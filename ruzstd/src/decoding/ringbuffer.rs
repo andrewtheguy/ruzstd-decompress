@@ -291,6 +291,7 @@ impl RingBuffer {
     /// 1. start + len <= self.len() so we do not copy uninitialised memory
     /// 2. More then len reserved space so we do not write out-of-bounds
     #[warn(unsafe_op_in_unsafe_fn)]
+    #[inline(always)]
     pub unsafe fn extend_from_within_unchecked(&mut self, start: usize, len: usize) {
         debug_assert!(start + len <= self.len());
         debug_assert!(self.free() >= len);
