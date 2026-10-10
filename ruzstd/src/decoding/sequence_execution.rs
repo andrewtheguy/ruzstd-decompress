@@ -21,10 +21,10 @@ pub fn execute_sequences(
                     have: scratch.literals_buffer.len(),
                 });
             }
-            let literals = &scratch.literals_buffer[literals_copy_counter..high];
+            // Pass all remaining literals so the copy can overshoot instead of calling memcpy
+            let literals = &scratch.literals_buffer[literals_copy_counter..];
+            scratch.buffer.push_prefix(literals, seq.ll as usize);
             literals_copy_counter += seq.ll as usize;
-
-            scratch.buffer.push(literals);
         }
 
         let actual_offset = do_offset_history(seq.of, seq.ll, &mut scratch.offset_hist);
