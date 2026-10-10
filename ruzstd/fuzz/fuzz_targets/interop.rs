@@ -32,16 +32,12 @@ fn encode_zstd(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
     zstd::stream::encode_all(std::io::Cursor::new(data), 3)
 }
 
-fn encode_ruzstd_uncompressed(data: &mut dyn std::io::Read) -> Vec<u8> {
-    let mut input = Vec::new();
-    data.read_to_end(&mut input).unwrap();
+fn encode_ruzstd_uncompressed(data: &[u8]) -> Vec<u8> {
     compress_to_vec(data, CompressionLevel::Uncompressed)
 }
 
-fn encode_ruzstd_compressed(data: &mut dyn std::io::Read) -> Vec<u8> {
-    let mut input = Vec::new();
-    data.read_to_end(&mut input).unwrap();
-    compress_to_vec(data, CompressionLevel::Uncompressed)
+fn encode_ruzstd_compressed(data: &[u8]) -> Vec<u8> {
+    compress_to_vec(data, CompressionLevel::Fastest)
 }
 
 fn decode_zstd(data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
@@ -66,16 +62,14 @@ fuzz_target!(|data: &[u8]| {
 
     // Encoding
     // Uncompressed encoding
-    let mut input = data;
-    let compressed = encode_ruzstd_uncompressed(&mut input);
+    let compressed = encode_ruzstd_uncompressed(data);
     let decoded = decode_zstd(&compressed).unwrap();
     assert_eq!(
         decoded, data,
         "Decoded data did not match the original input during compression"
     );
     // Compressed encoding
-    let mut input = data;
-    let compressed = encode_ruzstd_compressed(&mut input);
+    let compressed = encode_ruzstd_compressed(data);
     let decoded = decode_zstd(&compressed).unwrap();
     assert_eq!(
         decoded, data,
