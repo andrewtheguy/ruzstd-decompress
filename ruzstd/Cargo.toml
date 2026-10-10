@@ -42,3 +42,7 @@ rustc-dep-of-std = ["dep:core", "dep:alloc"]
 [[bench]]
 name = "decode_all"
 harness = false
+
+[[bench]]
+name = "compare_zstd"
+harness = false
