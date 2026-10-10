@@ -1,72 +1,100 @@
-use super::scratch::DecoderScratch;
+use super::decode_buffer::DecodeBuffer;
+use crate::blocks::sequence_section::Sequence;
 use crate::decoding::errors::ExecuteSequencesError;
 
-/// Take the provided decoder and execute the sequences stored within
-pub fn execute_sequences(
-    scratch: &mut DecoderScratch,
+/// Executes sequences one at a time, as they are decoded, so they never have to be stored.
+pub struct SequenceExecutor<'a> {
+    buffer: &'a mut DecodeBuffer,
+    literals: &'a [u8],
+    offset_hist: &'a mut [u32; 3],
+    literals_copy_counter: usize,
+    old_buffer_size: usize,
+    seq_sum: u32,
     max_block_decoded_len: usize,
-) -> Result<(), ExecuteSequencesError> {
-    let mut literals_copy_counter = 0;
-    let old_buffer_size = scratch.buffer.len();
-    let mut seq_sum = 0;
+}
 
-    for idx in 0..scratch.sequences.len() {
-        let seq = scratch.sequences[idx];
+impl<'a> SequenceExecutor<'a> {
+    pub fn new(
+        buffer: &'a mut DecodeBuffer,
+        literals: &'a [u8],
+        offset_hist: &'a mut [u32; 3],
+        max_block_decoded_len: usize,
+    ) -> Self {
+        let old_buffer_size = buffer.len();
+        SequenceExecutor {
+            buffer,
+            literals,
+            offset_hist,
+            literals_copy_counter: 0,
+            old_buffer_size,
+            seq_sum: 0,
+            max_block_decoded_len,
+        }
+    }
 
+    /// Copy the literals of `seq` and then its match to the end of the buffer.
+    #[inline(always)]
+    pub fn execute(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError> {
         if seq.ll > 0 {
-            let high = literals_copy_counter + seq.ll as usize;
-            if high > scratch.literals_buffer.len() {
+            let high = self.literals_copy_counter + seq.ll as usize;
+            if high > self.literals.len() {
                 return Err(ExecuteSequencesError::NotEnoughBytesForSequence {
                     wanted: high,
-                    have: scratch.literals_buffer.len(),
+                    have: self.literals.len(),
                 });
             }
             // Pass all remaining literals so the copy can overshoot instead of calling memcpy
-            let literals = &scratch.literals_buffer[literals_copy_counter..];
-            scratch.buffer.push_prefix(literals, seq.ll as usize);
-            literals_copy_counter += seq.ll as usize;
+            let literals = &self.literals[self.literals_copy_counter..];
+            self.buffer.push_prefix(literals, seq.ll as usize);
+            self.literals_copy_counter += seq.ll as usize;
         }
 
-        let actual_offset = do_offset_history(seq.of, seq.ll, &mut scratch.offset_hist);
+        let actual_offset = do_offset_history(seq.of, seq.ll, self.offset_hist);
         if actual_offset == 0 {
             return Err(ExecuteSequencesError::ZeroOffset);
         }
         if seq.ml > 0 {
-            scratch
-                .buffer
+            self.buffer
                 .repeat(actual_offset as usize, seq.ml as usize)?;
         }
 
-        seq_sum += seq.ml;
-        seq_sum += seq.ll;
-
-        if seq_sum as usize > max_block_decoded_len {
-            return Err(ExecuteSequencesError::TooManyBytesGenerated {
-                max: max_block_decoded_len,
-                decoded: seq_sum as usize,
-            });
-        }
-    }
-    if literals_copy_counter < scratch.literals_buffer.len() {
-        let rest_literals = &scratch.literals_buffer[literals_copy_counter..];
-        scratch.buffer.push(rest_literals);
-        seq_sum += rest_literals.len() as u32;
-        if seq_sum as usize > max_block_decoded_len {
-            return Err(ExecuteSequencesError::TooManyBytesGenerated {
-                max: max_block_decoded_len,
-                decoded: seq_sum as usize,
-            });
-        }
+        self.seq_sum += seq.ml;
+        self.seq_sum += seq.ll;
+        self.check_decoded_len(self.seq_sum)
     }
 
-    let diff = scratch.buffer.len() - old_buffer_size;
-    assert!(
-        seq_sum as usize == diff,
-        "Seq_sum: {} is different from the difference in buffersize: {}",
-        seq_sum,
-        diff
-    );
-    Ok(())
+    /// Copy the literals left over after the last sequence.
+    pub fn finish(self) -> Result<(), ExecuteSequencesError> {
+        let mut seq_sum = self.seq_sum;
+        if self.literals_copy_counter < self.literals.len() {
+            let rest_literals = &self.literals[self.literals_copy_counter..];
+            self.buffer.push(rest_literals);
+            seq_sum += rest_literals.len() as u32;
+            self.check_decoded_len(seq_sum)?;
+        }
+
+        let diff = self.buffer.len() - self.old_buffer_size;
+        assert!(
+            seq_sum as usize == diff,
+            "Seq_sum: {} is different from the difference in buffersize: {}",
+            seq_sum,
+            diff
+        );
+        Ok(())
+    }
+
+    /// Block_Maximum_Size bounds every block; checking after each sequence also keeps
+    /// `seq_sum` far from overflowing.
+    #[inline(always)]
+    fn check_decoded_len(&self, decoded: u32) -> Result<(), ExecuteSequencesError> {
+        if decoded as usize > self.max_block_decoded_len {
+            return Err(ExecuteSequencesError::TooManyBytesGenerated {
+                max: self.max_block_decoded_len,
+                decoded: decoded as usize,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Update the most recently used offsets to reflect the provided offset value, and return the

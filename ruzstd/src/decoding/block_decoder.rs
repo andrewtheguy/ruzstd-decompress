@@ -12,7 +12,7 @@ use crate::decoding::errors::{
     DecompressBlockError,
 };
 use crate::decoding::scratch::DecoderScratch;
-use crate::decoding::sequence_execution::execute_sequences;
+use crate::decoding::sequence_execution::SequenceExecutor;
 use crate::io::Read;
 
 pub struct BlockDecoder {
@@ -188,14 +188,18 @@ impl BlockDecoder {
         vprintln!("Slice for sequences: {}", raw.len());
 
         if seq_section.num_sequences != 0 {
-            decode_sequences(
-                &seq_section,
-                raw,
-                &mut workspace.fse,
-                &mut workspace.sequences,
-            )?;
-            vprintln!("Executing sequences");
-            execute_sequences(workspace, max_block_decoded_len)?;
+            let mut executor = SequenceExecutor::new(
+                &mut workspace.buffer,
+                &workspace.literals_buffer,
+                &mut workspace.offset_hist,
+                max_block_decoded_len,
+            );
+            decode_sequences(&seq_section, raw, &mut workspace.fse, |seq| {
+                executor
+                    .execute(seq)
+                    .map_err(DecompressBlockError::ExecuteSequencesError)
+            })?;
+            executor.finish()?;
         } else {
             if !raw.is_empty() {
                 return Err(DecompressBlockError::DecodeSequenceError(
@@ -205,7 +209,6 @@ impl BlockDecoder {
                 ));
             }
             workspace.buffer.push(&workspace.literals_buffer);
-            workspace.sequences.clear();
         }
 
         Ok(())
