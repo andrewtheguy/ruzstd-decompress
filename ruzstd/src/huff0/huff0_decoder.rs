@@ -8,12 +8,18 @@ use alloc::vec::Vec;
 /// The Zstandard specification limits the maximum length of a code to 11 bits.
 pub(crate) const MAX_MAX_NUM_BITS: u8 = 11;
 
+/// Decodes one symbol at a time by keeping the next `max_num_bits` bits as state.
+///
+/// The decoder uses [`HuffmanTable::decode_stream`] and [`HuffmanTable::decode_4_streams`]
+/// instead; this is kept as a simple reference to test them against.
+#[cfg(any(test, feature = "fuzz_exports"))]
 pub struct HuffmanDecoder<'table> {
     table: &'table HuffmanTable,
     /// State is used to index into the table.
     pub state: u64,
 }
 
+#[cfg(any(test, feature = "fuzz_exports"))]
 impl<'t> HuffmanDecoder<'t> {
     /// Create a new decoder with the provided table
     pub fn new(table: &'t HuffmanTable) -> HuffmanDecoder<'t> {
@@ -109,6 +115,64 @@ impl HuffmanTable {
         self.bit_ranks.clear();
         self.rank_indexes.clear();
         self.fse_table.reset();
+    }
+
+    /// Decode the symbol at the front of `br` and consume its bits.
+    ///
+    /// The next `max_num_bits` bits of the stream are exactly the state `HuffmanDecoder` keeps,
+    /// so they can index the table directly. `br` must have `max_num_bits` bits available
+    /// (see [`BitReaderReversed::ensure_bits`]).
+    #[inline(always)]
+    fn decode_symbol_from(&self, br: &mut BitReaderReversed<'_>) -> u8 {
+        let entry = self.decode[br.peek_bits(self.max_num_bits) as usize];
+        br.consume(entry.num_bits);
+        entry.symbol
+    }
+
+    /// Decode exactly `out.len()` symbols from `br` into `out`.
+    pub(crate) fn decode_stream(&self, br: &mut BitReaderReversed<'_>, out: &mut [u8]) {
+        for byte in out {
+            br.ensure_bits(self.max_num_bits);
+            *byte = self.decode_symbol_from(br);
+        }
+    }
+
+    /// Decode exactly `outs[i].len()` symbols from `brs[i]` into `outs[i]`, for all four streams.
+    ///
+    /// The four streams are independent, so decoding them in one loop lets the CPU overlap them.
+    /// After a refill at least 56 bits are available, enough for `56 / max_num_bits` symbols
+    /// per stream before the next refill check.
+    pub(crate) fn decode_4_streams(
+        &self,
+        brs: &mut [BitReaderReversed<'_>; 4],
+        outs: [&mut [u8]; 4],
+    ) {
+        let max_bits = self.max_num_bits;
+        debug_assert!(max_bits > 0);
+        let per_refill = 56 / max_bits as usize;
+        let [out0, out1, out2, out3] = outs;
+        let [br0, br1, br2, br3] = brs;
+        let common = out0.len().min(out1.len()).min(out2.len()).min(out3.len());
+
+        let mut i = 0;
+        while i + per_refill <= common {
+            br0.ensure_bits(56);
+            br1.ensure_bits(56);
+            br2.ensure_bits(56);
+            br3.ensure_bits(56);
+            for j in i..i + per_refill {
+                out0[j] = self.decode_symbol_from(br0);
+                out1[j] = self.decode_symbol_from(br1);
+                out2[j] = self.decode_symbol_from(br2);
+                out3[j] = self.decode_symbol_from(br3);
+            }
+            i += per_refill;
+        }
+
+        self.decode_stream(br0, &mut out0[i..]);
+        self.decode_stream(br1, &mut out1[i..]);
+        self.decode_stream(br2, &mut out2[i..]);
+        self.decode_stream(br3, &mut out3[i..]);
     }
 
     /// Read from `source` and decode the input, populating the huffman decoding table.

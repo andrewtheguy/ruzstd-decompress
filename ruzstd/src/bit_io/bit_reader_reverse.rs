@@ -86,6 +86,14 @@ impl<'s> BitReaderReversed<'s> {
         debug_assert!(self.bits_consumed < 8);
     }
 
+    /// Make sure at least `n` bits (at most 56) can be peeked and consumed without refilling.
+    #[inline(always)]
+    pub fn ensure_bits(&mut self, n: u8) {
+        if self.bits_consumed + n > 64 {
+            self.refill();
+        }
+    }
+
     /// Read `n` number of bits from the source. Will read at most 56 bits.
     /// If there are no more bits to be read from the source zero bits will be returned instead.
     #[inline(always)]

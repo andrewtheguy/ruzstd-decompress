@@ -5,7 +5,6 @@ use super::super::blocks::literals_section::{LiteralsSection, LiteralsSectionTyp
 use super::scratch::HuffmanScratch;
 use crate::bit_io::BitReaderReversed;
 use crate::decoding::errors::DecompressLiteralsError;
-use crate::huff0::HuffmanDecoder;
 use alloc::vec::Vec;
 
 /// Decode and decompress the provided literals section into `target`, returning the number of bytes read.
@@ -67,6 +66,15 @@ fn decompress_literals(
 
     let source = &source[bytes_read as usize..];
 
+    let max_num_bits = scratch.table.max_num_bits;
+    if max_num_bits == 0 {
+        return Err(err::UninitializedHuffmanTable);
+    }
+    let regenerated_size = section.regenerated_size as usize;
+    let start = target.len();
+    target.resize(start + regenerated_size, 0);
+    let out = &mut target[start..];
+
     if num_streams == 4 {
         //build jumptable
         if source.len() < 6 {
@@ -85,65 +93,41 @@ fn decompress_literals(
             });
         }
 
-        //decode 4 streams
-        let stream1 = &source[..jump1];
-        let stream2 = &source[jump1..jump2];
-        let stream3 = &source[jump2..jump3];
-        let stream4 = &source[jump3..];
+        // The first three streams each decode to (regenerated_size + 3) / 4 bytes,
+        // the fourth one to the rest.
+        // Like libzstd (MIN_LITERALS_FOR_4_STREAMS), reject sizes this split doesn't work for.
+        if regenerated_size < 6 {
+            return Err(err::DecodedLiteralCountMismatch {
+                decoded: 0,
+                expected: regenerated_size,
+            });
+        }
+        let segment_size = regenerated_size.div_ceil(4);
+        debug_assert!(3 * segment_size <= regenerated_size);
+        let (out0, rest) = out.split_at_mut(segment_size);
+        let (out1, rest) = rest.split_at_mut(segment_size);
+        let (out2, out3) = rest.split_at_mut(segment_size);
 
-        for stream in &[stream1, stream2, stream3, stream4] {
-            let mut decoder = HuffmanDecoder::new(&scratch.table);
-            let mut br = BitReaderReversed::new(stream);
-            //skip the 0 padding at the end of the last byte of the bit stream and throw away the first 1 found
-            let mut skipped_bits = 0;
-            loop {
-                let val = br.get_bits(1);
-                skipped_bits += 1;
-                if val == 1 || skipped_bits > 8 {
-                    break;
-                }
-            }
-            if skipped_bits > 8 {
-                //if more than 7 bits are 0, this is not the correct end of the bitstream. Either a bug or corrupted data
-                return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
-            }
-            decoder.init_state(&mut br);
-
-            while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
-                target.push(decoder.decode_symbol());
-                decoder.next_state(&mut br);
-            }
-            if br.bits_remaining() != -(scratch.table.max_num_bits as isize) {
-                return Err(DecompressLiteralsError::BitstreamReadMismatch {
-                    read_til: br.bits_remaining(),
-                    expected: -(scratch.table.max_num_bits as isize),
-                });
-            }
+        let mut brs = [
+            init_stream(&source[..jump1])?,
+            init_stream(&source[jump1..jump2])?,
+            init_stream(&source[jump2..jump3])?,
+            init_stream(&source[jump3..])?,
+        ];
+        scratch
+            .table
+            .decode_4_streams(&mut brs, [out0, out1, out2, out3]);
+        for br in &brs {
+            check_stream_end(br, max_num_bits)?;
         }
 
         bytes_read += source.len() as u32;
     } else {
         //just decode the one stream
         assert!(num_streams == 1);
-        let mut decoder = HuffmanDecoder::new(&scratch.table);
-        let mut br = BitReaderReversed::new(source);
-        let mut skipped_bits = 0;
-        loop {
-            let val = br.get_bits(1);
-            skipped_bits += 1;
-            if val == 1 || skipped_bits > 8 {
-                break;
-            }
-        }
-        if skipped_bits > 8 {
-            //if more than 7 bits are 0, this is not the correct end of the bitstream. Either a bug or corrupted data
-            return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
-        }
-        decoder.init_state(&mut br);
-        while br.bits_remaining() > -(scratch.table.max_num_bits as isize) {
-            target.push(decoder.decode_symbol());
-            decoder.next_state(&mut br);
-        }
+        let mut br = init_stream(source)?;
+        scratch.table.decode_stream(&mut br, out);
+        check_stream_end(&br, max_num_bits)?;
         bytes_read += source.len() as u32;
     }
 
@@ -155,4 +139,39 @@ fn decompress_literals(
     }
 
     Ok(bytes_read)
+}
+
+/// Create a reader for a Huffman stream, skipping the 0 padding at the end of the last byte
+/// and the first 1 found.
+pub(crate) fn init_stream(stream: &[u8]) -> Result<BitReaderReversed<'_>, DecompressLiteralsError> {
+    let mut br = BitReaderReversed::new(stream);
+    let mut skipped_bits = 0;
+    loop {
+        let val = br.get_bits(1);
+        skipped_bits += 1;
+        if val == 1 || skipped_bits > 8 {
+            break;
+        }
+    }
+    if skipped_bits > 8 {
+        //if more than 7 bits are 0, this is not the correct end of the bitstream. Either a bug or corrupted data
+        return Err(DecompressLiteralsError::ExtraPadding { skipped_bits });
+    }
+    Ok(br)
+}
+
+/// A stream must be used up exactly by the symbols it decodes to.
+pub(crate) fn check_stream_end(
+    br: &BitReaderReversed<'_>,
+    max_num_bits: u8,
+) -> Result<(), DecompressLiteralsError> {
+    if br.bits_remaining() != 0 {
+        // Reported the way the previous state based decoder counted, which had already
+        // read max_num_bits bits ahead.
+        return Err(DecompressLiteralsError::BitstreamReadMismatch {
+            read_til: br.bits_remaining() - max_num_bits as isize,
+            expected: -(max_num_bits as isize),
+        });
+    }
+    Ok(())
 }

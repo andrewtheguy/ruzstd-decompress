@@ -53,6 +53,46 @@ pub fn round_trip(data: &[u8]) {
         decoder.next_state(&mut br);
     }
     assert_eq!(&decoded, data);
+
+    // The table based decoder must agree, and use up the stream exactly
+    let stream = &encoded[table_bytes as usize..];
+    let mut br = crate::decoding::literals_section_decoder::init_stream(stream).unwrap();
+    let mut decoded = alloc::vec![0; data.len()];
+    decoder_table.decode_stream(&mut br, &mut decoded);
+    assert_eq!(&decoded, data);
+    crate::decoding::literals_section_decoder::check_stream_end(&br, decoder_table.max_num_bits)
+        .unwrap();
+
+    // Same for four interleaved streams, split like the literals section does
+    let segment_size = data.len().div_ceil(4);
+    if data.len() < 4 || 3 * segment_size > data.len() {
+        return;
+    }
+    let mut writer = BitWriter::new();
+    let mut encoder = huff0_encoder::HuffmanEncoder::new(&encoder_table, &mut writer);
+    encoder.encode4x(data, false);
+    let encoded = writer.dump();
+    let jump1 = encoded[0] as usize + ((encoded[1] as usize) << 8);
+    let jump2 = jump1 + encoded[2] as usize + ((encoded[3] as usize) << 8);
+    let jump3 = jump2 + encoded[4] as usize + ((encoded[5] as usize) << 8);
+    let streams = &encoded[6..];
+    let init = crate::decoding::literals_section_decoder::init_stream;
+    let mut brs = [
+        init(&streams[..jump1]).unwrap(),
+        init(&streams[jump1..jump2]).unwrap(),
+        init(&streams[jump2..jump3]).unwrap(),
+        init(&streams[jump3..]).unwrap(),
+    ];
+    let mut decoded = alloc::vec![0; data.len()];
+    let (out0, rest) = decoded.split_at_mut(segment_size);
+    let (out1, rest) = rest.split_at_mut(segment_size);
+    let (out2, out3) = rest.split_at_mut(segment_size);
+    decoder_table.decode_4_streams(&mut brs, [out0, out1, out2, out3]);
+    assert_eq!(&decoded, data);
+    for br in &brs {
+        crate::decoding::literals_section_decoder::check_stream_end(br, decoder_table.max_num_bits)
+            .unwrap();
+    }
 }
 
 #[test]
