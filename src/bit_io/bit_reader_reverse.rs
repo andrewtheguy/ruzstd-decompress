@@ -39,14 +39,13 @@ impl<'s> BitReaderReversed<'s> {
     }
 
     /// We refill the container in full bytes, shifting the still unread portion to the left, and filling the lower bits with new data
-    #[cold]
+    ///
+    /// The common case, moving the window down while enough source is left, is inlined; the
+    /// end of the source is handled out of line in `refill_slow`.
+    #[inline(always)]
     fn refill(&mut self) {
         let bytes_consumed = self.bits_consumed as usize / 8;
-        if bytes_consumed == 0 {
-            return;
-        }
-
-        if self.index >= bytes_consumed {
+        if bytes_consumed != 0 && self.index >= bytes_consumed {
             // We can safely move the window contained in `bit_container` down by `bytes_consumed`
             // If the reader wasn't byte aligned, the byte that was partially read is now in the highest order bits in the `bit_container`
             self.index -= bytes_consumed;
@@ -54,7 +53,17 @@ impl<'s> BitReaderReversed<'s> {
             self.bits_consumed &= 7;
             self.bit_container =
                 u64::from_le_bytes((&self.source[self.index..][..8]).try_into().unwrap());
-        } else if self.index > 0 {
+        } else if bytes_consumed != 0 {
+            self.refill_slow(bytes_consumed);
+        }
+    }
+
+    /// Refill when fewer than `bytes_consumed` bytes of the source are left.
+    #[cold]
+    #[inline(never)]
+    fn refill_slow(&mut self, bytes_consumed: usize) {
+        debug_assert!(self.index < bytes_consumed);
+        if self.index > 0 {
             // Read the last portion of source into the `bit_container`
             if self.source.len() >= 8 {
                 self.bit_container = u64::from_le_bytes((&self.source[..8]).try_into().unwrap());
@@ -188,5 +197,60 @@ mod test {
         // All zeroes filled in
         assert_eq!(br.get_bits(4), 0b0000);
         assert_eq!(br.bits_remaining(), -7);
+    }
+
+    #[test]
+    fn matches_bitwise_model() {
+        use alloc::vec::Vec;
+
+        // Reads from the end of the source to the front, most significant bit first,
+        // with zeroes once the source is used up.
+        fn model_bits(source: &[u8], pos: &mut usize, n: u8) -> u64 {
+            let mut value = 0;
+            for _ in 0..n {
+                let total = source.len() * 8;
+                let bit = if *pos < total {
+                    let bit_idx = total - 1 - *pos;
+                    (source[bit_idx / 8] >> (bit_idx % 8)) & 1
+                } else {
+                    0
+                };
+                value = (value << 1) | bit as u64;
+                *pos += 1;
+            }
+            value
+        }
+
+        let source: Vec<u8> = (0..40u32).map(|x| (x * 151 + 7) as u8).collect();
+        let patterns: [&[u8]; 4] = [&[1, 7, 3], &[11, 9, 8], &[56, 1, 13], &[0, 25, 2, 31]];
+        for len in 0..source.len() {
+            let source = &source[..len];
+            for pattern in patterns {
+                let mut br = super::BitReaderReversed::new(source);
+                let mut pos = 0;
+                for (step, &n) in pattern.iter().cycle().take(60).enumerate() {
+                    let expected = model_bits(source, &mut pos, n);
+                    assert_eq!(br.get_bits(n), expected, "len {len} step {step}");
+                    assert_eq!(br.bits_remaining(), len as isize * 8 - pos as isize);
+                }
+                // get_bits_triple must agree too
+                let mut br = super::BitReaderReversed::new(source);
+                let mut pos = 0;
+                for (step, &n) in pattern.iter().cycle().take(30).enumerate() {
+                    let (n1, n2, n3) = (n % 20, n % 7, n % 13);
+                    let expected = (
+                        model_bits(source, &mut pos, n1),
+                        model_bits(source, &mut pos, n2),
+                        model_bits(source, &mut pos, n3),
+                    );
+                    assert_eq!(
+                        br.get_bits_triple(n1, n2, n3),
+                        expected,
+                        "len {len} step {step}"
+                    );
+                    assert_eq!(br.bits_remaining(), len as isize * 8 - pos as isize);
+                }
+            }
+        }
     }
 }
