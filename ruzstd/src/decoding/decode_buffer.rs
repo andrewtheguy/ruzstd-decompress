@@ -119,32 +119,30 @@ impl DecodeBuffer {
     }
 
     fn repeat_in_chunks(&mut self, offset: usize, match_length: usize, start_idx: usize) {
-        // We have at max offset bytes in one chunk, the last one can be smaller
-        let mut start_idx = start_idx;
-        let mut copied_counter_left = match_length;
-        // TODO this can  be optimized further I think.
-        // Each time we copy a chunk we have a repetiton of length 'offset', so we can copy offset * iteration many bytes from start_idx
-        while copied_counter_left > 0 {
-            let chunksize = usize::min(offset, copied_counter_left);
+        // The match repeats the `offset` bytes at start_idx. After each copy the repeated pattern
+        // starting at start_idx is longer, so the next copy can be as long as everything from
+        // start_idx to the end: offset, 2*offset, 4*offset, ... This keeps every copy aligned to
+        // the pattern (copied is always a multiple of offset) and needs only
+        // log2(match_length / offset) copies instead of match_length / offset.
+        let mut copied = 0;
+        while copied < match_length {
+            let chunksize = usize::min(offset + copied, match_length - copied);
 
             // SAFETY: Requirements checked:
             // 1. start_idx + chunksize must be <= self.buffer.len()
             //      We know that:
-            //      1. start_idx starts at buffer.len() - offset
-            //      2. chunksize <= offset (== offset for each iteration but the last, and match_length modulo offset in the last iteration)
-            //      3. the buffer grows by offset many bytes each iteration but the last
-            //      4. start_idx is increased by the same amount as the buffer grows each iteration
+            //      1. start_idx = buffer.len() - offset before the first iteration
+            //      2. the buffer has grown by `copied` bytes since then
+            //      3. chunksize <= offset + copied
             //
-            //      Thus follows: start_idx + chunksize == self.buffer.len() in each iteration but the last, where match_length modulo offset == chunksize < offset
-            //          Meaning: start_idx + chunksize <= self.buffer.len()
+            //      Thus follows: start_idx + chunksize <= start_idx + offset + copied == self.buffer.len()
             //
             // 2. explicitly reserved enough memory for the whole match_length
             unsafe {
                 self.buffer
                     .extend_from_within_unchecked(start_idx, chunksize)
             };
-            copied_counter_left -= chunksize;
-            start_idx += chunksize;
+            copied += chunksize;
         }
     }
 
@@ -349,6 +347,36 @@ mod tests {
     extern crate std;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    #[test]
+    fn repeat_matches_bytewise_copy() {
+        // Overlapping matches (offset < match_length) repeat the last `offset` bytes.
+        // Draining different amounts first makes the copies wrap around the ring buffer
+        // at different points.
+        for drained in [0, 7, 100, 250] {
+            for offset in 1..25 {
+                for match_length in 0..200 {
+                    let mut decode_buf = DecodeBuffer::new(1000);
+                    decode_buf.push(&vec![0xEE; drained]);
+                    decode_buf.drain();
+
+                    let start: Vec<u8> = (0..30).collect();
+                    decode_buf.push(&start);
+                    decode_buf.repeat(offset, match_length).unwrap();
+
+                    let mut expected = start.clone();
+                    for _ in 0..match_length {
+                        expected.push(expected[expected.len() - offset]);
+                    }
+                    assert_eq!(
+                        decode_buf.drain(),
+                        expected,
+                        "drained {drained} offset {offset} match_length {match_length}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn short_writer() {
