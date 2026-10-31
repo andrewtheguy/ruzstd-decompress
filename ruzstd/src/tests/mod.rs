@@ -877,7 +877,10 @@ fn peek_shows_what_collect_retains() {
         // Everything decoded so far: what was collected, then what peek shows.
         let shown = peeked(&decoder);
         assert!(!shown.is_empty());
-        assert_eq!([&out[..], &shown[..]].concat(), data[..out.len() + shown.len()]);
+        assert_eq!(
+            [&out[..], &shown[..]].concat(),
+            data[..out.len() + shown.len()]
+        );
         if let Some(collected) = decoder.collect() {
             out.extend_from_slice(&collected);
         }
