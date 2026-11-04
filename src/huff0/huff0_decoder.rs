@@ -556,6 +556,13 @@ impl HuffmanTable {
     fn build_table_from_weights(&mut self) -> Result<(), HuffmanTableError> {
         use HuffmanTableError as err;
 
+        // At most 255 weights, the last symbol's implied: a symbol is a byte. The weights'
+        // reader stops past 255, but its last states can still give one or two more.
+        if self.weights.len() > 255 {
+            return Err(err::TooManyWeights {
+                got: self.weights.len(),
+            });
+        }
         self.bits.clear();
         self.bits.resize(self.weights.len() + 1, 0);
 
@@ -625,21 +632,55 @@ impl HuffmanTable {
         if self.decode.len() != TABLE_SIZE {
             self.decode.resize(TABLE_SIZE, Entry::default());
         }
-        for symbol in 0..self.bits.len() {
-            let bits_for_symbol = self.bits[symbol];
-            if bits_for_symbol != 0 {
-                let base_idx = self.rank_indexes[bits_for_symbol as usize];
-                let len = 1 << (MAX_MAX_NUM_BITS - bits_for_symbol);
-                self.rank_indexes[bits_for_symbol as usize] += len;
-                self.decode[base_idx..base_idx + len].fill(Entry {
-                    symbol: symbol as u8,
-                    num_bits: bits_for_symbol,
-                });
+        // The symbols by their codes' lengths, in order within each, so that a length's are
+        // filled in a loop of their own, every code the same number of entries: no branch on
+        // a symbol's length, and stores as wide as its entries (see `fill_rank`).
+        let mut sorted = [0u8; 256];
+        let mut next = [0usize; MAX_MAX_NUM_BITS as usize + 1];
+        let mut start = 0;
+        for (next, &count) in next.iter_mut().zip(&self.bit_ranks).skip(1) {
+            *next = start;
+            start += count as usize;
+        }
+        for (symbol, &bits) in self.bits.iter().enumerate() {
+            if bits != 0 {
+                let next = &mut next[bits as usize];
+                sorted[*next] = symbol as u8;
+                *next += 1;
+            }
+        }
+        let mut from = 0;
+        for num_bits in 1..=max_bits {
+            let count = self.bit_ranks[num_bits as usize] as usize;
+            let symbols = &sorted[from..from + count];
+            from += count;
+            let at = self.rank_indexes[num_bits as usize];
+            let entries = &mut self.decode[at..at + (count << (MAX_MAX_NUM_BITS - num_bits))];
+            match num_bits {
+                11 => fill_rank::<1>(entries, symbols, num_bits),
+                10 => fill_rank::<2>(entries, symbols, num_bits),
+                9 => fill_rank::<4>(entries, symbols, num_bits),
+                8 => fill_rank::<8>(entries, symbols, num_bits),
+                7 => fill_rank::<16>(entries, symbols, num_bits),
+                6 => fill_rank::<32>(entries, symbols, num_bits),
+                5 => fill_rank::<64>(entries, symbols, num_bits),
+                4 => fill_rank::<128>(entries, symbols, num_bits),
+                3 => fill_rank::<256>(entries, symbols, num_bits),
+                2 => fill_rank::<512>(entries, symbols, num_bits),
+                _ => fill_rank::<1024>(entries, symbols, num_bits),
             }
         }
 
         self.max_num_bits = max_bits;
         Ok(())
+    }
+}
+
+/// Fill `entries` with the codes of `symbols`, each `num_bits` long and so `L` entries.
+#[inline(always)]
+fn fill_rank<const L: usize>(entries: &mut [Entry], symbols: &[u8], num_bits: u8) {
+    for (code, &symbol) in entries.as_chunks_mut::<L>().0.iter_mut().zip(symbols) {
+        *code = [Entry { symbol, num_bits }; L];
     }
 }
 
@@ -754,6 +795,22 @@ fn highest_bit_set(x: u32) -> u32 {
 mod tests {
     use super::*;
 
+    /// 256 weights, which with the implied last are a symbol past a byte's, are refused, even
+    /// when they make a whole code (as 256 of weight 1 do); the FSE-coded weights can come to
+    /// that many, as a fuzzed dictionary's did.
+    #[test]
+    fn too_many_weights() {
+        let mut table = HuffmanTable::new();
+        table.weights = alloc::vec![1; 256];
+        assert!(matches!(
+            table.build_table_from_weights(),
+            Err(HuffmanTableError::TooManyWeights { got: 256 })
+        ));
+        table.weights = alloc::vec![1; 255];
+        table.weights[0] = 2;
+        assert!(table.build_table_from_weights().is_ok());
+    }
+
     /// The table of pairs decodes what the single symbols' table does, bit for bit, whatever
     /// the code, the streams' lengths and the output's.
     #[test]
@@ -793,6 +850,20 @@ mod tests {
             let mut table = HuffmanTable::new();
             table.build_decoder(&description).unwrap();
             assert_eq!(table.max_num_bits, max_bits);
+            // The entries as the table was filled before, a symbol at a time.
+            let mut expected = Vec::new();
+            for bits in (1..=MAX_MAX_NUM_BITS).rev() {
+                for (symbol, _) in table.bits.iter().enumerate().filter(|(_, b)| **b == bits) {
+                    let len = 1 << (MAX_MAX_NUM_BITS - bits);
+                    expected.extend(core::iter::repeat_n((symbol as u8, bits), len));
+                }
+            }
+            let got: Vec<_> = table
+                .decode
+                .iter()
+                .map(|e| (e.symbol, e.num_bits))
+                .collect();
+            assert_eq!(got, expected);
             table.build_pairs();
 
             let sources: [Vec<u8>; 4] =

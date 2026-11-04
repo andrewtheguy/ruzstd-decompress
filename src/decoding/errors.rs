@@ -4,7 +4,6 @@ use crate::bit_io::GetBitsError;
 use crate::blocks::block::BlockType;
 use crate::blocks::literals_section::LiteralsSectionType;
 use crate::io::Error;
-use alloc::vec::Vec;
 use core::fmt;
 #[cfg(feature = "std")]
 use std::error::Error as StdError;
@@ -909,19 +908,9 @@ impl core::fmt::Display for SequencesHeaderParseError {
 #[non_exhaustive]
 pub enum FSETableError {
     AccLogIsZero,
-    AccLogTooBig {
-        got: u8,
-        max: u8,
-    },
+    AccLogTooBig { got: u8, max: u8 },
     GetBitsError(GetBitsError),
-    ProbabilityCounterMismatch {
-        got: u32,
-        expected_sum: u32,
-        symbol_probabilities: Vec<i32>,
-    },
-    TooManySymbols {
-        got: usize,
-    },
+    TooManySymbols { got: usize },
 }
 
 #[cfg(feature = "std")]
@@ -945,16 +934,6 @@ impl core::fmt::Display for FSETableError {
                 )
             }
             FSETableError::GetBitsError(e) => write!(f, "{e:?}"),
-            FSETableError::ProbabilityCounterMismatch {
-                got,
-                expected_sum,
-                symbol_probabilities,
-            } => {
-                write!(
-                    f,
-                    "The counter ({got}) exceeded the expected sum: {expected_sum}. This means an error or corrupted data \n {symbol_probabilities:?}",
-                )
-            }
             FSETableError::TooManySymbols { got } => {
                 write!(
                     f,
