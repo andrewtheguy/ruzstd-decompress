@@ -893,7 +893,9 @@ fn collect_gives_each_block_as_decoded() {
 }
 
 /// The checksum covers every byte decoded, however much of it was collected and when:
-/// collected a block at a time, or not at all until the frame is done.
+/// collected a block at a time, or not at all until the frame is done. A frame without a
+/// checksum has none calculated, and decodes the same; one decoder takes the frames in turn,
+/// with and without, so that a reset starts the hash anew or leaves it off.
 #[cfg(feature = "hash")]
 #[test]
 fn checksum_whatever_was_collected() {
@@ -903,28 +905,36 @@ fn checksum_whatever_was_collected() {
     let data: Vec<u8> = (0..300_000u32)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8 ^ (i / 700) as u8)
         .collect();
-    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1).unwrap();
-    encoder.include_checksum(true).unwrap();
-    encoder.window_log(17).unwrap();
-    encoder.write_all(&data).unwrap();
-    let compressed = encoder.finish().unwrap();
-    for collect_each_block in [true, false] {
-        let mut decoder = FrameDecoder::new();
+    let compress = |checksum| {
+        let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1).unwrap();
+        encoder.include_checksum(checksum).unwrap();
         // A window smaller than the data, so that collected bytes are dropped on the way.
-        let mut source = &compressed[..];
+        encoder.window_log(17).unwrap();
+        encoder.write_all(&data).unwrap();
+        encoder.finish().unwrap()
+    };
+    let (with, without) = (compress(true), compress(false));
+    let mut decoder = FrameDecoder::new();
+    for (checksum, collect_each_block) in
+        [(true, true), (false, true), (true, false), (false, false)]
+    {
+        let mut source = if checksum { &with[..] } else { &without[..] };
         decoder.init(&mut source).unwrap();
+        let mut out = Vec::new();
         while !decoder.is_finished() {
             decoder
                 .decode_blocks(&mut source, BlockDecodingStrategy::UptoBlocks(1))
                 .unwrap();
             if collect_each_block {
-                decoder.collect().unwrap();
+                out.extend(decoder.collect().unwrap());
             }
         }
-        let expected = decoder.get_checksum_from_data().unwrap();
-        assert_eq!(decoder.get_calculated_checksum(), Some(expected));
-        decoder.collect().unwrap();
-        assert_eq!(decoder.get_calculated_checksum(), Some(expected));
+        let expected = decoder.get_checksum_from_data();
+        assert_eq!(expected.is_some(), checksum);
+        assert_eq!(decoder.get_calculated_checksum(), expected);
+        out.extend(decoder.collect().unwrap());
+        assert_eq!(decoder.get_calculated_checksum(), expected);
+        assert!(out == data, "{checksum} {collect_each_block}");
     }
 }
 

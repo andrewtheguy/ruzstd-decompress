@@ -107,7 +107,10 @@ impl FrameDecoderState {
         let (frame, header_size) = frame::read_frame_header(source)?;
         let window_size = frame.window_size()?;
         Self::check_window_size(window_size, max_window_size)?;
-        let mut decoder_scratch = DecoderScratch::new(window_size as usize);
+        let mut decoder_scratch = DecoderScratch::new(
+            window_size as usize,
+            frame.descriptor.content_checksum_flag(),
+        );
         decoder_scratch
             .buffer
             .reserve(Self::initial_room(&frame, window_size));
@@ -130,7 +133,10 @@ impl FrameDecoderState {
         self.frame_header = frame_header;
         self.frame_finished = false;
         self.block_counter = 0;
-        self.decoder_scratch.reset(window_size as usize);
+        self.decoder_scratch.reset(
+            window_size as usize,
+            self.frame_header.descriptor.content_checksum_flag(),
+        );
         self.decoder_scratch
             .buffer
             .reserve(Self::initial_room(&self.frame_header, window_size));
@@ -276,12 +282,13 @@ impl FrameDecoder {
     }
 
     /// The checksum of every byte decoded so far, collected or not: once the frame is
-    /// finished, what its checksum should be.
+    /// finished, what its checksum should be. `None` for a frame without a checksum, whose
+    /// bytes are not hashed, as libzstd does not hash them.
     #[cfg(feature = "hash")]
     pub fn get_calculated_checksum(&self) -> Option<u32> {
         let state = self.state.as_ref()?;
-        let cksum_64bit = state.decoder_scratch.buffer.checksum();
-        //truncate to lower 32bit because reasons...
+        let cksum_64bit = state.decoder_scratch.buffer.checksum()?;
+        // The frame's checksum is the hash's lower 32 bits.
         Some(cksum_64bit as u32)
     }
 

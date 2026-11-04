@@ -26,13 +26,13 @@ pub struct DecoderScratch {
 }
 
 impl DecoderScratch {
-    pub fn new(window_size: usize) -> DecoderScratch {
+    pub fn new(window_size: usize, checksum: bool) -> DecoderScratch {
         DecoderScratch {
             huf: HuffmanScratch {
                 table: HuffmanTable::new(),
             },
             fse: FSEScratch::new(),
-            buffer: DecodeBuffer::new(window_size),
+            buffer: DecodeBuffer::new(window_size, checksum),
             offset_hist: [1, 4, 8],
 
             block_content_buffer: Vec::new(),
@@ -40,12 +40,12 @@ impl DecoderScratch {
         }
     }
 
-    pub fn reset(&mut self, window_size: usize) {
+    pub fn reset(&mut self, window_size: usize, checksum: bool) {
         self.offset_hist = [1, 4, 8];
         self.literals_buffer.clear();
         self.block_content_buffer.clear();
 
-        self.buffer.reset(window_size);
+        self.buffer.reset(window_size, checksum);
 
         self.fse.reset();
 
