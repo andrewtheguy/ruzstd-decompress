@@ -6,6 +6,7 @@ use super::super::blocks::sequence_section::SequencesHeader;
 use super::literals_section_decoder::decode_literals;
 use super::sequence_section_decoder::decode_sequences;
 use crate::common::MAX_BLOCK_SIZE;
+use crate::decoding::decode_buffer::LITERALS_PADDING;
 use crate::decoding::errors::DecodeSequenceError;
 use crate::decoding::errors::{
     BlockHeaderReadError, BlockSizeError, BlockTypeError, DecodeBlockContentError,
@@ -195,6 +196,11 @@ impl BlockDecoder {
             // that part and the offset history, so a failed block adds nothing.
             let len_before = workspace.buffer.len();
             let offset_hist_before = workspace.offset_hist;
+            // For the executor's copy of whole chunks; cleared with the literals, next block.
+            let literals_len = workspace.literals_buffer.len();
+            workspace
+                .literals_buffer
+                .resize(literals_len + LITERALS_PADDING, 0);
             let mut executor = SequenceExecutor::new(
                 &mut workspace.buffer,
                 &workspace.literals_buffer,
