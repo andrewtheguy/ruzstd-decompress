@@ -4,7 +4,7 @@
 
 use crate::decoding::errors::{DecodeSequenceError, FSEDecoderError};
 use crate::fse::FSETable;
-use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 /// One state of a sequence decoding table.
 #[derive(Copy, Clone, Default, Debug, PartialEq)]
@@ -22,7 +22,7 @@ pub struct SeqEntry {
 /// Room for the largest table, `1 << 9` states (literal and match lengths; offsets have at most
 /// `1 << 8`). A power of two, so that a state masked by `SIZE - 1` is in bounds, and indexing
 /// needs no check.
-const SIZE: usize = 1 << 9;
+pub(crate) const SIZE: usize = 1 << 9;
 
 /// What the codes of one of the three tables stand for.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -48,7 +48,9 @@ impl SeqKind {
 /// A sequence decoding table: an FSE table's states, or an RLE code as a table of one state.
 #[derive(Clone)]
 pub struct SeqTable {
-    entries: Box<[SeqEntry; SIZE]>,
+    /// Empty until a table is built, so that a new decoder allocates nothing it may not use,
+    /// then always `SIZE` long.
+    entries: Vec<SeqEntry>,
     /// How many bits the first state is read from; `None` until a table is built, since a block
     /// that repeats the previous table needs there to be one.
     accuracy_log: Option<u8>,
@@ -60,7 +62,7 @@ pub struct SeqTable {
 impl SeqTable {
     pub fn new() -> SeqTable {
         SeqTable {
-            entries: Box::new([SeqEntry::default(); SIZE]),
+            entries: Vec::new(),
             accuracy_log: None,
             holds_predefined: false,
         }
@@ -71,13 +73,22 @@ impl SeqTable {
     }
 
     pub fn reinit_from(&mut self, other: &SeqTable) {
-        *self.entries = *other.entries;
+        self.entries.clear();
+        self.entries.extend_from_slice(&other.entries);
         self.accuracy_log = other.accuracy_log;
         self.holds_predefined = other.holds_predefined;
     }
 
+    /// Room for every state, made on the first build.
+    fn sized(&mut self) {
+        if self.entries.len() != SIZE {
+            self.entries.resize(SIZE, SeqEntry::default());
+        }
+    }
+
     /// Take the states of `fse`, a table of `kind`'s codes.
     pub fn build_from_fse(&mut self, fse: &FSETable, kind: SeqKind) {
+        self.sized();
         for (entry, state) in self.entries.iter_mut().zip(&fse.decode) {
             let (base_value, nb_add_bits) = kind.code_value(state.symbol);
             *entry = SeqEntry {
@@ -114,6 +125,7 @@ impl SeqTable {
     /// Every state is `code`, and no bits are read for the next one.
     pub fn build_rle(&mut self, code: u8, kind: SeqKind) {
         let (base_value, nb_add_bits) = kind.code_value(code);
+        self.sized();
         self.entries[0] = SeqEntry {
             base_value,
             next_state: 0,
@@ -124,18 +136,23 @@ impl SeqTable {
         self.holds_predefined = false;
     }
 
-    /// How many bits the first state is read from.
-    pub fn accuracy_log(&self) -> Result<u8, DecodeSequenceError> {
-        self.accuracy_log
-            .ok_or(DecodeSequenceError::FSEDecoderError(
-                FSEDecoderError::TableIsUninitialized,
-            ))
+    /// How many bits the first state is read from, and the states, as an array: a state masked
+    /// by `SIZE - 1` indexes it with no bounds check (see [`at`]).
+    pub fn states(&self) -> Result<(u8, &[SeqEntry; SIZE]), DecodeSequenceError> {
+        let uninitialized =
+            DecodeSequenceError::FSEDecoderError(FSEDecoderError::TableIsUninitialized);
+        let accuracy_log = self.accuracy_log.ok_or(uninitialized)?;
+        let states = self.entries.as_slice().try_into().map_err(|_| {
+            DecodeSequenceError::FSEDecoderError(FSEDecoderError::TableIsUninitialized)
+        })?;
+        Ok((accuracy_log, states))
     }
+}
 
-    #[inline(always)]
-    pub fn get(&self, state: usize) -> SeqEntry {
-        self.entries[state & (SIZE - 1)]
-    }
+/// The entry of `state` in a table's states (see [`SeqTable::states`]).
+#[inline(always)]
+pub fn at(states: &[SeqEntry; SIZE], state: usize) -> SeqEntry {
+    states[state & (SIZE - 1)]
 }
 
 impl Default for SeqTable {
@@ -247,15 +264,15 @@ mod tests {
     fn built_from_fse_states() {
         let mut fse = FSETable::new(crate::blocks::sequence_section::MAX_LITERAL_LENGTH_CODE);
         let mut table = SeqTable::new();
-        assert!(table.accuracy_log().is_err());
+        assert!(table.states().is_err());
         table
             .build_predefined(&mut fse, SeqKind::LiteralLength)
             .unwrap();
-        assert_eq!(table.accuracy_log().unwrap(), LL_DEFAULT_ACC_LOG);
+        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
         for (state, entry) in fse.decode.iter().enumerate() {
             let (base_value, nb_add_bits) = SeqKind::LiteralLength.code_value(entry.symbol);
             assert_eq!(
-                table.get(state),
+                at(table.states().unwrap().1, state),
                 SeqEntry {
                     base_value,
                     next_state: entry.base_line as u16,
@@ -265,25 +282,27 @@ mod tests {
             );
         }
         // Kept across a reset, as a new frame does, then taken again without a build.
-        let states: alloc::vec::Vec<SeqEntry> = (0..64).map(|state| table.get(state)).collect();
+        let states: alloc::vec::Vec<SeqEntry> = (0..64)
+            .map(|state| at(table.states().unwrap().1, state))
+            .collect();
         table.reset();
-        assert!(table.accuracy_log().is_err());
+        assert!(table.states().is_err());
         fse.reset();
         table
             .build_predefined(&mut fse, SeqKind::LiteralLength)
             .unwrap();
         assert!(fse.decode.is_empty(), "rebuilt");
-        assert_eq!(table.accuracy_log().unwrap(), LL_DEFAULT_ACC_LOG);
+        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
         assert!(
             (0..64)
-                .map(|state| table.get(state))
+                .map(|state| at(table.states().unwrap().1, state))
                 .eq(states.iter().copied())
         );
 
         table.build_rle(20, SeqKind::LiteralLength);
-        assert_eq!(table.accuracy_log().unwrap(), 0);
+        assert_eq!(table.states().unwrap().0, 0);
         assert_eq!(
-            table.get(0),
+            at(table.states().unwrap().1, 0),
             SeqEntry {
                 base_value: 24,
                 next_state: 0,
@@ -297,7 +316,7 @@ mod tests {
             .unwrap();
         assert!(
             (0..64)
-                .map(|state| table.get(state))
+                .map(|state| at(table.states().unwrap().1, state))
                 .eq(states.iter().copied())
         );
     }

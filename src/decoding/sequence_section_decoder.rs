@@ -2,9 +2,9 @@ use super::super::blocks::sequence_section::ModeType;
 use super::super::blocks::sequence_section::Sequence;
 use super::super::blocks::sequence_section::SequencesHeader;
 use super::scratch::FSEScratch;
-use super::sequence_table::SeqKind;
 #[cfg(test)]
 use super::sequence_table::{LL_DEFAULT_ACC_LOG, LL_DEFAULT_DISTRIBUTION};
+use super::sequence_table::{SeqKind, at};
 use crate::bit_io::BitReaderReversed;
 use crate::blocks::sequence_section::{
     MAX_LITERAL_LENGTH_CODE, MAX_MATCH_LENGTH_CODE, MAX_OFFSET_CODE,
@@ -42,15 +42,17 @@ pub fn decode_sequences<E: From<DecodeSequenceError>>(
     }
 
     // An RLE table is a table of one state that reads no bits, so it needs no case of its own.
-    let (ll_table, ml_table, of_table) = (&scratch.ll, &scratch.ml, &scratch.of);
-    let mut ll_state = br.get_bits(ll_table.accuracy_log()?) as usize;
-    let mut of_state = br.get_bits(of_table.accuracy_log()?) as usize;
-    let mut ml_state = br.get_bits(ml_table.accuracy_log()?) as usize;
+    let (ll_log, ll_table) = scratch.ll.states()?;
+    let (of_log, of_table) = scratch.of.states()?;
+    let (ml_log, ml_table) = scratch.ml.states()?;
+    let mut ll_state = br.get_bits(ll_log) as usize;
+    let mut of_state = br.get_bits(of_log) as usize;
+    let mut ml_state = br.get_bits(ml_log) as usize;
 
     for seq_idx in 0..section.num_sequences {
-        let ll = ll_table.get(ll_state);
-        let ml = ml_table.get(ml_state);
-        let of = of_table.get(of_state);
+        let ll = at(ll_table, ll_state);
+        let ml = at(ml_table, ml_state);
+        let of = at(of_table, of_state);
 
         let (of_add, ml_add, ll_add) =
             br.get_bits_triple(of.nb_add_bits, ml.nb_add_bits, ll.nb_add_bits);

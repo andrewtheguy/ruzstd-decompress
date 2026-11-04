@@ -8,8 +8,16 @@ use alloc::vec::Vec;
 /// The Zstandard specification limits the maximum length of a code to 11 bits.
 pub(crate) const MAX_MAX_NUM_BITS: u8 = 11;
 
+/// The table always has `1 << MAX_MAX_NUM_BITS` entries, whatever the codes' longest: one of
+/// `max_num_bits` bits is repeated for every value of the bits after it. So a lookup is the next
+/// `MAX_MAX_NUM_BITS` bits, a fixed shift, and needs no bounds check.
+const TABLE_SIZE: usize = 1 << MAX_MAX_NUM_BITS;
+
 /// A Huffman decoding table contains a list of Huffman prefix codes and their associated values
 pub struct HuffmanTable {
+    /// Indexed by the next `MAX_MAX_NUM_BITS` bits (see [`TABLE_SIZE`]): empty until the first
+    /// table is built, so that a new decoder allocates nothing it may not use, then always
+    /// `TABLE_SIZE` long, each build writing all of it.
     decode: Vec<Entry>,
     /// The weight of a symbol is the number of occurences in a table.
     /// This value is used in constructing a binary tree referred to as
@@ -47,6 +55,7 @@ impl HuffmanTable {
     /// of `other`.
     pub fn reinit_from(&mut self, other: &Self) {
         self.reset();
+        self.decode.clear();
         self.decode.extend_from_slice(&other.decode);
         self.weights.extend_from_slice(&other.weights);
         self.max_num_bits = other.max_num_bits;
@@ -57,7 +66,6 @@ impl HuffmanTable {
 
     /// Completely empty the table of all data.
     pub fn reset(&mut self) {
-        self.decode.clear();
         self.weights.clear();
         self.max_num_bits = 0;
         self.bits.clear();
@@ -66,22 +74,79 @@ impl HuffmanTable {
         self.fse_table.reset();
     }
 
+    /// The table, as an array, so that its lookups need no bounds check. Only once one is built,
+    /// which the literals section checks (`max_num_bits` is 0 until then).
+    #[inline(always)]
+    fn table(&self) -> &[Entry; TABLE_SIZE] {
+        self.decode
+            .as_slice()
+            .try_into()
+            .expect("a table is built before it decodes")
+    }
+
     /// Decode the symbol at the front of `br` and consume its bits.
     ///
-    /// The next `max_num_bits` bits of the stream index the table directly. `br` must have `max_num_bits` bits available
-    /// (see [`BitReaderReversed::ensure_bits`]).
+    /// The next `MAX_MAX_NUM_BITS` bits of the stream index the table directly. `br` must have
+    /// them available (see [`BitReaderReversed::ensure_bits`]); past the stream's end they are
+    /// zeros, which only the bits after the code's are.
     #[inline(always)]
-    fn decode_symbol_from(&self, br: &mut BitReaderReversed<'_>) -> u8 {
-        let entry = self.decode[br.peek_bits(self.max_num_bits) as usize];
+    fn decode_symbol(table: &[Entry; TABLE_SIZE], br: &mut BitReaderReversed<'_>) -> u8 {
+        let entry = table[br.peek_bits(MAX_MAX_NUM_BITS) as usize & (TABLE_SIZE - 1)];
         br.consume(entry.num_bits);
         entry.symbol
     }
 
     /// Decode exactly `out.len()` symbols from `br` into `out`.
     pub(crate) fn decode_stream(&self, br: &mut BitReaderReversed<'_>, out: &mut [u8]) {
-        for byte in out {
-            br.ensure_bits(self.max_num_bits);
-            *byte = self.decode_symbol_from(br);
+        let max_bits = self.max_num_bits;
+        match max_bits {
+            ..=7 => self.decode_stream_n::<8>(br, out),
+            8 => self.decode_stream_n::<7>(br, out),
+            9 => self.decode_stream_n::<6>(br, out),
+            _ => self.decode_stream_n::<5>(br, out),
+        }
+    }
+
+    /// Decode the symbol at the top of `window`, the reader's bits left aligned (see
+    /// [`BitReaderReversed::sentinel_window`]), and shift its bits out.
+    ///
+    /// The index is a fixed shift of `window`, and the next window one shift by the entry's
+    /// length. The window is all a stream needs in the loop: the bits used are counted by the
+    /// sentinel, so the four streams' state fits in registers, wasm's included.
+    #[inline(always)]
+    fn decode_aligned(table: &[Entry; TABLE_SIZE], window: &mut u64) -> u8 {
+        let entry = table[(*window >> (64 - MAX_MAX_NUM_BITS)) as usize];
+        *window <<= entry.num_bits;
+        entry.symbol
+    }
+
+    /// [`Self::decode_stream`], `N` symbols a refill: `N * max_num_bits` must be at most 56.
+    #[inline(always)]
+    fn decode_stream_n<const N: usize>(&self, br: &mut BitReaderReversed<'_>, out: &mut [u8]) {
+        let max_bits = self.max_num_bits;
+        debug_assert!(N * max_bits as usize <= 56);
+        let table = self.table();
+        // A copy, so its state can stay in registers, while a refill cannot reach the source's
+        // end; nothing takes its address.
+        let mut b = br.clone();
+        let mut done = 0;
+        for chunk in out.as_chunks_mut::<N>().0 {
+            if !b.can_refill_fast() {
+                break;
+            }
+            b.ensure_bits_fast(57);
+            let mut window = b.sentinel_window();
+            for byte in chunk {
+                *byte = Self::decode_aligned(table, &mut window);
+            }
+            b.consume_to_sentinel(window);
+            done += N;
+        }
+        *br = b;
+        // The rest, near the source's end or past the last whole chunk, on `br` itself.
+        for byte in &mut out[done..] {
+            br.ensure_bits(MAX_MAX_NUM_BITS);
+            *byte = Self::decode_symbol(table, br);
         }
     }
 
@@ -95,40 +160,88 @@ impl HuffmanTable {
         brs: &mut [BitReaderReversed<'_>; 4],
         outs: [&mut [u8]; 4],
     ) {
-        let max_bits = self.max_num_bits;
-        debug_assert!(max_bits > 0);
-        let per_refill = 56 / max_bits as usize;
-        let [out0, out1, out2, out3] = outs;
-        let [br0, br1, br2, br3] = brs;
-        let common = out0.len().min(out1.len()).min(out2.len()).min(out3.len());
+        debug_assert!(self.max_num_bits > 0);
+        match self.max_num_bits {
+            ..=7 => self.decode_4_streams_n::<8>(brs, outs),
+            8 => self.decode_4_streams_n::<7>(brs, outs),
+            9 => self.decode_4_streams_n::<6>(brs, outs),
+            _ => self.decode_4_streams_n::<5>(brs, outs),
+        }
+    }
 
-        let mut i = 0;
-        while i + per_refill <= common {
-            br0.ensure_bits(56);
-            br1.ensure_bits(56);
-            br2.ensure_bits(56);
-            br3.ensure_bits(56);
-            for j in i..i + per_refill {
-                out0[j] = self.decode_symbol_from(br0);
-                out1[j] = self.decode_symbol_from(br1);
-                out2[j] = self.decode_symbol_from(br2);
-                out3[j] = self.decode_symbol_from(br3);
+    /// [`Self::decode_4_streams`], `N` symbols a stream a refill: `N * max_num_bits` must be at
+    /// most 56. The readers are copied into locals for the loop, so that their state can stay in
+    /// registers, and the output is taken `N` bytes at a time, so its stores need no checks.
+    #[inline(always)]
+    fn decode_4_streams_n<const N: usize>(
+        &self,
+        brs: &mut [BitReaderReversed<'_>; 4],
+        outs: [&mut [u8]; 4],
+    ) {
+        let max_bits = self.max_num_bits;
+        debug_assert!(N * max_bits as usize <= 56);
+        let table = self.table();
+        let [out0, out1, out2, out3] = outs;
+        let common = out0.len().min(out1.len()).min(out2.len()).min(out3.len());
+        let whole = common - common % N;
+        let [mut b0, mut b1, mut b2, mut b3] = brs.clone();
+
+        let chunks = out0[..whole]
+            .as_chunks_mut::<N>()
+            .0
+            .iter_mut()
+            .zip(out1[..whole].as_chunks_mut::<N>().0)
+            .zip(out2[..whole].as_chunks_mut::<N>().0)
+            .zip(out3[..whole].as_chunks_mut::<N>().0);
+        // While no stream's refill can reach its source's end: so the loop has no call to the slow
+        // refill, which would keep the readers in memory (see `ensure_bits_fast`).
+        let mut done = 0;
+        for (((c0, c1), c2), c3) in chunks {
+            if !(b0.can_refill_fast()
+                && b1.can_refill_fast()
+                && b2.can_refill_fast()
+                && b3.can_refill_fast())
+            {
+                break;
             }
-            i += per_refill;
+            b0.ensure_bits_fast(57);
+            b1.ensure_bits_fast(57);
+            b2.ensure_bits_fast(57);
+            b3.ensure_bits_fast(57);
+            let (mut w0, mut w1, mut w2, mut w3) = (
+                b0.sentinel_window(),
+                b1.sentinel_window(),
+                b2.sentinel_window(),
+                b3.sentinel_window(),
+            );
+            for k in 0..N {
+                c0[k] = Self::decode_aligned(table, &mut w0);
+                c1[k] = Self::decode_aligned(table, &mut w1);
+                c2[k] = Self::decode_aligned(table, &mut w2);
+                c3[k] = Self::decode_aligned(table, &mut w3);
+            }
+            b0.consume_to_sentinel(w0);
+            b1.consume_to_sentinel(w1);
+            b2.consume_to_sentinel(w2);
+            b3.consume_to_sentinel(w3);
+            done += N;
         }
 
-        self.decode_stream(br0, &mut out0[i..]);
-        self.decode_stream(br1, &mut out1[i..]);
-        self.decode_stream(br2, &mut out2[i..]);
-        self.decode_stream(br3, &mut out3[i..]);
+        *brs = [b0, b1, b2, b3];
+        let [br0, br1, br2, br3] = brs;
+        self.decode_stream_n::<N>(br0, &mut out0[done..]);
+        self.decode_stream_n::<N>(br1, &mut out1[done..]);
+        self.decode_stream_n::<N>(br2, &mut out2[done..]);
+        self.decode_stream_n::<N>(br3, &mut out3[done..]);
     }
 
     /// Read from `source` and decode the input, populating the huffman decoding table.
     ///
     /// Returns the number of bytes read.
     pub fn build_decoder(&mut self, source: &[u8]) -> Result<u32, HuffmanTableError> {
-        self.decode.clear();
-
+        // No table until this one is built, so that a block repeating a table after a failed
+        // build is refused as having none, not decoded from half of one.
+        self.max_num_bits = 0;
         let bytes_used = self.read_weights(source)?;
         self.build_table_from_weights()?;
         Ok(bytes_used)
@@ -331,7 +444,6 @@ impl HuffmanTable {
         }
 
         self.bits[self.weights.len()] = max_bits + 1 - last_weight;
-        self.max_num_bits = max_bits;
 
         if max_bits > MAX_MAX_NUM_BITS {
             return Err(err::MaxBitsTooHigh { got: max_bits });
@@ -343,48 +455,43 @@ impl HuffmanTable {
             self.bit_ranks[(*num_bits) as usize] += 1;
         }
 
-        //fill with dummy symbols
-        self.decode.resize(
-            1 << self.max_num_bits,
-            Entry {
-                symbol: 0,
-                num_bits: 0,
-            },
-        );
-
         //starting codes for each rank
         self.rank_indexes.clear();
         self.rank_indexes.resize((max_bits + 1) as usize, 0);
 
+        // The table is laid out at MAX_MAX_NUM_BITS bits whatever max_bits is (see TABLE_SIZE):
+        // a code of `bits` bits spans the entries of every value of the bits after it.
         self.rank_indexes[max_bits as usize] = 0;
         for bits in (1..self.rank_indexes.len() as u8).rev() {
             self.rank_indexes[bits as usize - 1] = self.rank_indexes[bits as usize]
-                + self.bit_ranks[bits as usize] as usize * (1 << (max_bits - bits));
+                + self.bit_ranks[bits as usize] as usize * (1 << (MAX_MAX_NUM_BITS - bits));
         }
 
         assert!(
-            self.rank_indexes[0] == self.decode.len(),
+            self.rank_indexes[0] == TABLE_SIZE,
             "rank_idx[0]: {} should be: {}",
             self.rank_indexes[0],
-            self.decode.len()
+            TABLE_SIZE
         );
 
+        // Sized once; every later build overwrites all of it.
+        if self.decode.len() != TABLE_SIZE {
+            self.decode.resize(TABLE_SIZE, Entry::default());
+        }
         for symbol in 0..self.bits.len() {
             let bits_for_symbol = self.bits[symbol];
             if bits_for_symbol != 0 {
-                // allocate code for the symbol and set in the table
-                // a code ignores all max_bits - bits[symbol] bits, so it gets
-                // a range that spans all of those in the decoding table
                 let base_idx = self.rank_indexes[bits_for_symbol as usize];
-                let len = 1 << (max_bits - bits_for_symbol);
+                let len = 1 << (MAX_MAX_NUM_BITS - bits_for_symbol);
                 self.rank_indexes[bits_for_symbol as usize] += len;
-                for idx in 0..len {
-                    self.decode[base_idx + idx].symbol = symbol as u8;
-                    self.decode[base_idx + idx].num_bits = bits_for_symbol;
-                }
+                self.decode[base_idx..base_idx + len].fill(Entry {
+                    symbol: symbol as u8,
+                    num_bits: bits_for_symbol,
+                });
             }
         }
 
+        self.max_num_bits = max_bits;
         Ok(())
     }
 }
@@ -397,7 +504,7 @@ impl Default for HuffmanTable {
 
 /// A single entry in the table contains the decoded symbol/literal and the
 /// size of the prefix code.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct Entry {
     /// The byte that the prefix code replaces during encoding.
     symbol: u8,
