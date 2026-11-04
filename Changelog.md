@@ -6,6 +6,8 @@ This document records the changes made between versions, starting with version 0
 
 * **Breaking** Remove the compressor (`encoding`) and the dictionary builder (`dictionary`, the `dict_builder` feature): this fork is a decoder only
 * Remove the `fuzz_exports` feature, which only the encoder round-trip fuzz targets used
+* Replace the unsafe ring buffer with a safe one and forbid unsafe code; decoding is about as fast natively and faster in wasm (`docs/benchmarks/README.md`)
+* Copy overlapping matches in doubling runs
 * Apply the per-block decoded size limit to a block's literals, including blocks with no sequences
 
 # After 0.9.0
