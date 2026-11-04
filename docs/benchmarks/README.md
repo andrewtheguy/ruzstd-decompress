@@ -161,6 +161,104 @@ Every workload: [`results/run3-peek-perf.md`](results/run3-peek-perf.md)
   all, and on the video and mixed tiles from 4.5–6.7 times to 2.2–2.5 times.
 - `decode` and `interop` fuzzing, four minutes each, found nothing.
 
+## 2026-11-04: libzstd-style sequence tables
+
+The question: do the sequences decode faster from tables laid out as libzstd's
+(`ZSTD_seqSymbol`), each state holding the code's value and extra bits and the
+next state's base and bit count (`src/decoding/sequence_table.rs`)? Before,
+each sequence's codes were turned into values with a lookup apiece, and RLE
+blocks had a loop of their own. Predefined tables are now also kept from one
+block, and frame, to the next.
+
+| | |
+|---|---|
+| **N** | `master` at `cfb8f3d` (v0.9.2-alpha.3) |
+| **T** | N with the tables |
+
+The same workloads, machine and build as the `peek-perf` run. Every variant
+decoded every workload to the same output.
+
+A profile first (`perf`, native) said where the time goes:
+- On the video tiles, 64% is Huffman literals (`decode_4_streams`) and about
+  3% sequences.
+- On mixed, 34% is literals and about 10% sequences.
+- On silesia `-3`, about 38% is sequences.
+
+The tables could only pay on the general corpora and the smaller tiles, and
+that is where they did. Geomean over the 18 workloads, against N:
+
+| | T |
+|---|---:|
+| native | **−6.1%** |
+| wasm | **−9.1%** |
+
+| workload | native N | native T | wasm N | wasm T |
+|---|---:|---:|---:|---:|
+| video 1920x1080 | 465 | 462 (−0.6%) | 594 | 587 (−1.1%) |
+| video 2880x1800@2 | 1495 | 1459 (−2.4%) | 1975 | 1879 (−4.9%) |
+| mixed 1920x1080, 200 MB | 675 | 671 (−0.6%) | 882 | 851 (−3.5%) |
+| mixed 2880x1800@2, 200 MB | 968 | 969 (+0.1%) | 1293 | 1201 (−7.1%) |
+| enwik9 `-3` | 2656 | 2433 (−8.4%) | 3653 | 3205 (−12.3%) |
+| enwik9 `-19` | 2164 | 1987 (−8.2%) | 2980 | 2647 (−11.2%) |
+| silesia `-3` | 476 | 440 (−7.6%) | 664 | 581 (−12.5%) |
+| silesia `-19` | 469 | 431 (−8.1%) | 679 | 586 (−13.6%) |
+
+The smaller tiles (browser, drag, still, terminal, uncover) gain 3–15% natively
+and 5–15% in wasm. Every workload:
+[`results/run4-seq-tables.md`](results/run4-seq-tables.md) (native and wasm)
+and [`results/run5-seq-tables-native-pinned.md`](results/run5-seq-tables-native-pinned.md)
+(native, glibc's thresholds fixed, which the native figures above are from).
+
+**glibc's malloc and the small native workloads.** In the first run, native
+still 1920x1080 took 1.15 ms for T against N's 0.50 ms (+129%), every round.
+The cause was page faults, about 320 a pass for T and almost none for N, not
+the decoding. The harness makes a new decoder every pass. glibc moves its mmap
+threshold as blocks are freed, so whether that decoder's buffers come from the
+heap or as fresh pages to fault in turns on the build's allocation pattern.
+With the thresholds fixed (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=67108864:glibc.malloc.trim_threshold=268435456`),
+T takes 0.47 ms and N 0.51 ms. The same effect is in the earlier runs' small
+native workloads:
+- drag 1920x1080: 0.92 ms for N then, 0.46 ms with the thresholds fixed;
+- terminal 1920x1080: 2.55 ms then, 1.12 ms fixed;
+- still 2880x1800@2: 2.38 ms then, 1.19 ms fixed;
+- the 1.45 ms of v0.9.2-alpha.2 on still 1920x1080 in the `peek-perf` run.
+
+So those earlier figures, and their libzstd ratios, say as much about glibc as
+about the decoders. The large workloads (video, mixed, the corpora) moved by
+under 4%. Fixing either threshold alone made it worse for both, 1.4–1.8 ms; only
+the pair holds. Both harnesses now set the same pair themselves at start
+(`mallopt`, on glibc: a 64 MiB mmap threshold and a 256 MiB trim threshold), so
+no setting of the environment is needed. wasm's allocator does
+not give memory back, so its runs are unaffected.
+
+Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+nothing.
+
+A native run with the thresholds set by the harnesses, no environment
+needed, on the corpora of "Running it again" (enwik9 traded for the video):
+[`results/run6-native-mallopt.md`](results/run6-native-mallopt.md). It agrees
+with the run under `GLIBC_TUNABLES` to within 3.3% on every workload both have,
+most within 2%. It also gives libzstd's lead without glibc's noise: 35% by
+geomean over alpha.3 (N), so about 1.5 times, not the 2.6 the first run gave.
+
+| workload | N | T | libzstd | libzstd's lead over T |
+|---|---:|---:|---:|---:|
+| video 1920x1080 | 465 | 464 | 191 | 2.4× |
+| video 2880x1800@2 | 1494 | 1470 | 619 | 2.4× |
+| mixed 1920x1080, 200 MB | 684 | 666 | 302 | 2.2× |
+| mixed 2880x1800@2, 200 MB | 975 | 946 | 447 | 2.1× |
+| silesia `-3` | 474 | 445 | 214 | 2.1× |
+| silesia `-19` | 469 | 433 | 219 | 2.0× |
+| video clip, raw blocks | 16.2 | 16.4 | 20.3 | 0.8× |
+
+The small tiles are closer: libzstd leads by 1.1–1.2 times on browser and drag,
+1.2–1.5 on terminal and 1.6–1.9 on uncover. On still, ruzstd is ahead (0.95 and
+0.83 times), but libzstd's harness zero-fills a whole bitmap for every still body
+and ruzstd's does not.
+On the video clip ruzstd is ahead: there is nothing to decode, only blocks to
+copy, so that compares how the two harnesses take the output, not the
+decoders.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
@@ -174,8 +272,15 @@ and results.
    [`dump-tiles.sh`](harness/dump-tiles.sh), which writes
    `SCENARIO-SIZE-PICTURE.tiles`: a byte for the kind (0 planar, 1 still), `w`
    and `h` as u16, the length as u32, little endian, then the body.
-2. **The general corpora**: `enwik9` (mattmahoney.net) and the Silesia corpus as
-   one tar, each `zstd -3` and `zstd -19` into `corpus/`.
+2. **The general corpora**: the Silesia corpus as one tar, `zstd -3` and
+   `zstd -19`, and the first minute of `Multicolored_Explosions-4k.webm` (4K
+   VP9 video, no audio), cut without re-encoding (`ffmpeg -t 60 -c copy -an`:
+   129,927,535 bytes, SHA-256
+   `ba8a6a586890f80bd78a3a5180644d867882f7c5370c63573b5aec582ed66e54`),
+   `zstd -T0 -3`, into `corpus/`. The video is already compressed, so zstd
+   stores it as it is, in raw blocks: it measures that path. At `-19` it is the
+   same, so it is left out. `enwik9` at both levels was the third until
+   2026-11-04. It is text, which Silesia has, and it was the slowest workload.
 3. **The variants**: a tree each in `variants/A`… (a `git archive` of the
    commit, with the patches above), then [`build.sh`](harness/build.sh) `A B …`
    on the timing machine; [`libzstd/`](harness/libzstd) is built the same way

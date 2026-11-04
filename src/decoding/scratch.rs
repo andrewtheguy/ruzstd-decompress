@@ -1,6 +1,7 @@
 //! Structures that wrap around various decoders to make decoding easier.
 
 use super::decode_buffer::DecodeBuffer;
+use super::sequence_table::SeqTable;
 use crate::decoding::dictionary::Dictionary;
 use crate::fse::FSETable;
 use crate::huff0::HuffmanTable;
@@ -30,14 +31,7 @@ impl DecoderScratch {
             huf: HuffmanScratch {
                 table: HuffmanTable::new(),
             },
-            fse: FSEScratch {
-                offsets: FSETable::new(MAX_OFFSET_CODE),
-                of_rle: None,
-                literal_lengths: FSETable::new(MAX_LITERAL_LENGTH_CODE),
-                ll_rle: None,
-                match_lengths: FSETable::new(MAX_MATCH_LENGTH_CODE),
-                ml_rle: None,
-            },
+            fse: FSEScratch::new(),
             buffer: DecodeBuffer::new(window_size),
             offset_hist: [1, 4, 8],
 
@@ -53,12 +47,7 @@ impl DecoderScratch {
 
         self.buffer.reset(window_size);
 
-        self.fse.literal_lengths.reset();
-        self.fse.match_lengths.reset();
-        self.fse.offsets.reset();
-        self.fse.ll_rle = None;
-        self.fse.ml_rle = None;
-        self.fse.of_rle = None;
+        self.fse.reset();
 
         self.huf.table.reset();
     }
@@ -92,34 +81,42 @@ impl Default for HuffmanScratch {
     }
 }
 
+/// The sequences section's tables, and the FSE tables their descriptions are read into.
 pub struct FSEScratch {
     pub offsets: FSETable,
-    pub of_rle: Option<u8>,
     pub literal_lengths: FSETable,
-    pub ll_rle: Option<u8>,
     pub match_lengths: FSETable,
-    pub ml_rle: Option<u8>,
+    pub of: SeqTable,
+    pub ll: SeqTable,
+    pub ml: SeqTable,
 }
 
 impl FSEScratch {
     pub fn new() -> FSEScratch {
         FSEScratch {
             offsets: FSETable::new(MAX_OFFSET_CODE),
-            of_rle: None,
             literal_lengths: FSETable::new(MAX_LITERAL_LENGTH_CODE),
-            ll_rle: None,
             match_lengths: FSETable::new(MAX_MATCH_LENGTH_CODE),
-            ml_rle: None,
+            of: SeqTable::new(),
+            ll: SeqTable::new(),
+            ml: SeqTable::new(),
         }
     }
 
+    pub fn reset(&mut self) {
+        self.offsets.reset();
+        self.literal_lengths.reset();
+        self.match_lengths.reset();
+        self.of.reset();
+        self.ll.reset();
+        self.ml.reset();
+    }
+
+    /// Take `other`'s tables, which are all a later block can repeat.
     pub fn reinit_from(&mut self, other: &Self) {
-        self.offsets.reinit_from(&other.offsets);
-        self.literal_lengths.reinit_from(&other.literal_lengths);
-        self.match_lengths.reinit_from(&other.match_lengths);
-        self.of_rle = other.of_rle;
-        self.ll_rle = other.ll_rle;
-        self.ml_rle = other.ml_rle;
+        self.of.reinit_from(&other.of);
+        self.ll.reinit_from(&other.ll);
+        self.ml.reinit_from(&other.ml);
     }
 }
 
