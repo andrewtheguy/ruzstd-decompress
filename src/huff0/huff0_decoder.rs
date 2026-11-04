@@ -556,6 +556,13 @@ impl HuffmanTable {
     fn build_table_from_weights(&mut self) -> Result<(), HuffmanTableError> {
         use HuffmanTableError as err;
 
+        // At most 255 weights, the last symbol's implied: a symbol is a byte. The weights'
+        // reader stops past 255, but its last states can still give one or two more.
+        if self.weights.len() > 255 {
+            return Err(err::TooManyWeights {
+                got: self.weights.len(),
+            });
+        }
         self.bits.clear();
         self.bits.resize(self.weights.len() + 1, 0);
 
@@ -787,6 +794,22 @@ fn highest_bit_set(x: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 256 weights, which with the implied last are a symbol past a byte's, are refused, even
+    /// when they make a whole code (as 256 of weight 1 do); the FSE-coded weights can come to
+    /// that many, as a fuzzed dictionary's did.
+    #[test]
+    fn too_many_weights() {
+        let mut table = HuffmanTable::new();
+        table.weights = alloc::vec![1; 256];
+        assert!(matches!(
+            table.build_table_from_weights(),
+            Err(HuffmanTableError::TooManyWeights { got: 256 })
+        ));
+        table.weights = alloc::vec![1; 255];
+        table.weights[0] = 2;
+        assert!(table.build_table_from_weights().is_ok());
+    }
 
     /// The table of pairs decodes what the single symbols' table does, bit for bit, whatever
     /// the code, the streams' lengths and the output's.
