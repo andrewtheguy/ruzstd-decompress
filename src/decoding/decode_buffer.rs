@@ -21,11 +21,12 @@ pub struct DecodeBuffer {
 
     pub window_size: usize,
     total_output_counter: u64,
-    /// The hash of the bytes dropped from the buffer; those still in it are hashed when the
-    /// checksum is asked for (see [`DecodeBuffer::checksum`]), so that collecting them early
-    /// costs nothing more.
+    /// The hash of the bytes dropped from the buffer, when the frame has a checksum to check
+    /// them against: none is made for one that has not, as libzstd makes none. The bytes still
+    /// in the buffer are hashed when the checksum is asked for (see [`DecodeBuffer::checksum`]),
+    /// so that collecting them early costs nothing more.
     #[cfg(feature = "hash")]
-    hash: twox_hash::XxHash64,
+    hash: Option<twox_hash::XxHash64>,
 }
 
 /// Reads the bytes not yet collected, as many as fit.
@@ -41,19 +42,24 @@ impl Read for DecodeBuffer {
 }
 
 impl DecodeBuffer {
-    pub fn new(window_size: usize) -> DecodeBuffer {
-        DecodeBuffer {
+    /// A buffer for a frame of `window_size`, hashing what it decodes if `checksum`, the frame
+    /// having one.
+    pub fn new(window_size: usize, checksum: bool) -> DecodeBuffer {
+        let mut buffer = DecodeBuffer {
             buffer: RingBuffer::new(),
             collected: 0,
             dict_content: Vec::new(),
             window_size,
             total_output_counter: 0,
             #[cfg(feature = "hash")]
-            hash: twox_hash::XxHash64::with_seed(0),
-        }
+            hash: None,
+        };
+        buffer.reset(window_size, checksum);
+        buffer
     }
 
-    pub fn reset(&mut self, window_size: usize) {
+    /// Empty the buffer for a new frame, as [`Self::new`] makes it.
+    pub fn reset(&mut self, window_size: usize, checksum: bool) {
         self.window_size = window_size;
         self.buffer.clear();
         self.collected = 0;
@@ -61,8 +67,10 @@ impl DecodeBuffer {
         self.total_output_counter = 0;
         #[cfg(feature = "hash")]
         {
-            self.hash = twox_hash::XxHash64::with_seed(0);
+            self.hash = checksum.then(|| twox_hash::XxHash64::with_seed(0));
         }
+        #[cfg(not(feature = "hash"))]
+        let _ = checksum;
     }
 
     pub fn len(&self) -> usize {
@@ -188,14 +196,15 @@ impl DecodeBuffer {
         }
     }
 
-    /// The XXH64 of every byte decoded since the reset, collected or not.
+    /// The XXH64 of every byte decoded since the reset, collected or not; `None` unless the
+    /// buffer was made for a frame with a checksum.
     #[cfg(feature = "hash")]
-    pub fn checksum(&self) -> u64 {
-        let mut hash = self.hash.clone();
+    pub fn checksum(&self) -> Option<u64> {
+        let mut hash = self.hash.clone()?;
         let (a, b) = self.buffer.as_slices();
         hash.write(a);
         hash.write(b);
-        hash.finish()
+        Some(hash.finish())
     }
 
     /// How many bytes are decoded and not yet collected.
@@ -251,11 +260,11 @@ impl DecodeBuffer {
         let dropped = past_window.min(self.collected);
         if dropped > 0 {
             #[cfg(feature = "hash")]
-            {
+            if let Some(hash) = &mut self.hash {
                 let (a, b) = self.buffer.as_slices();
                 let in_a = dropped.min(a.len());
-                self.hash.write(&a[..in_a]);
-                self.hash.write(&b[..dropped - in_a]);
+                hash.write(&a[..in_a]);
+                hash.write(&b[..dropped - in_a]);
             }
             self.buffer.drop_first_n(dropped);
             self.collected -= dropped;
@@ -315,7 +324,7 @@ mod tests {
         };
 
         // Each collect writes every new byte, and the buffer keeps the window of 100.
-        let mut decode_buf = DecodeBuffer::new(100);
+        let mut decode_buf = DecodeBuffer::new(100, true);
         decode_buf.push(b"0123456789");
         decode_buf.repeat(10, 90).unwrap();
         let repeats = 1000;
@@ -362,7 +371,7 @@ mod tests {
         };
 
         // A write that fails leaves what was not written to be collected again.
-        let mut decode_buf = DecodeBuffer::new(100);
+        let mut decode_buf = DecodeBuffer::new(100, true);
         decode_buf.push(b"0123456789");
         decode_buf.repeat(10, 90).unwrap();
         let repeats = 1000;
@@ -396,7 +405,7 @@ mod tests {
         };
         for round in 0..300 {
             let window = 1 + next(300);
-            let mut decode_buf = DecodeBuffer::new(window);
+            let mut decode_buf = DecodeBuffer::new(window, true);
             let mut model: Vec<u8> = Vec::new();
             let mut out: Vec<u8> = Vec::new();
             for _ in 0..200 {
@@ -435,7 +444,7 @@ mod tests {
                     use core::hash::Hasher;
                     let mut hash = twox_hash::XxHash64::with_seed(0);
                     hash.write(&model);
-                    assert_eq!(decode_buf.checksum(), hash.finish(), "round {round}");
+                    assert_eq!(decode_buf.checksum(), Some(hash.finish()), "round {round}");
                 }
             }
             out.extend_from_slice(&decode_buf.collect());
@@ -450,7 +459,7 @@ mod tests {
         let prefix: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
         for offset in 1..=64 {
             for match_length in 1..=200 {
-                let mut decode_buf = DecodeBuffer::new(1 << 20);
+                let mut decode_buf = DecodeBuffer::new(1 << 20, true);
                 decode_buf.push(&prefix);
                 decode_buf.repeat(offset, match_length).unwrap();
                 let mut expected = prefix.clone();

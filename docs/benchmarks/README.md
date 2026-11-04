@@ -801,6 +801,72 @@ workload: [`results/run13-huffman-wasm.md`](results/run13-huffman-wasm.md).
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
 
+## 2026-11-04: hashing only frames with a checksum
+
+The question: a native profile of `main` on uncover 1920x1080 put XXH64 at
+5.8% of the time. The decoder never checks a checksum itself; what was it
+hashing?
+
+Since the bytes are collected as they are decoded (`v0.9.2-alpha.5`), the
+decode buffer hashes each byte as it drops it past the window, so that
+`get_calculated_checksum` can give the frame's checksum at its end. zDesk's
+still stream is one frame with a 1 MiB window and no checksum, and in the
+tiles it runs on for far more than a MiB: one stream a pass of 454 bodies in
+uncover, 447 in browser, 134 in terminal, 1,430 in video. Every byte of it
+past the first MiB was hashed, for nothing. libzstd makes no hash for a frame
+without a checksum. (The still tiles' two streams are under a MiB, and drop
+nothing.)
+
+| | |
+|---|---|
+| **B0** | `main` at `d3b4aaa` (the table of pairs' loop in wasm) |
+| **CK** | B0 with the commit (`10a15e5`) |
+| **Z** | libzstd |
+
+The commit hashes a frame's bytes only when its header has the checksum flag;
+`get_calculated_checksum` is `None` for a frame without one. A test takes
+frames with and without a checksum in turn on one decoder, collected a block
+at a time or at the end, and checks both checksums and the bytes.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against B0:
+
+| | CK | libzstd |
+|---|---:|---:|
+| native | **−5.0%** | +1.8% |
+| wasm | **−3.8%** | |
+
+| workload | native B0 | native CK | wasm B0 | wasm CK | libzstd |
+|---|---:|---:|---:|---:|---:|
+| browser 1920x1080 | 3.99 | 3.29 (**−17.5%**) | 4.81 | 4.14 (**−13.9%**) | 4.79 |
+| browser 2880x1800@2 | 9.71 | 8.47 (**−12.7%**) | 11.92 | 10.66 (**−10.5%**) | 13.06 |
+| terminal 1920x1080 | 0.58 | 0.53 (−8.6%) | 0.71 | 0.66 (−7.6%) | 0.70 |
+| terminal 2880x1800@2 | 1.41 | 1.20 (**−14.7%**) | 1.72 | 1.53 (**−10.7%**) | 1.77 |
+| uncover 1920x1080 | 1.88 | 1.77 (−5.4%) | 2.35 | 2.26 (−3.9%) | 1.50 |
+| uncover 2880x1800@2 | 3.24 | 2.99 (−7.7%) | 4.11 | 3.86 (−5.9%) | 2.80 |
+| video 1920x1080 | 268 | 260 (−2.8%) | 342 | 325 (−5.1%) | 190 |
+| video 2880x1800@2 | 883 | 847 (−4.1%) | 1071 | 1069 (−0.2%) | 600 |
+| mixed 1920x1080, 200 MB | 420 | 405 (−3.6%) | 523 | 531 (+1.5%) | 303 |
+| mixed 2880x1800@2, 200 MB | 621 | 597 (−3.9%) | 777 | 759 (−2.4%) | 446 |
+| silesia `-3` | 331 | 336 (+1.7%) | 454 | 449 (−1.2%) | 220 |
+| silesia `-19` | 341 | 348 (+2.2%) | 463 | 473 (+2.2%) | 220 |
+
+ms a pass. The still and drag tiles and the video corpus are within 3.7% either
+way. Silesia's
+frames have checksums (the `zstd` command's default), so they hash as before;
+their +1.7–2.2% is a little over the spread of their rounds natively
+(0.7–4.3%), with nothing in the commit on their path but a test of whether to
+hash. Every workload: [`results/run14-checksum.md`](results/run14-checksum.md).
+
+- By geomean natively, libzstd now takes 1.07 times ruzstd's time. ruzstd is
+  1.46–1.54 times faster on browser tiles and 1.3–1.5 times on terminal; uncover is
+  1.07–1.18 times slower, video and mixed 1.3–1.4 times, silesia 1.5–1.6.
+- The profile that found this also shows what the roadmap had wrong: the
+  harness's `replay`, 15% of uncover natively, is the sequences' decoding
+  inlined into it (14.7% of the 15.3%), not a copy of the output.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
