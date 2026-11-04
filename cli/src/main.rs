@@ -55,8 +55,10 @@ enum Commands {
     Decompress {
         /// .zst archive to decompress
         input_file: PathBuf,
-        /// Where the compressed file is written
+        /// Where the decompressed file is written
         /// [default: <ARCHIVE_NAME>]
+        // The doc comment doubles as clap help text, so the brackets are not a doc link.
+        #[allow(rustdoc::broken_intra_doc_links)]
         output_file: Option<PathBuf>,
     },
 }
