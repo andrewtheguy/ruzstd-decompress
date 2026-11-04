@@ -9,7 +9,9 @@
 A pure Rust implementation of the Zstandard compression format, as defined in [RFC8878](https://www.rfc-editor.org/rfc/rfc8878.pdf).
 
 This crate contains a fully operational implementation of the decompression portion of the standard.
-It also provides a compressor which is usable, but it does not yet reach the speed, ratio or configurability of the original zstd library.
+
+This fork is a decoder only: the compressor and the dictionary builder of upstream ruzstd
+(<https://github.com/KillingSpark/zstd-rs>) have been removed, as nothing that uses it compresses with it.
 
 This crate is currently actively maintained.
 
@@ -28,55 +30,7 @@ times slower. Enwik9 is highly compressible, for less compressible data
 (like a ubuntu installation .iso) my decoder comes close to only being
 1.4 times slower.
 
-## Compression
-On the compression side:
-- Support for generating compressed blocks at any compression level
-  - [x] Uncompressed
-  - [x] Fastest (roughly level 1)
-  - [ ] Default (roughly level 3)
-  - [ ] Better (roughly level 7)
-  - [ ] Best (roughly level 11)
-- [x] Checksums
-- [ ] Dictionaries
-
-## Dictionary Generation
-When the `dict_builder` feature is enabled, the `dictionary` module
-provides the ability to create new dictionaries. 
-
-On the `github-users` sample set, our implementation benchmarks within
-0.2% of the official implementation (as of commit 
-`09e52d07340acdb2e13817b066e8be6e424f7258`):
-```no_build
-uncompressed: 100.00% (7484607 bytes)
-no dict: 34.99% of original size (2618872 bytes)
-reference dict: 16.16% of no dict size (2195672 bytes smaller)
-our dict: 16.28% of no dict size (2192400 bytes smaller)
-```
-
-The dictionary generator only provides support for creating "raw
-content" dictionaries. Tagged dictionaries are currently unsupported.
-
-See <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#dictionary-format>
-for clarification.
-
-
 # How can you use it?
-
-## Compression
-
-The easiest is to use the provided `compress`/`compress_to_vec` functions
-
-```rust, no_run
-use ruzstd::encoding::{compress, compress_to_vec, CompressionLevel};
-let data: &[u8] = todo!();
-// Either
-let mut compressed = Vec::new();
-compress(data, &mut compressed, CompressionLevel::Fastest);
-// or
-let compressed = compress_to_vec(data, CompressionLevel::Fastest);
- ```
-
- Or you can use the `FrameDecoder` manually to compress data. This allows you to process encoded data while it is being encoded instead of collecting into a big vector.
 
 ## Decompression
 
@@ -118,11 +72,6 @@ given block count has been decoded or the decodebuffer has reached a certain siz
 
 1. More Performance optimizations
     1. sequence_decoding and reverse_bitreader::get_bits. Those account for about 50% of the whole time used in decoding
-    2. Matching suffixes. This accounts for >60% of the whole time used in encoding
-2. Implement encoder features
-    1. More levels
-    2. Dictionaries
-    3. Checksums
 
 ## Testing
 

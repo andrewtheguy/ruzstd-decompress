@@ -1,5 +1,4 @@
-//! Values and interfaces shared between the encoding side
-//! and the decoding side.
+//! Values from the format specification that the decoder shares between its parts.
 
 // --- FRAMES ---
 /// This magic number is included at the start of a single Zstandard frame
