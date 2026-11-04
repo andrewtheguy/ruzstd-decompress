@@ -19,6 +19,11 @@ pub struct HuffmanTable {
     /// table is built, so that a new decoder allocates nothing it may not use, then always
     /// `TABLE_SIZE` long, each build writing all of it.
     decode: Vec<Entry>,
+    /// The same codes two symbols to an entry where both fit in `MAX_MAX_NUM_BITS` bits (see
+    /// [`PairEntry`]), made from `decode` only when a block chooses it (see [`choose_pairs`]):
+    /// empty until then, and `pairs_built` says whether it is `decode`'s.
+    pairs: Vec<PairEntry>,
+    pairs_built: bool,
     /// The weight of a symbol is the number of occurences in a table.
     /// This value is used in constructing a binary tree referred to as
     /// a Huffman tree. Once this tree is constructed, it can be used to build the
@@ -41,6 +46,8 @@ impl HuffmanTable {
     pub fn new() -> HuffmanTable {
         HuffmanTable {
             decode: Vec::new(),
+            pairs: Vec::new(),
+            pairs_built: false,
 
             weights: Vec::with_capacity(256),
             max_num_bits: 0,
@@ -57,6 +64,7 @@ impl HuffmanTable {
         self.reset();
         self.decode.clear();
         self.decode.extend_from_slice(&other.decode);
+        self.pairs_built = false;
         self.weights.extend_from_slice(&other.weights);
         self.max_num_bits = other.max_num_bits;
         self.bits.extend_from_slice(&other.bits);
@@ -68,6 +76,7 @@ impl HuffmanTable {
     pub fn reset(&mut self) {
         self.weights.clear();
         self.max_num_bits = 0;
+        self.pairs_built = false;
         self.bits.clear();
         self.bit_ranks.clear();
         self.rank_indexes.clear();
@@ -235,6 +244,143 @@ impl HuffmanTable {
         self.decode_stream_n::<N>(br3, &mut out3[done..]);
     }
 
+    /// [`Self::decode_4_streams`], from the table of pairs when [`choose_pairs`] says it pays for
+    /// its build: `compressed_size` is the literals' size in the block, the table's description
+    /// included.
+    pub(crate) fn decode_4_streams_sized(
+        &mut self,
+        brs: &mut [BitReaderReversed<'_>; 4],
+        outs: [&mut [u8]; 4],
+        compressed_size: usize,
+    ) {
+        let regenerated: usize = outs.iter().map(|out| out.len()).sum();
+        if choose_pairs(regenerated, compressed_size) {
+            self.build_pairs();
+            self.decode_4_streams_pairs(brs, outs);
+        } else {
+            self.decode_4_streams(brs, outs);
+        }
+    }
+
+    /// Make the table of pairs from `decode`, unless it already is.
+    ///
+    /// An index's first symbol is `decode`'s entry for it; the bits after that symbol's code,
+    /// shifted to the top, index `decode` again for the second. That entry is the symbol whose
+    /// code those bits start with if its code is no longer than they are, which is when the two
+    /// codes together fit in the index.
+    fn build_pairs(&mut self) {
+        if self.pairs_built {
+            return;
+        }
+        if self.pairs.len() != TABLE_SIZE {
+            self.pairs.resize(TABLE_SIZE, PairEntry::default());
+        }
+        let single: &[Entry; TABLE_SIZE] = self
+            .decode
+            .as_slice()
+            .try_into()
+            .expect("a table is built before it decodes");
+        let pairs: &mut [PairEntry; TABLE_SIZE] =
+            self.pairs.as_mut_slice().try_into().expect("sized above");
+        for (index, pair) in pairs.iter_mut().enumerate() {
+            let first = single[index];
+            let second = single[(index << first.num_bits) & (TABLE_SIZE - 1)];
+            let both = first.num_bits + second.num_bits;
+            *pair = if both <= MAX_MAX_NUM_BITS {
+                PairEntry::new(first.symbol, second.symbol, both, 2)
+            } else {
+                PairEntry::new(first.symbol, 0, first.num_bits, 1)
+            };
+        }
+        self.pairs_built = true;
+    }
+
+    /// The table of pairs, as an array; only once [`Self::build_pairs`] has built it.
+    #[inline(always)]
+    fn pairs(&self) -> &[PairEntry; TABLE_SIZE] {
+        debug_assert!(self.pairs_built);
+        self.pairs
+            .as_slice()
+            .try_into()
+            .expect("the pairs are built before they decode")
+    }
+
+    /// Decode the one or two symbols at the top of `window` into `out` at `*at`, and shift their
+    /// bits out. Both bytes of the entry are written; the second is only kept, `*at` moved past
+    /// it, when the entry holds two symbols, else the next entry overwrites it.
+    #[inline(always)]
+    fn decode_pair_aligned(
+        pairs: &[PairEntry; TABLE_SIZE],
+        window: &mut u64,
+        out: &mut [u8; PAIRS_OUT],
+        at: &mut usize,
+    ) {
+        let entry = pairs[(*window >> (64 - MAX_MAX_NUM_BITS)) as usize];
+        out[*at..*at + 2].copy_from_slice(&entry.symbols);
+        *window <<= entry.num_bits;
+        *at += entry.len();
+    }
+
+    /// [`Self::decode_4_streams`] from the table of pairs, [`PAIRS_A_REFILL`] lookups a stream a
+    /// refill, while every stream has [`PAIRS_OUT`] bytes of output left to take them; the rest
+    /// one symbol at a time from `decode`.
+    fn decode_4_streams_pairs(&self, brs: &mut [BitReaderReversed<'_>; 4], outs: [&mut [u8]; 4]) {
+        let pairs = self.pairs();
+        let [out0, out1, out2, out3] = outs;
+        let [mut b0, mut b1, mut b2, mut b3] = brs.clone();
+        let (mut at0, mut at1, mut at2, mut at3) = (0, 0, 0, 0);
+        let can_refill = |b: [&BitReaderReversed<'_>; 4]| b.iter().all(|b| b.can_refill_fast());
+        if can_refill([&b0, &b1, &b2, &b3]) {
+            b0.ensure_bits_fast(57);
+            b1.ensure_bits_fast(57);
+            b2.ensure_bits_fast(57);
+            b3.ensure_bits_fast(57);
+            let (mut w0, mut w1, mut w2, mut w3) = (
+                b0.sentinel_window(),
+                b1.sentinel_window(),
+                b2.sentinel_window(),
+                b3.sentinel_window(),
+            );
+            // While every stream has the output a refill's lookups may write to.
+            while let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
+                room(out0, at0),
+                room(out1, at1),
+                room(out2, at2),
+                room(out3, at3),
+            ) {
+                let (mut d0, mut d1, mut d2, mut d3) = (0, 0, 0, 0);
+                for _ in 0..PAIRS_A_REFILL {
+                    Self::decode_pair_aligned(pairs, &mut w0, c0, &mut d0);
+                    Self::decode_pair_aligned(pairs, &mut w1, c1, &mut d1);
+                    Self::decode_pair_aligned(pairs, &mut w2, c2, &mut d2);
+                    Self::decode_pair_aligned(pairs, &mut w3, c3, &mut d3);
+                }
+                at0 += d0;
+                at1 += d1;
+                at2 += d2;
+                at3 += d3;
+                if !can_refill([&b0, &b1, &b2, &b3]) {
+                    break;
+                }
+                w0 = b0.refill_window_fast(w0);
+                w1 = b1.refill_window_fast(w1);
+                w2 = b2.refill_window_fast(w2);
+                w3 = b3.refill_window_fast(w3);
+            }
+            b0.consume_to_sentinel(w0);
+            b1.consume_to_sentinel(w1);
+            b2.consume_to_sentinel(w2);
+            b3.consume_to_sentinel(w3);
+        }
+
+        *brs = [b0, b1, b2, b3];
+        let [br0, br1, br2, br3] = brs;
+        self.decode_stream(br0, &mut out0[at0..]);
+        self.decode_stream(br1, &mut out1[at1..]);
+        self.decode_stream(br2, &mut out2[at2..]);
+        self.decode_stream(br3, &mut out3[at3..]);
+    }
+
     /// Read from `source` and decode the input, populating the huffman decoding table.
     ///
     /// Returns the number of bytes read.
@@ -242,6 +388,7 @@ impl HuffmanTable {
         // No table until this one is built, so that a block repeating a table after a failed
         // build is refused as having none, not decoded from half of one.
         self.max_num_bits = 0;
+        self.pairs_built = false;
         let bytes_used = self.read_weights(source)?;
         self.build_table_from_weights()?;
         Ok(bytes_used)
@@ -512,9 +659,159 @@ pub struct Entry {
     num_bits: u8,
 }
 
+/// An entry of the table of pairs: the one or two symbols an index starts with, and their codes'
+/// bits together.
+#[derive(Copy, Clone, Debug, Default)]
+struct PairEntry {
+    /// The first symbol, then the second, or anything when there is one.
+    symbols: [u8; 2],
+    num_bits: u8,
+    /// 1 when the entry holds two symbols, else 0.
+    has_second: u8,
+}
+
+impl PairEntry {
+    fn new(first: u8, second: u8, num_bits: u8, len: u8) -> PairEntry {
+        PairEntry {
+            symbols: [first, second],
+            num_bits,
+            has_second: len - 1,
+        }
+    }
+
+    /// How many symbols the entry holds, 1 or 2; masked so that the compiler knows, and the
+    /// stores of a refill's lookups need no bounds checks.
+    #[inline(always)]
+    fn len(self) -> usize {
+        1 + usize::from(self.has_second & 1)
+    }
+}
+
+/// Lookups a stream from the table of pairs between refills: each takes at most
+/// `MAX_MAX_NUM_BITS` bits, of the 56 a refill leaves.
+const PAIRS_A_REFILL: usize = 56 / MAX_MAX_NUM_BITS as usize;
+
+/// The output a stream needs left for a refill's lookups from the table of pairs: two bytes
+/// each, and every one written at most two past the last.
+const PAIRS_OUT: usize = 2 * PAIRS_A_REFILL;
+
+/// Whether the four streams of a block's literals decode faster from the table of pairs, its
+/// build included, than one symbol at a time: libzstd's `HUF_selectDecoder`, from the literals'
+/// size and how far they are compressed. The table of pairs costs more to build and saves more,
+/// the more of the codes are short, which is when the literals compress well.
+fn choose_pairs(regenerated: usize, compressed: usize) -> bool {
+    // libzstd's estimates, for each sixteenth of the ratio of the compressed size to the
+    // regenerated: the time to build each table, then to decode 256 bytes from it, for the
+    // table of single symbols and then of pairs.
+    const COSTS: [[(u32, u32); 2]; 16] = [
+        [(0, 0), (1, 1)],
+        [(0, 0), (1, 1)],
+        [(150, 216), (381, 119)],
+        [(170, 205), (514, 112)],
+        [(177, 199), (539, 110)],
+        [(197, 194), (644, 107)],
+        [(221, 192), (735, 107)],
+        [(256, 189), (881, 106)],
+        [(359, 188), (1167, 109)],
+        [(582, 187), (1570, 114)],
+        [(688, 187), (1712, 122)],
+        [(825, 186), (1965, 136)],
+        [(976, 185), (2131, 150)],
+        [(1180, 186), (2070, 175)],
+        [(1377, 185), (1731, 202)],
+        [(1412, 185), (1695, 202)],
+    ];
+    if regenerated == 0 {
+        return false;
+    }
+    let ratio = if compressed >= regenerated {
+        15
+    } else {
+        compressed * 16 / regenerated
+    };
+    let blocks = (regenerated >> 8) as u32;
+    let [(build1, decode1), (build2, decode2)] = COSTS[ratio];
+    let single = build1 + decode1 * blocks;
+    let pairs = build2 + decode2 * blocks;
+    // A small advantage to the single symbols' table, which is smaller, as libzstd gives it.
+    pairs + (pairs >> 5) < single
+}
+
+/// The [`PAIRS_OUT`] bytes of `out` from `at`, if it has them.
+#[inline(always)]
+fn room(out: &mut [u8], at: usize) -> Option<&mut [u8; PAIRS_OUT]> {
+    out.get_mut(at..)?.first_chunk_mut()
+}
+
 /// Assert that the provided value is greater than zero, and returns the
 /// 32 - the number of leading zeros
 fn highest_bit_set(x: u32) -> u32 {
     assert!(x > 0);
     u32::BITS - x.leading_zeros()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The table of pairs decodes what the single symbols' table does, bit for bit, whatever
+    /// the code, the streams' lengths and the output's.
+    #[test]
+    fn pairs_decode_as_singles() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..2000 {
+            // A complete prefix code: leaves split until there are enough, none over 11 bits.
+            let leaves = 2 + next(60);
+            let mut lengths = alloc::vec![0u8];
+            while lengths.len() < leaves {
+                let at = next(lengths.len());
+                if lengths[at] < MAX_MAX_NUM_BITS {
+                    lengths[at] += 1;
+                    lengths.push(lengths[at]);
+                }
+            }
+            let max_bits = *lengths.iter().max().unwrap();
+            // Given to distinct symbols up to 128, the highest one's weight left implied.
+            let mut weights = alloc::vec![0u8; 129];
+            let mut symbols: Vec<usize> = (0..129).collect();
+            for &len in &lengths {
+                let symbol = symbols.swap_remove(next(symbols.len()));
+                weights[symbol] = max_bits + 1 - len;
+            }
+            let last = weights.iter().rposition(|&w| w > 0).unwrap();
+            let mut description = alloc::vec![127 + last as u8];
+            for two in weights[..last].chunks(2) {
+                description.push(two[0] << 4 | two.get(1).copied().unwrap_or(0));
+            }
+
+            let mut table = HuffmanTable::new();
+            table.build_decoder(&description).unwrap();
+            assert_eq!(table.max_num_bits, max_bits);
+            table.build_pairs();
+
+            let sources: [Vec<u8>; 4] =
+                core::array::from_fn(|_| (0..next(200)).map(|_| next(256) as u8).collect());
+            let lens: [usize; 4] = core::array::from_fn(|_| next(400));
+            let readers = || sources.each_ref().map(|s| BitReaderReversed::new(s));
+            let mut singles = lens.map(|len| alloc::vec![0u8; len]);
+            let mut pairs = singles.clone();
+            let mut by_singles = readers();
+            let mut by_pairs = readers();
+            table.decode_4_streams(
+                &mut by_singles,
+                singles.each_mut().map(|v| v.as_mut_slice()),
+            );
+            table.decode_4_streams_pairs(&mut by_pairs, pairs.each_mut().map(|v| v.as_mut_slice()));
+            assert_eq!(singles, pairs);
+            for (a, b) in by_singles.iter().zip(&by_pairs) {
+                assert_eq!(a.bits_remaining(), b.bits_remaining());
+            }
+        }
+    }
 }

@@ -140,6 +140,20 @@ impl<'s> BitReaderReversed<'s> {
         debug_assert!(self.bits_consumed <= 63);
     }
 
+    /// [`Self::consume_to_sentinel`], then the refill of `ensure_bits_fast(57)` without its
+    /// check, then the next [`Self::sentinel_window`]: only while [`Self::can_refill_fast`]. A
+    /// refill that has no whole byte to move by reloads the same bytes.
+    #[inline(always)]
+    pub fn refill_window_fast(&mut self, window: u64) -> u64 {
+        let consumed = window.trailing_zeros() as usize;
+        debug_assert!(consumed <= 63 && self.index >= 8);
+        self.index -= consumed / 8;
+        self.bits_consumed = (consumed % 8) as u8;
+        self.bit_container =
+            u64::from_le_bytes((&self.source[self.index..][..8]).try_into().unwrap());
+        (self.bit_container | 1) << self.bits_consumed
+    }
+
     /// Make sure at least `n` bits (at most 57) can be peeked and consumed without refilling.
     #[inline(always)]
     pub fn ensure_bits(&mut self, n: u8) {

@@ -116,7 +116,7 @@ fn decompress_literals(
         ];
         scratch
             .table
-            .decode_4_streams(&mut brs, [out0, out1, out2, out3]);
+            .decode_4_streams_sized(&mut brs, [out0, out1, out2, out3], compressed_size);
         for br in &brs {
             check_stream_end(br, max_num_bits)?;
         }
