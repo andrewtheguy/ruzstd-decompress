@@ -414,7 +414,7 @@ const LL_DEFAULT_ACC_LOG: u8 = 6;
 /// If [ModeType::Predefined] is selected for a symbol type, its FSE decoding
 /// table is generated using a predefined distribution table.
 ///
-/// https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#literals-length
+/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#literals-length>
 const LITERALS_LENGTH_DEFAULT_DISTRIBUTION: [i32; 36] = [
     4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
     -1, -1, -1, -1,
@@ -425,7 +425,7 @@ const ML_DEFAULT_ACC_LOG: u8 = 6;
 /// If [ModeType::Predefined] is selected for a symbol type, its FSE decoding
 /// table is generated using a predefined distribution table.
 ///
-/// https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#match-length
+/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#match-length>
 const MATCH_LENGTH_DEFAULT_DISTRIBUTION: [i32; 53] = [
     1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1,
@@ -436,7 +436,7 @@ const OF_DEFAULT_ACC_LOG: u8 = 5;
 /// If [ModeType::Predefined] is selected for a symbol type, its FSE decoding
 /// table is generated using a predefined distribution table.
 ///
-/// https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#match-length
+/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#offset-codes>
 const OFFSET_DEFAULT_DISTRIBUTION: [i32; 29] = [
     1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
 ];
@@ -452,13 +452,13 @@ fn test_ll_default() {
         .unwrap();
 
     #[cfg(feature = "std")]
-    for idx in 0..table.decode.len() {
+    for (idx, entry) in table.decode.iter().enumerate() {
         std::println!(
             "{:3}: {:3} {:3} {:3}",
             idx,
-            table.decode[idx].symbol,
-            table.decode[idx].num_bits,
-            table.decode[idx].base_line
+            entry.symbol,
+            entry.num_bits,
+            entry.base_line
         );
     }
 

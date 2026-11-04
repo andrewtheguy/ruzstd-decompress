@@ -1,0 +1,1 @@
+- After Rust changes run `cargo test` and `cargo clippy --all-targets -- -D warnings`.

@@ -55,8 +55,10 @@ enum Commands {
     Decompress {
         /// .zst archive to decompress
         input_file: PathBuf,
-        /// Where the compressed file is written
+        /// Where the decompressed file is written
         /// [default: <ARCHIVE_NAME>]
+        // The doc comment doubles as clap help text, so the brackets are not a doc link.
+        #[allow(rustdoc::broken_intra_doc_links)]
         output_file: Option<PathBuf>,
     },
 }
@@ -142,6 +144,18 @@ fn decompress(input: PathBuf, output: PathBuf) -> color_eyre::Result<()> {
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(decoder_input)?;
 
     std::io::copy(&mut decoder, &mut output)?;
+
+    let frame_decoder = decoder.into_frame_decoder();
+    if let Some(expected) = frame_decoder.get_checksum_from_data() {
+        let calculated = frame_decoder
+            .get_calculated_checksum()
+            .wrap_err("checksum present in frame but could not be calculated")?;
+        if expected != calculated {
+            color_eyre::eyre::bail!(
+                "checksum mismatch: frame contains {expected:#010x}, but decoded data hashes to {calculated:#010x}"
+            );
+        }
+    }
 
     info!(
         "inflated {} ——> {}",
