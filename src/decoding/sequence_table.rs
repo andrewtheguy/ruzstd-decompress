@@ -32,16 +32,36 @@ pub enum SeqKind {
     Offset,
 }
 
+/// Room for every kind's codes (at most 53, the match lengths'), a power of two, so that a code
+/// masked by `CODES - 1` indexes the values with no bounds check.
+const CODES: usize = 64;
+
 impl SeqKind {
-    /// The value of `code` before its extra bits are added, and how many extra bits it has.
-    /// `code` is at most the kind's largest, which the tables are built to hold to.
-    fn code_value(self, code: u8) -> (u32, u8) {
-        let code = code as usize;
+    /// Each code's value before its extra bits are added, and how many extra bits it has; the
+    /// codes past the kind's largest are 0.
+    fn values(self) -> (&'static [u32; CODES], &'static [u8; CODES]) {
         match self {
-            SeqKind::LiteralLength => (LL_BASE[code], LL_BITS[code]),
-            SeqKind::MatchLength => (ML_BASE[code], ML_BITS[code]),
-            SeqKind::Offset => (1 << code, code as u8),
+            SeqKind::LiteralLength => (&LL_BASE, &LL_BITS),
+            SeqKind::MatchLength => (&ML_BASE, &ML_BITS),
+            SeqKind::Offset => (&OF_BASE, &OF_BITS),
         }
+    }
+
+    /// How many codes the kind has.
+    fn codes(self) -> usize {
+        match self {
+            SeqKind::LiteralLength => LL_CODES,
+            SeqKind::MatchLength => ML_CODES,
+            SeqKind::Offset => OF_CODES,
+        }
+    }
+
+    /// The value of `code` before its extra bits are added, and how many extra bits it has.
+    /// `code` is at most the kind's largest.
+    fn code_value(self, code: u8) -> (u32, u8) {
+        let (base, bits) = self.values();
+        let code = code as usize & (CODES - 1);
+        (base[code], bits[code])
     }
 }
 
@@ -117,6 +137,12 @@ impl SeqTable {
     ) -> Result<(), FSETableError> {
         self.accuracy_log = None;
         self.holds_predefined = false;
+        if probabilities.len() > kind.codes() {
+            return Err(FSETableError::TooManySymbols {
+                got: probabilities.len(),
+            });
+        }
+        let (base, bits) = kind.values();
         self.sized();
         let entries: &mut [SeqEntry; SIZE] = self
             .entries
@@ -127,11 +153,11 @@ impl SeqTable {
             acc_log,
             probabilities,
             |state, code, nb_bits, next_state| {
-                let (base_value, nb_add_bits) = kind.code_value(code);
+                let code = code as usize & (CODES - 1);
                 entries[state & (SIZE - 1)] = SeqEntry {
-                    base_value,
+                    base_value: base[code],
                     next_state: next_state as u16,
-                    nb_add_bits,
+                    nb_add_bits: bits[code],
                     nb_bits,
                 };
             },
@@ -182,11 +208,14 @@ impl Default for SeqTable {
 /// Literal length codes' values and extra bits.
 ///
 /// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#literals-length-codes>
-const LL_BASE: [u32; 36] = [
+const LL_CODES: usize = 36;
+const LL_BASE: [u32; CODES] = padded(LL_BASE_LISTED);
+const LL_BITS: [u8; CODES] = padded_bits(LL_BITS_LISTED);
+const LL_BASE_LISTED: [u32; LL_CODES] = [
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64,
     128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 ];
-const LL_BITS: [u8; 36] = [
+const LL_BITS_LISTED: [u8; LL_CODES] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11,
     12, 13, 14, 15, 16,
 ];
@@ -194,15 +223,61 @@ const LL_BITS: [u8; 36] = [
 /// Match length codes' values and extra bits.
 ///
 /// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#match-length-codes>
-const ML_BASE: [u32; 53] = [
+const ML_CODES: usize = 53;
+const ML_BASE: [u32; CODES] = padded(ML_BASE_LISTED);
+const ML_BITS: [u8; CODES] = padded_bits(ML_BITS_LISTED);
+const ML_BASE_LISTED: [u32; ML_CODES] = [
     3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
     28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027,
     2051, 4099, 8195, 16387, 32771, 65539,
 ];
-const ML_BITS: [u8; 53] = [
+const ML_BITS_LISTED: [u8; ML_CODES] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 ];
+
+/// Offset codes' values and extra bits: code `n` is `1 << n` with `n` extra bits.
+const OF_CODES: usize = 32;
+const OF_BASE: [u32; CODES] = {
+    let mut base = [0; CODES];
+    let mut code = 0;
+    while code < OF_CODES {
+        base[code] = 1 << code;
+        code += 1;
+    }
+    base
+};
+const OF_BITS: [u8; CODES] = {
+    let mut bits = [0; CODES];
+    let mut code = 0;
+    while code < OF_CODES {
+        bits[code] = code as u8;
+        code += 1;
+    }
+    bits
+};
+
+/// A kind's listed values, followed by zeros up to [`CODES`].
+const fn padded<const N: usize>(listed: [u32; N]) -> [u32; CODES] {
+    let mut out = [0; CODES];
+    let mut code = 0;
+    while code < N {
+        out[code] = listed[code];
+        code += 1;
+    }
+    out
+}
+
+/// [`padded`], for the extra bits.
+const fn padded_bits<const N: usize>(listed: [u8; N]) -> [u8; CODES] {
+    let mut out = [0; CODES];
+    let mut code = 0;
+    while code < N {
+        out[code] = listed[code];
+        code += 1;
+    }
+    out
+}
 
 /// The predefined distributions, used when a block's mode is [ModeType::Predefined].
 ///

@@ -1,4 +1,4 @@
-use crate::bit_io::{BitReader, BitReaderReversed};
+use crate::bit_io::{BitReaderReversed, GetBitsError};
 use crate::decoding::errors::{FSEDecoderError, FSETableError};
 use alloc::vec::Vec;
 
@@ -174,92 +174,115 @@ impl FSETable {
         )
     }
 
-    /// Read the accuracy log and the probability table from the source and return the number of bytes
-    /// read. If the size of the table is larger than the provided `max_log`, return an error.
+    /// Read the accuracy log and the probabilities from `source`, as libzstd reads them
+    /// (`FSE_readNCount`), and return how many bytes they took. If the table is larger than
+    /// `max_log` allows, return an error.
     fn read_probabilities(&mut self, source: &[u8], max_log: u8) -> Result<usize, FSETableError> {
-        self.symbol_probabilities.clear(); //just clear, we will fill a probability for each entry anyways. No need to force new allocs here
+        let probabilities = &mut self.symbol_probabilities;
+        probabilities.clear();
+        let most = self.max_symbol as usize + 1;
+        let source_bits = source.len() * 8;
+        if source_bits < 4 {
+            return Err(FSETableError::GetBitsError(
+                GetBitsError::NotEnoughRemainingBits {
+                    requested: 4,
+                    remaining: source_bits,
+                },
+            ));
+        }
 
-        let mut br = BitReader::new(source);
-        self.accuracy_log = ACC_LOG_OFFSET + (br.get_bits(4)? as u8);
-        if self.accuracy_log > max_log {
+        let accuracy_log = ACC_LOG_OFFSET + (bits_at(source, 0) & 0xF) as u8;
+        self.accuracy_log = accuracy_log;
+        if accuracy_log > max_log {
             return Err(FSETableError::AccLogTooBig {
-                got: self.accuracy_log,
+                got: accuracy_log,
                 max: max_log,
             });
         }
-        if self.accuracy_log == 0 {
-            return Err(FSETableError::AccLogIsZero);
-        }
 
-        let probability_sum = 1 << self.accuracy_log;
-        let mut probability_counter = 0;
-
-        while probability_counter < probability_sum {
-            let max_remaining_value = probability_sum - probability_counter + 1;
-            let bits_to_read = highest_bit_set(max_remaining_value);
-
-            let unchecked_value = br.get_bits(bits_to_read as usize)? as u32;
-
-            let low_threshold = ((1 << bits_to_read) - 1) - (max_remaining_value);
-            let mask = (1 << (bits_to_read - 1)) - 1;
-            let small_value = unchecked_value & mask;
-
-            let value = if small_value < low_threshold {
-                br.return_bits(1);
-                small_value
-            } else if unchecked_value > mask {
-                unchecked_value - low_threshold
+        // What is left of the table's states, plus one: a value is at most this, and is read
+        // from `num_bits` bits, or one fewer for the smallest ones. `threshold` is the largest
+        // power of two not above `remaining`, `num_bits` one more than its log; both only fall,
+        // a step at a time, so that no value waits on counting the bits it is read from.
+        let sum = 1u32 << accuracy_log;
+        let mut remaining = sum + 1;
+        let mut threshold = sum;
+        let mut num_bits = accuracy_log as usize + 1;
+        let mut at = 4;
+        while remaining > 1 {
+            // The bits are read past the source's end as zeroes, which reads every
+            // probability as "less than one" and ends the loop; the end is checked after it.
+            let window = bits_at(source, at) as u32;
+            let max = (2 * threshold - 1) - remaining;
+            let value = if window & (threshold - 1) < max {
+                at += num_bits - 1;
+                window & (threshold - 1)
             } else {
-                unchecked_value
-            };
-            //println!("{}, {}, {}", self.symbol_probablilities.len(), unchecked_value, value);
-
-            let prob = (value as i32) - 1;
-
-            self.symbol_probabilities.push(prob);
-            if prob != 0 {
-                if prob > 0 {
-                    probability_counter += prob as u32;
+                at += num_bits;
+                let value = window & (2 * threshold - 1);
+                if value >= threshold {
+                    value - max
                 } else {
-                    // probability -1 counts as 1
-                    assert!(prob == -1);
-                    probability_counter += 1;
+                    value
                 }
-            } else {
-                //fast skip further zero probabilities
+            };
+            let prob = value as i32 - 1;
+            probabilities.push(prob);
+            if prob == 0 {
+                // More zeros, 3 to each 2 bits read until they are not 3.
                 loop {
-                    let skip_amount = br.get_bits(2)? as usize;
-
-                    self.symbol_probabilities
-                        .resize(self.symbol_probabilities.len() + skip_amount, 0);
-                    if skip_amount != 3 {
+                    let repeat = (bits_at(source, at) & 3) as usize;
+                    at += 2;
+                    let len = probabilities.len() + repeat;
+                    if len > most {
+                        return Err(FSETableError::TooManySymbols { got: len });
+                    }
+                    probabilities.resize(len, 0);
+                    if repeat != 3 {
                         break;
                     }
                 }
+            } else {
+                // a probability of -1 counts as 1
+                remaining -= prob.unsigned_abs();
+                while remaining < threshold {
+                    num_bits -= 1;
+                    threshold >>= 1;
+                }
+            }
+            if probabilities.len() > most {
+                return Err(FSETableError::TooManySymbols {
+                    got: probabilities.len(),
+                });
             }
         }
-
-        if probability_counter != probability_sum {
-            return Err(FSETableError::ProbabilityCounterMismatch {
-                got: probability_counter,
-                expected_sum: probability_sum,
-                symbol_probabilities: self.symbol_probabilities.clone(),
-            });
+        if at > source_bits {
+            return Err(FSETableError::GetBitsError(
+                GetBitsError::NotEnoughRemainingBits {
+                    requested: at,
+                    remaining: source_bits,
+                },
+            ));
         }
-        if self.symbol_probabilities.len() > self.max_symbol as usize + 1 {
-            return Err(FSETableError::TooManySymbols {
-                got: self.symbol_probabilities.len(),
-            });
-        }
-
-        let bytes_read = if br.bits_read().is_multiple_of(8) {
-            br.bits_read() / 8
-        } else {
-            (br.bits_read() / 8) + 1
-        };
-
-        Ok(bytes_read)
+        Ok(at.div_ceil(8))
     }
+}
+
+/// The bits of `source` from bit `at` on, the first the lowest: at least 56 of them, zeroes
+/// past its end.
+#[inline(always)]
+fn bits_at(source: &[u8], at: usize) -> u64 {
+    let byte = at / 8;
+    let word = match source.get(byte..byte + 8) {
+        Some(bytes) => u64::from_le_bytes(bytes.try_into().unwrap()),
+        None => {
+            let rest = source.get(byte..).unwrap_or(&[]);
+            let mut bytes = [0; 8];
+            bytes[..rest.len()].copy_from_slice(rest);
+            u64::from_le_bytes(bytes)
+        }
+    };
+    word >> (at % 8)
 }
 
 /// Work out the states of the table of `probabilities`, of `1 << acc_log` states, and hand
@@ -289,25 +312,24 @@ pub(crate) fn build_states(
         });
     }
     let table_size = 1 << acc_log;
-    let mut symbols = [0u8; MAX_TABLE_SIZE];
-    let symbols = &mut symbols[..table_size];
 
-    // Each symbol's next state, and the "less than one" symbols at the top of the table.
+    // Each symbol's next state; a "less than one" symbol has one state, at the top of the
+    // table, so those take the states from `high` up.
     let mut next = [0u16; 256];
     let mut high = table_size;
     for (symbol, &prob) in probabilities.iter().enumerate() {
         if prob == -1 {
             high -= 1;
-            symbols[high] = symbol as u8;
             next[symbol] = 1;
         } else {
             next[symbol] = prob.max(0) as u16;
         }
     }
 
-    // The other symbols, spread over the rest in a semi-random order: first laid out in a
-    // row, a symbol's run written 8 bytes at a time, then placed one by one, so neither step
-    // has a loop as long as a symbol's probability.
+    // The other symbols, spread over the rest in a semi-random order: laid out in a row, a
+    // symbol's run written 8 bytes at a time, so that no loop is as long as a symbol's
+    // probability, and the row's `k`th symbol given the `k`th position of a walk round the
+    // table by `step`, past the states from `high` up.
     let mut row = [0u8; MAX_TABLE_SIZE + 8];
     let mut end = 0;
     for (symbol, &prob) in probabilities.iter().enumerate() {
@@ -324,23 +346,47 @@ pub(crate) fn build_states(
     }
     let mask = table_size - 1;
     let step = (table_size >> 1) + (table_size >> 3) + 3;
-    let mut position = 0;
-    for &symbol in &row[..high] {
-        symbols[position] = symbol;
-        position = (position + step) & mask;
-        while position >= high {
-            // everything from `high` up is taken
-            position = (position + step) & mask;
-        }
-    }
 
     // Each state's bits and base, from the symbol's states in table order.
-    for (index, &symbol) in symbols.iter().enumerate() {
+    let mut emit = |index: usize, symbol: u8| {
         let next = &mut next[symbol as usize];
         let x = u32::from(*next);
         *next += 1;
         let num_bits = acc_log - (u32::BITS - 1 - x.leading_zeros()) as u8;
         state(index, symbol, num_bits, (x << num_bits) - table_size as u32);
+    };
+    if high == table_size {
+        // The walk skips no state, so its `k`th position is `k * step` round the table, and
+        // state `u` is given the row's symbol at `u` times the inverse of `step` (odd, so
+        // there is one) round the table: no walk at all.
+        let inverse = inverse_mod_power_of_two(step) & mask;
+        let mut k = 0;
+        for index in 0..table_size {
+            emit(index, row[k & (MAX_TABLE_SIZE - 1)]);
+            k = (k + inverse) & mask;
+        }
+    } else {
+        let mut symbols = [0u8; MAX_TABLE_SIZE];
+        let symbols = &mut symbols[..table_size];
+        let mut top = table_size;
+        for (symbol, &prob) in probabilities.iter().enumerate() {
+            if prob == -1 {
+                top -= 1;
+                symbols[top] = symbol as u8;
+            }
+        }
+        let mut position = 0;
+        for &symbol in &row[..high] {
+            symbols[position] = symbol;
+            position = (position + step) & mask;
+            while position >= high {
+                // everything from `high` up is taken
+                position = (position + step) & mask;
+            }
+        }
+        for (index, &symbol) in symbols.iter().enumerate() {
+            emit(index, symbol);
+        }
     }
     Ok(())
 }
@@ -365,14 +411,26 @@ const MAX_TABLE_SIZE: usize = 1 << MAX_ACC_LOG;
 /// `Accuracy_Log`
 const ACC_LOG_OFFSET: u8 = 5;
 
-fn highest_bit_set(x: u32) -> u32 {
-    assert!(x > 0);
-    u32::BITS - x.leading_zeros()
+/// The `y` with `x * y == 1` round any power of two up to `1 << 64`, for an odd `x`: each step
+/// of Newton's doubles the low bits that are right, from the three that `x` itself gets right.
+fn inverse_mod_power_of_two(x: usize) -> usize {
+    debug_assert!(x % 2 == 1);
+    let mut y = x;
+    for _ in 0..5 {
+        y = y.wrapping_mul(2usize.wrapping_sub(x.wrapping_mul(y)));
+    }
+    y
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bit_io::BitReader;
+
+    fn highest_bit_set(x: u32) -> u32 {
+        assert!(x > 0);
+        u32::BITS - x.leading_zeros()
+    }
 
     // The table as built before, a state at a time, as a model.
 
@@ -457,15 +515,18 @@ mod tests {
             seed ^= seed << 17;
             (seed % u64::from(n)) as u32
         };
-        for _ in 0..3000 {
+        let mut without_less_than_one = 0;
+        for round in 0..3000 {
             let acc_log = 5 + next(5) as u8;
-            // Probabilities that sum to the table's size, a "less than one" counting one.
+            // Probabilities that sum to the table's size, a "less than one" counting one; every
+            // other table has none, which spreads its symbols another way.
+            let less_than_one = round % 2 == 0;
             let mut left = 1i32 << acc_log;
             let mut probs = Vec::new();
             while left > 0 {
                 let prob = match next(6) {
                     0 => 0,
-                    1 => -1,
+                    1 if less_than_one => -1,
                     2 => left,
                     _ => 1 + next(left as u32) as i32,
                 };
@@ -483,6 +544,119 @@ mod tests {
                 .map(|e| (e.symbol, e.num_bits, e.base_line))
                 .collect();
             assert_eq!(got, model(acc_log, &probs), "{acc_log} {probs:?}");
+            without_less_than_one += usize::from(!probs.contains(&-1));
+        }
+        assert!(without_less_than_one > 1500, "{without_less_than_one}");
+    }
+
+    /// The reader as it was, a bit reader's `get_bits` for each value; but reading on past
+    /// the source's end into zeroes, and checking the end once done, since the last value may
+    /// take fewer bits than are read for it.
+    fn read_model(source: &[u8], max_log: u8, most: usize) -> Option<(u8, Vec<i32>, usize)> {
+        let mut padded = source.to_vec();
+        padded.resize(source.len() + 128, 0);
+        let mut br = BitReader::new(&padded);
+        let accuracy_log = ACC_LOG_OFFSET + (br.get_bits(4).ok()? as u8);
+        if accuracy_log > max_log {
+            return None;
+        }
+        let probability_sum = 1 << accuracy_log;
+        let mut probability_counter = 0;
+        let mut probs = Vec::new();
+        while probability_counter < probability_sum {
+            let max_remaining_value = probability_sum - probability_counter + 1;
+            let bits_to_read = highest_bit_set(max_remaining_value);
+            let unchecked_value = br.get_bits(bits_to_read as usize).ok()? as u32;
+            let low_threshold = ((1 << bits_to_read) - 1) - (max_remaining_value);
+            let mask = (1 << (bits_to_read - 1)) - 1;
+            let small_value = unchecked_value & mask;
+            let value = if small_value < low_threshold {
+                br.return_bits(1);
+                small_value
+            } else if unchecked_value > mask {
+                unchecked_value - low_threshold
+            } else {
+                unchecked_value
+            };
+            let prob = (value as i32) - 1;
+            probs.push(prob);
+            if prob != 0 {
+                probability_counter += prob.unsigned_abs();
+            } else {
+                loop {
+                    let skip_amount = br.get_bits(2).ok()? as usize;
+                    probs.resize(probs.len() + skip_amount, 0);
+                    if skip_amount != 3 {
+                        break;
+                    }
+                }
+            }
+            if probs.len() > most {
+                return None;
+            }
+        }
+        if source.is_empty() || br.bits_read() > source.len() * 8 {
+            return None;
+        }
+        Some((accuracy_log, probs, br.bits_read().div_ceil(8)))
+    }
+
+    /// Random descriptions, and real ones cut short, read as the old reader read them.
+    #[test]
+    fn read_matches_model() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut read = 0;
+        for round in 0..200_000 {
+            let len = (next() % 80) as usize;
+            let mut source: Vec<u8> = (0..len).map(|_| next() as u8).collect();
+            // Small accuracy logs, as the sequences' tables have, and runs of zero bytes,
+            // which are runs of zero probabilities.
+            if let Some(first) = source.first_mut() {
+                *first &= if round % 2 == 0 { 0xF3 } else { 0xFF };
+            }
+            if round % 3 == 0 {
+                for byte in source.iter_mut().skip(1).step_by(3) {
+                    *byte = 0;
+                }
+            }
+            let (max_log, most) = [(9, 36), (9, 53), (8, 32), (6, 256)][round % 4];
+            let mut table = FSETable::new((most - 1) as u8);
+            let got = table
+                .read_probabilities(&source, max_log)
+                .ok()
+                .map(|bytes| {
+                    (
+                        table.accuracy_log,
+                        table.symbol_probabilities.clone(),
+                        bytes,
+                    )
+                });
+            assert_eq!(got, read_model(&source, max_log, most), "{source:?}");
+            read += usize::from(got.is_some());
+        }
+        assert!(read > 20_000, "{read}");
+    }
+
+    /// The inverse of any odd number, round every table size and more.
+    #[test]
+    fn inverse_of_odd_numbers() {
+        for x in (1..20_000usize).step_by(2) {
+            let y = inverse_mod_power_of_two(x);
+            assert_eq!(x.wrapping_mul(y), 1, "{x}");
+        }
+        for acc_log in 5..=MAX_ACC_LOG {
+            let size = 1usize << acc_log;
+            let step = (size >> 1) + (size >> 3) + 3;
+            assert_eq!(
+                (step * (inverse_mod_power_of_two(step) & (size - 1))) % size,
+                1
+            );
         }
     }
 }
