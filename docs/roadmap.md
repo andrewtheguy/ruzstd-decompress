@@ -1,16 +1,16 @@
 # Roadmap
 
-What to make faster next, most promising first, as of 2026-11-04 (after the
-table of pairs' loop in wasm, [`benchmarks/README.md`](benchmarks/README.md)).
+What to make faster next, most promising first, as of 2026-11-04 (after
+hashing only frames with a checksum, [`benchmarks/README.md`](benchmarks/README.md)).
 The figures are from `perf` profiles on lab1, natively unless they say wasm;
 zDesk's workload is the tiles, decoded in WebAssembly. The crate stays free of
 unsafe code.
 
-By geomean natively, libzstd takes 1.03 times ruzstd's time, with the harness
+By geomean natively, libzstd takes 1.07 times ruzstd's time, with the harness
 keeping its decoders across tiles as zDesk's page does. ruzstd is faster on
-the still, drag, browser and terminal tiles; uncover is 1.1–1.3 times slower,
-video and mixed 1.4 times, and silesia 1.5 times. In wasm, video takes
-1.23–1.26 times its native time.
+the still, drag, browser and terminal tiles; uncover is 1.07–1.18 times
+slower, video and mixed 1.3–1.4 times, and silesia 1.5–1.6 times. In wasm,
+video takes 1.23–1.26 times its native time.
 
 ## 1. The sequences, again
 
@@ -53,12 +53,15 @@ which the small tiles and silesia mostly use, with the multiplication too
 
 ## 4. Smaller
 
-- The frame checksum (XXH64, the `twox-hash` crate) is 3–5% of video.
-- The harness's own function (`decode_bench`'s `replay`) is 19% of uncover,
-  natively and in wasm, and about 6% of video natively and 10% in wasm: most likely the copy
-  of the output out of the decoder into the caller's `Vec`, as zDesk's page
-  makes it too; not yet confirmed. In V8 it runs in the baseline tier
-  (Liftoff) throughout, being called once a pass.
+- The frame checksum (XXH64, the `twox-hash` crate) is made only for frames
+  with a checksum now; of the workloads, only the general corpora's have one
+  (the `zstd` command's default), none of the tiles'.
+- The harness's own function (`decode_bench`'s `replay`) is mostly decoder
+  code inlined into it: natively on uncover, 14.7% of its 15.3% is the
+  sequences' decoding (`decode_sequences`), which counts with item 1. In V8
+  it is about 10% of video and runs in the baseline tier (Liftoff)
+  throughout, being called once a pass: what of that is the decoder's is not
+  yet known.
 - The ring buffer's lazy initialisation cost silesia 2–4% in wasm in the
   quick checks before (not in a full run), with nothing in V8's profile to
   show where.
