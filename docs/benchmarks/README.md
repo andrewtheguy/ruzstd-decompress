@@ -736,7 +736,8 @@ and results.
    2026-11-04. It is text, which Silesia has, and it was the slowest workload.
 3. **The variants**: a tree each in `variants/A`… (a `git archive` of the
    commit, with the patches above), then [`build.sh`](harness/build.sh) `A B …`
-   on the timing machine; [`libzstd/`](harness/libzstd) is built the same way
+   on the timing machine, with the harness of the variant's own tree where it has
+   one; [`libzstd/`](harness/libzstd) is built the same way
    into `bin/Z-native`.
 4. [`run.sh`](harness/run.sh) `OUT.jsonl VARIANT…` (wasm through
    [`run-wasi.mjs`](harness/run-wasi.mjs); `PLATFORMS=native` for native alone),

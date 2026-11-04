@@ -275,14 +275,12 @@ impl FrameDecoder {
         state.check_sum
     }
 
-    /// Returns the checksum that was calculated while decoding.
-    /// Only a sensible value after all decoded bytes have been collected/read from the FrameDecoder
+    /// The checksum of every byte decoded so far, collected or not: once the frame is
+    /// finished, what its checksum should be.
     #[cfg(feature = "hash")]
     pub fn get_calculated_checksum(&self) -> Option<u32> {
-        use core::hash::Hasher;
-
         let state = self.state.as_ref()?;
-        let cksum_64bit = state.decoder_scratch.buffer.hash.finish();
+        let cksum_64bit = state.decoder_scratch.buffer.checksum();
         //truncate to lower 32bit because reasons...
         Some(cksum_64bit as u32)
     }
@@ -394,64 +392,29 @@ impl FrameDecoder {
         Ok(state.frame_finished)
     }
 
-    /// Collect bytes and retain window_size bytes while decoding is still going on.
-    /// After decoding of the frame (is_finished() == true) has finished it will collect all remaining bytes
+    /// Every byte decoded and not yet collected, as soon as its block is decoded. The window
+    /// that blocks to come may copy from is kept apart, so collecting never holds bytes back:
+    /// a frame that is a stream flushed block by block gives each block's bytes when it is
+    /// decoded. `None` if there is no frame.
     pub fn collect(&mut self) -> Option<Vec<u8>> {
-        let finished = self.is_finished();
         let state = self.state.as_mut()?;
-        if finished {
-            Some(state.decoder_scratch.buffer.drain())
-        } else {
-            state.decoder_scratch.buffer.drain_to_window_size()
-        }
+        Some(state.decoder_scratch.buffer.collect())
     }
 
-    /// Collect bytes and retain window_size bytes while decoding is still going on.
-    /// After decoding of the frame (is_finished() == true) has finished it will collect all remaining bytes
+    /// Write every byte decoded and not yet collected to `w`, as [`FrameDecoder::collect`]
+    /// gives them, and return how many.
     pub fn collect_to_writer(&mut self, w: impl Write) -> Result<usize, Error> {
-        let finished = self.is_finished();
-        let state = match &mut self.state {
-            None => return Ok(0),
-            Some(s) => s,
-        };
-        if finished {
-            state.decoder_scratch.buffer.drain_to_writer(w)
-        } else {
-            state.decoder_scratch.buffer.drain_to_window_size_writer(w)
+        match &mut self.state {
+            None => Ok(0),
+            Some(state) => state.decoder_scratch.buffer.collect_to_writer(w),
         }
     }
 
-    /// Every byte decoded and not yet collected, in order, as two slices, without
-    /// collecting any: the window_size bytes that [`FrameDecoder::collect`] retains
-    /// while decoding is still going on are among them.
-    ///
-    /// For a frame that is a stream flushed block by block, whose newest bytes are
-    /// wanted as soon as their blocks are decoded rather than once the frame ends:
-    /// read them here, then collect to keep the buffer at the window's size.
-    pub fn peek(&self) -> (&[u8], &[u8]) {
-        match &self.state {
-            None => (&[], &[]),
-            Some(state) => state.decoder_scratch.buffer.as_slices(),
-        }
-    }
-
-    /// How many bytes can currently be collected from the decodebuffer, while decoding is going on this will be lower than the actual decodbuffer size
-    /// because window_size bytes need to be retained for decoding.
-    /// After decoding of the frame (is_finished() == true) has finished it will report all remaining bytes
+    /// How many bytes are decoded and not yet collected.
     pub fn can_collect(&self) -> usize {
-        let finished = self.is_finished();
-        let state = match &self.state {
-            None => return 0,
-            Some(s) => s,
-        };
-        if finished {
-            state.decoder_scratch.buffer.can_drain()
-        } else {
-            state
-                .decoder_scratch
-                .buffer
-                .can_drain_to_window_size()
-                .unwrap_or(0)
+        match &self.state {
+            None => 0,
+            Some(state) => state.decoder_scratch.buffer.can_collect(),
         }
     }
 
@@ -642,18 +605,12 @@ impl FrameDecoder {
     }
 }
 
-/// Read bytes from the decode_buffer that are no longer needed. While the frame is not yet finished
-/// this will retain window_size bytes, else it will drain it completely
+/// Reads the bytes decoded and not yet collected, as [`FrameDecoder::collect`] gives them.
 impl Read for FrameDecoder {
     fn read(&mut self, target: &mut [u8]) -> Result<usize, Error> {
-        let state = match &mut self.state {
-            None => return Ok(0),
-            Some(s) => s,
-        };
-        if state.frame_finished {
-            state.decoder_scratch.buffer.read_all(target)
-        } else {
-            state.decoder_scratch.buffer.read(target)
+        match &mut self.state {
+            None => Ok(0),
+            Some(state) => state.decoder_scratch.buffer.read(target),
         }
     }
 }

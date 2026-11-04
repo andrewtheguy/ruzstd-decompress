@@ -80,12 +80,6 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
             }
             assert!(in_still, "a body that continues no stream");
             let frame = &mut still;
-            frame.collect_to_writer(io::sink()).unwrap();
-            let held = |f: &FrameDecoder| {
-                let (a, b) = f.peek();
-                a.len() + b.len()
-            };
-            let before = held(frame);
             while !source.is_empty() {
                 let header = u32::from_le_bytes([source[0], source[1], source[2], 0]);
                 assert!(header & 1 == 0, "a last block");
@@ -94,13 +88,11 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
                 let (read, _) = frame.decode_from_to(block, &mut []).unwrap();
                 assert_eq!(read, block.len());
                 source = &source[block.len()..];
-                assert!(held(frame) - before <= most);
+                assert!(frame.can_collect() <= most);
             }
-            let (a, b) = frame.peek();
-            let in_a = before.min(a.len());
+            // The body's blocks' bytes, all collected as soon as they are decoded.
             bitmap.clear();
-            bitmap.extend_from_slice(&a[in_a..]);
-            bitmap.extend_from_slice(&b[before - in_a..]);
+            frame.collect_to_writer(&mut bitmap).unwrap();
         }
         out += bitmap.len() as u64;
         if check {

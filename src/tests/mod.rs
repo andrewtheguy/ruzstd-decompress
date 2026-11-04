@@ -847,11 +847,13 @@ fn verbose_disabled() {
     const { assert!(!VERBOSE) };
 }
 
-/// What `peek` shows is every byte decoded and not yet collected, in order:
-/// before the frame ends, the window `collect` retains among them.
+/// Collecting gives every byte as soon as its block is decoded, long before the frame
+/// ends, and the blocks after still copy from the window: a frame read a block at a time,
+/// collected or read after each, comes out whole.
 #[test]
-fn peek_shows_what_collect_retains() {
+fn collect_gives_each_block_as_decoded() {
     use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
+    use crate::io::Read;
 
     // Several blocks' worth, which does not all repeat.
     let data: Vec<u8> = (0..400_000u32)
@@ -862,34 +864,73 @@ fn peek_shows_what_collect_retains() {
     let mut decoder = FrameDecoder::new();
     let mut source = &compressed[..];
     decoder.init(&mut source).unwrap();
+    assert_eq!(decoder.can_collect(), 0);
     let mut out = Vec::new();
-    let peeked = |decoder: &FrameDecoder| {
-        let (a, b) = decoder.peek();
-        [a, b].concat()
-    };
-    assert!(peeked(&decoder).is_empty());
+    let mut blocks = 0;
     while !decoder.is_finished() {
         decoder
             .decode_blocks(&mut source, BlockDecodingStrategy::UptoBlocks(1))
             .unwrap();
-        // Everything decoded so far: what was collected, then what peek shows.
-        let shown = peeked(&decoder);
-        assert!(!shown.is_empty());
-        assert_eq!(
-            [&out[..], &shown[..]].concat(),
-            data[..out.len() + shown.len()]
-        );
-        if let Some(collected) = decoder.collect() {
-            out.extend_from_slice(&collected);
+        blocks += 1;
+        let new = decoder.can_collect();
+        assert!(new > 0);
+        // Every other block read in pieces, the rest collected at once.
+        if blocks % 2 == 0 {
+            let mut piece = [0; 1000];
+            while decoder.can_collect() > 0 {
+                let n = decoder.read(&mut piece).unwrap();
+                out.extend_from_slice(&piece[..n]);
+            }
+        } else {
+            out.extend_from_slice(&decoder.collect().unwrap());
         }
+        assert_eq!(decoder.can_collect(), 0);
+        assert_eq!(out, data[..out.len()]);
     }
-    out.extend_from_slice(&decoder.collect().unwrap());
+    assert!(blocks > 2, "{blocks}");
+    assert_eq!(decoder.collect().unwrap(), []);
     assert_eq!(out, data);
 }
 
-/// A block that fails to decode adds nothing to the output: `peek` shows after the
-/// error what it showed before the block. Sequences are executed as they are decoded,
-/// so a block whose bitstream turns out bad at its end has to be undone.
+/// The checksum covers every byte decoded, however much of it was collected and when:
+/// collected a block at a time, or not at all until the frame is done.
+#[cfg(feature = "hash")]
+#[test]
+fn checksum_whatever_was_collected() {
+    use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
+    use std::io::Write;
+
+    let data: Vec<u8> = (0..300_000u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8 ^ (i / 700) as u8)
+        .collect();
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 1).unwrap();
+    encoder.include_checksum(true).unwrap();
+    encoder.window_log(17).unwrap();
+    encoder.write_all(&data).unwrap();
+    let compressed = encoder.finish().unwrap();
+    for collect_each_block in [true, false] {
+        let mut decoder = FrameDecoder::new();
+        // A window smaller than the data, so that collected bytes are dropped on the way.
+        let mut source = &compressed[..];
+        decoder.init(&mut source).unwrap();
+        while !decoder.is_finished() {
+            decoder
+                .decode_blocks(&mut source, BlockDecodingStrategy::UptoBlocks(1))
+                .unwrap();
+            if collect_each_block {
+                decoder.collect().unwrap();
+            }
+        }
+        let expected = decoder.get_checksum_from_data().unwrap();
+        assert_eq!(decoder.get_calculated_checksum(), Some(expected));
+        decoder.collect().unwrap();
+        assert_eq!(decoder.get_calculated_checksum(), Some(expected));
+    }
+}
+
+/// A block that fails to decode adds nothing to the output: after the error there is
+/// nothing to collect, everything before it having been collected. Sequences are executed
+/// as they are decoded, so a block whose bitstream turns out bad at its end has to be undone.
 #[test]
 fn failed_block_adds_no_output() {
     use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
@@ -898,10 +939,6 @@ fn failed_block_adds_no_output() {
         .map(|i| ((i.wrapping_mul(2_654_435_761) >> 24) as u8 % 7) ^ (i / 1000) as u8)
         .collect();
     let compressed = zstd::bulk::compress(&data, 3).unwrap();
-    let peeked = |decoder: &FrameDecoder| {
-        let (a, b) = decoder.peek();
-        [a, b].concat()
-    };
     let mut failed_with_output_before = 0;
     for at in (0..compressed.len()).step_by(31) {
         for bit in [0x01u8, 0x80] {
@@ -912,13 +949,14 @@ fn failed_block_adds_no_output() {
             if decoder.init(&mut source).is_err() {
                 continue;
             }
+            let mut out = Vec::new();
             while !decoder.is_finished() {
-                let before = peeked(&decoder);
+                out.extend_from_slice(&decoder.collect().unwrap());
                 match decoder.decode_blocks(&mut source, BlockDecodingStrategy::UptoBlocks(1)) {
                     Ok(_) => {}
                     Err(_) => {
-                        assert_eq!(peeked(&decoder), before, "byte {at} bit {bit:#x}");
-                        failed_with_output_before += usize::from(!before.is_empty());
+                        assert_eq!(decoder.can_collect(), 0, "byte {at} bit {bit:#x}");
+                        failed_with_output_before += usize::from(!out.is_empty());
                         break;
                     }
                 }
