@@ -234,6 +234,31 @@ not give memory back, so its runs are unaffected.
 Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
 nothing.
 
+A native run with the thresholds set by the harnesses, no environment
+needed, on the corpora of "Running it again" (enwik9 traded for the video):
+[`results/run6-native-mallopt.md`](results/run6-native-mallopt.md). It agrees
+with the run under `GLIBC_TUNABLES` to within 3.3% on every workload both have,
+most within 2%. It also gives libzstd's lead without glibc's noise: 35% by
+geomean over alpha.3 (N), so about 1.5 times, not the 2.6 the first run gave.
+
+| workload | N | T | libzstd | libzstd's lead over T |
+|---|---:|---:|---:|---:|
+| video 1920x1080 | 465 | 464 | 191 | 2.4× |
+| video 2880x1800@2 | 1494 | 1470 | 619 | 2.4× |
+| mixed 1920x1080, 200 MB | 684 | 666 | 302 | 2.2× |
+| mixed 2880x1800@2, 200 MB | 975 | 946 | 447 | 2.1× |
+| silesia `-3` | 474 | 445 | 214 | 2.1× |
+| silesia `-19` | 469 | 433 | 219 | 2.0× |
+| video clip, raw blocks | 16.2 | 16.4 | 20.3 | 0.8× |
+
+The small tiles are closer: libzstd leads by 1.1–1.2 times on browser and drag,
+1.2–1.5 on terminal and 1.6–1.9 on uncover. On still, ruzstd is ahead (0.95 and
+0.83 times), but libzstd's harness zero-fills a whole bitmap for every still body
+and ruzstd's does not.
+On the video clip ruzstd is ahead: there is nothing to decode, only blocks to
+copy, so that compares how the two harnesses take the output, not the
+decoders.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
