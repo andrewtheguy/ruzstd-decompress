@@ -8,3 +8,6 @@ fuzz_decodecorpus
 perf.data*
 fuzz/corpus
 .idea
+tmp/
+CLAUDE.local.md
+.claude/settings.local.json
