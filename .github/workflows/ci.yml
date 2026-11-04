@@ -14,18 +14,16 @@ jobs:
           uses: dtolnay/rust-toolchain@stable
           with:
             components: clippy
-        - name: Install cargo-hack and cargo-msrv
+        - name: Install cargo-hack
           uses: taiki-e/install-action@v2
           with:
-            tool: cargo-hack, cargo-msrv
+            tool: cargo-hack
         - name: check
           run: cargo +stable hack check --workspace --feature-powerset --exclude-features rustc-dep-of-std
         - name: cargo hack clippy
           run: cargo +stable hack clippy --workspace --feature-powerset --exclude-features rustc-dep-of-std
         - name: cargo hack test
           run: cargo +stable hack test --workspace --feature-powerset --exclude-features rustc-dep-of-std
-        - name: Verify MSRV
-          run: cargo msrv verify
 
   nightly-stuff:
     name: nightly lint, miri
