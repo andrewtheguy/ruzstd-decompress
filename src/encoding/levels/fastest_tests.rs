@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use crate::encoding::{compress_to_vec, CompressionLevel};
+use crate::encoding::{CompressionLevel, compress_to_vec};
 
 #[test]
 fn fastest_does_not_expand_incompressible_blocks_past_raw_size() {

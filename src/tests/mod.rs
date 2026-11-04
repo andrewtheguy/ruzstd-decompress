@@ -489,8 +489,8 @@ fn test_streaming_no_std() {
 
 #[test]
 fn test_decode_all() {
-    use crate::decoding::errors::FrameDecoderError;
     use crate::decoding::FrameDecoder;
+    use crate::decoding::errors::FrameDecoderError;
 
     let skip_frame = |input: &mut Vec<u8>, length: usize| {
         input.extend_from_slice(&0x184D2A50u32.to_le_bytes());
@@ -615,7 +615,7 @@ fn test_large_window_decodes_when_limit_raised() {
 #[test]
 fn test_large_window_rejected_at_default_limit() {
     use crate::decoding::errors::FrameDecoderError;
-    use crate::decoding::{FrameDecoder, DEFAULT_MAX_WINDOW_SIZE};
+    use crate::decoding::{DEFAULT_MAX_WINDOW_SIZE, FrameDecoder};
 
     let compressed = include_bytes!("../../test_fixtures/window_256mib.zst");
 
@@ -665,8 +665,8 @@ fn test_multi_frame_large_window_decodes_when_raised() {
 
 #[test]
 fn test_large_window_rejected_on_first_and_later_frames() {
-    use crate::decoding::errors::FrameDecoderError;
     use crate::decoding::FrameDecoder;
+    use crate::decoding::errors::FrameDecoderError;
 
     let big = include_bytes!("../../test_fixtures/window_256mib.zst"); // 256 MiB window
     let small = include_bytes!("../../test_fixtures/window_8mib.zst"); // 8 MiB window
@@ -701,8 +701,8 @@ fn test_large_window_rejected_on_first_and_later_frames() {
 #[test]
 #[cfg(feature = "std")]
 fn test_streaming_decoder_max_window_size() {
-    use crate::decoding::errors::FrameDecoderError;
     use crate::decoding::StreamingDecoder;
+    use crate::decoding::errors::FrameDecoderError;
     use std::io::Read;
 
     let compressed = include_bytes!("../../test_fixtures/window_256mib.zst");
@@ -764,10 +764,10 @@ fn rle_literals_block(n: u32, sequences: &[u8]) -> Vec<u8> {
 #[test]
 fn test_literals_only_block_bounded_by_block_maximum_size() {
     use crate::common::MAX_BLOCK_SIZE;
+    use crate::decoding::FrameDecoder;
     use crate::decoding::errors::{
         DecodeBlockContentError, DecompressBlockError, FrameDecoderError,
     };
-    use crate::decoding::FrameDecoder;
 
     let decode = |literals: u32| {
         let mut input = FRAME_HEADER_1MIB_WINDOW.to_vec();
@@ -797,10 +797,10 @@ fn test_literals_only_block_bounded_by_block_maximum_size() {
 #[test]
 fn test_literals_left_after_sequences_bounded_by_block_maximum_size() {
     use crate::common::MAX_BLOCK_SIZE;
+    use crate::decoding::FrameDecoder;
     use crate::decoding::errors::{
         DecodeBlockContentError, DecompressBlockError, ExecuteSequencesError, FrameDecoderError,
     };
-    use crate::decoding::FrameDecoder;
 
     let decode = |literals: u32| {
         let mut input = FRAME_HEADER_1MIB_WINDOW.to_vec();
@@ -854,7 +854,7 @@ fn verbose_disabled() {
 #[test]
 fn peek_shows_what_collect_retains() {
     use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
-    use crate::encoding::{compress_to_vec, CompressionLevel};
+    use crate::encoding::{CompressionLevel, compress_to_vec};
 
     // Several blocks' worth, which does not all repeat.
     let data: Vec<u8> = (0..400_000u32)

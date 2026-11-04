@@ -2,8 +2,8 @@
 #[macro_use]
 extern crate libfuzzer_sys;
 extern crate ruzstd;
-use std::io::Read;
 use ruzstd::encoding::{CompressionLevel, compress_to_vec};
+use std::io::Read;
 
 fn decode_ruzstd(data: &mut dyn std::io::Read) -> Vec<u8> {
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(data).unwrap();
