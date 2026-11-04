@@ -161,6 +161,76 @@ Every workload: [`results/run3-peek-perf.md`](results/run3-peek-perf.md)
   all, and on the video and mixed tiles from 4.5–6.7 times to 2.2–2.5 times.
 - `decode` and `interop` fuzzing, four minutes each, found nothing.
 
+## 2026-11-04: libzstd-style sequence tables
+
+The question: do the sequences decode faster from tables laid out as libzstd's
+(`ZSTD_seqSymbol`), each state holding the code's value and extra bits and the
+next state's base and bit count (`src/decoding/sequence_table.rs`)? Before,
+each sequence's codes were turned into values with a lookup apiece, and RLE
+blocks had a loop of their own. Predefined tables are now also kept from one
+block, and frame, to the next.
+
+| | |
+|---|---|
+| **N** | `master` at `cfb8f3d` (v0.9.2-alpha.3) |
+| **T** | N with the tables |
+
+The same workloads, machine and build as the `peek-perf` run. Every variant
+decoded every workload to the same output.
+
+A profile first (`perf`, native) said where the time goes:
+- On the video tiles, 64% is Huffman literals (`decode_4_streams`) and about
+  3% sequences.
+- On mixed, 34% is literals and about 10% sequences.
+- On silesia `-3`, about 38% is sequences.
+
+The tables could only pay on the general corpora and the smaller tiles, and
+that is where they did. Geomean over the 18 workloads, against N:
+
+| | T |
+|---|---:|
+| native | **−6.1%** |
+| wasm | **−9.1%** |
+
+| workload | native N | native T | wasm N | wasm T |
+|---|---:|---:|---:|---:|
+| video 1920x1080 | 465 | 462 (−0.6%) | 594 | 587 (−1.1%) |
+| video 2880x1800@2 | 1495 | 1459 (−2.4%) | 1975 | 1879 (−4.9%) |
+| mixed 1920x1080, 200 MB | 675 | 671 (−0.6%) | 882 | 851 (−3.5%) |
+| mixed 2880x1800@2, 200 MB | 968 | 969 (+0.1%) | 1293 | 1201 (−7.1%) |
+| enwik9 `-3` | 2656 | 2433 (−8.4%) | 3653 | 3205 (−12.3%) |
+| enwik9 `-19` | 2164 | 1987 (−8.2%) | 2980 | 2647 (−11.2%) |
+| silesia `-3` | 476 | 440 (−7.6%) | 664 | 581 (−12.5%) |
+| silesia `-19` | 469 | 431 (−8.1%) | 679 | 586 (−13.6%) |
+
+The smaller tiles (browser, drag, still, terminal, uncover) gain 3–15% natively
+and 5–15% in wasm. Every workload:
+[`results/run4-seq-tables.md`](results/run4-seq-tables.md) (native and wasm)
+and [`results/run5-seq-tables-native-pinned.md`](results/run5-seq-tables-native-pinned.md)
+(native, glibc's thresholds fixed, which the native figures above are from).
+
+**glibc's malloc and the small native workloads.** In the first run, native
+still 1920x1080 took 1.15 ms for T against N's 0.50 ms (+129%), every round.
+The cause was page faults, about 320 a pass for T and almost none for N, not
+the decoding. The harness makes a new decoder every pass. glibc moves its mmap
+threshold as blocks are freed, so whether that decoder's buffers come from the
+heap or as fresh pages to fault in turns on the build's allocation pattern.
+With the thresholds fixed (`GLIBC_TUNABLES=glibc.malloc.mmap_threshold=67108864:glibc.malloc.trim_threshold=268435456`),
+T takes 0.47 ms and N 0.51 ms. The same effect is in the earlier runs' small
+native workloads:
+- drag 1920x1080: 0.92 ms for N then, 0.46 ms with the thresholds fixed;
+- terminal 1920x1080: 2.55 ms then, 1.12 ms fixed;
+- still 2880x1800@2: 2.38 ms then, 1.19 ms fixed;
+- the 1.45 ms of v0.9.2-alpha.2 on still 1920x1080 in the `peek-perf` run.
+
+So those earlier figures, and their libzstd ratios, say as much about glibc as
+about the decoders. The large workloads (video, mixed, the corpora) moved by
+under 4%. `run.sh` now fixes the thresholds. wasm's allocator does not give
+memory back, so its runs are unaffected.
+
+Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
@@ -181,7 +251,8 @@ and results.
    on the timing machine; [`libzstd/`](harness/libzstd) is built the same way
    into `bin/Z-native`.
 4. [`run.sh`](harness/run.sh) `OUT.jsonl VARIANT…` (wasm through
-   [`run-wasi.mjs`](harness/run-wasi.mjs); `PLATFORMS=native` for native alone),
+   [`run-wasi.mjs`](harness/run-wasi.mjs); `PLATFORMS=native` for native alone;
+   it fixes glibc's malloc thresholds unless `GLIBC_TUNABLES` is set),
    on a quiet machine, then [`summary.py`](harness/summary.py) `OUT.jsonl
    [BASE]` for the tables against BASE, A by default (`uv run --python 3.13
    python -I summary.py OUT.jsonl M`). `build.sh` uses a variant's
