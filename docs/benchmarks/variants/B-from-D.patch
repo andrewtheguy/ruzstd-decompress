@@ -1,0 +1,32 @@
+diff -ru a/src/decoding/decode_buffer.rs b/src/decoding/decode_buffer.rs
+--- a/src/decoding/decode_buffer.rs	2026-11-03 19:43:53.715956942 -0800
++++ b/src/decoding/decode_buffer.rs	2026-11-03 19:42:50.210334068 -0800
+@@ -98,17 +98,17 @@
+     }
+ 
+     fn repeat_in_chunks(&mut self, offset: usize, match_length: usize, start_idx: usize) {
+-        // The match overlaps what it writes: it repeats the last `offset` bytes.
+-        // Once one copy of them is written, `start_idx..` holds two whole periods,
+-        // so each copy can take twice what the one before took, from the same
+-        // start, until the match is written.
+-        let mut available = offset;
+-        let mut left = match_length;
+-        while left > 0 {
+-            let chunk = usize::min(available, left);
+-            self.buffer.extend_from_within(start_idx, chunk);
+-            left -= chunk;
+-            available += chunk;
++        // We have at max offset bytes in one chunk, the last one can be smaller
++        let mut start_idx = start_idx;
++        let mut copied_counter_left = match_length;
++        // TODO this can  be optimized further I think.
++        // Each time we copy a chunk we have a repetiton of length 'offset', so we can copy offset * iteration many bytes from start_idx
++        while copied_counter_left > 0 {
++            let chunksize = usize::min(offset, copied_counter_left);
++
++            self.buffer.extend_from_within(start_idx, chunksize);
++            copied_counter_left -= chunksize;
++            start_idx += chunksize;
+         }
+     }
+ 

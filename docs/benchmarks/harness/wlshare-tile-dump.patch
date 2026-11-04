@@ -1,0 +1,38 @@
+--- a/examples/motion-bench.rs
++++ b/examples/motion-bench.rs
+@@ -410,11 +410,13 @@
+                 }
+                 TileBody::Planar(body) => {
+                     sent.planar += body.len() as u64;
++                    tile_dump(0, w, h, &body);
+                     let rgb = planar_decoder::unpack(&body, w, h)?;
+                     self.paste((x, y, w, h), &rgb);
+                 }
+                 TileBody::Still(body) => {
+                     sent.still += body.len() as u64;
++                    tile_dump(1, w, h, &body);
+                     let rgb = self.stills.unpack(&body, w, h)?;
+                     self.paste((x, y, w, h), &rgb);
+                 }
+@@ -866,3 +868,21 @@
+         tally.tail_tick_bytes,
+     );
+ }
++
++/// Scratch only: every lossless body, in order, to `$TILE_DUMP`: kind (0
++/// planar, 1 still), w and h as u16, the length as u32, little endian, then it.
++fn tile_dump(kind: u8, w: usize, h: usize, body: &[u8]) {
++    use std::io::Write;
++    use std::sync::{Mutex, OnceLock};
++    static OUT: OnceLock<Option<Mutex<std::io::BufWriter<std::fs::File>>>> = OnceLock::new();
++    let out = OUT.get_or_init(|| std::env::var_os("TILE_DUMP").map(|p| Mutex::new(std::io::BufWriter::new(std::fs::File::create(p).unwrap()))));
++    if let Some(out) = out {
++        let mut out = out.lock().unwrap();
++        out.write_all(&[kind]).unwrap();
++        out.write_all(&(w as u16).to_le_bytes()).unwrap();
++        out.write_all(&(h as u16).to_le_bytes()).unwrap();
++        out.write_all(&(body.len() as u32).to_le_bytes()).unwrap();
++        out.write_all(body).unwrap();
++        out.flush().unwrap();
++    }
++}

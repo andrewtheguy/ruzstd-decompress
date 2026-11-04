@@ -1,0 +1,25 @@
+diff -ru a/src/decoding/ringbuffer.rs b/src/decoding/ringbuffer.rs
+--- a/src/decoding/ringbuffer.rs	2026-11-03 19:30:42.000000000 -0800
++++ b/src/decoding/ringbuffer.rs	2026-11-03 19:43:52.596201412 -0800
+@@ -615,7 +615,11 @@
+ ) {
+     unsafe {
+         // By default use usize as the copy size
+-        #[cfg(all(not(target_feature = "sse2"), not(target_feature = "neon")))]
++        #[cfg(all(
++            not(target_feature = "sse2"),
++            not(target_feature = "neon"),
++            not(target_feature = "simd128")
++        ))]
+         type CopyType = usize;
+ 
+         // Use u128 if we detect a simd feature
+@@ -623,6 +627,8 @@
+         type CopyType = u128;
+         #[cfg(target_feature = "sse2")]
+         type CopyType = u128;
++        #[cfg(target_feature = "simd128")]
++        type CopyType = u128;
+ 
+         const COPY_AT_ONCE_SIZE: usize = core::mem::size_of::<CopyType>();
+         let min_buffer_size = usize::min(src.1, dst.1);
