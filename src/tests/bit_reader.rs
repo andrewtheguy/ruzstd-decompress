@@ -77,3 +77,35 @@ fn test_bitreader_normal() {
         );
     }
 }
+
+/// The reader matches a bit-by-bit model, every width up to 64, up to the source's end.
+#[test]
+fn test_bitreader_normal_matches_model() {
+    use crate::bit_io::BitReader;
+    use alloc::vec::Vec;
+
+    let source: Vec<u8> = (0..40u32).map(|x| (x * 151 + 7) as u8).collect();
+    for len in 0..source.len() {
+        let source = &source[..len];
+        for first in 0..65 {
+            let mut br = BitReader::new(source);
+            let mut pos = 0;
+            for (step, n) in core::iter::once(first).chain(1..65).enumerate() {
+                let got = br.get_bits(n);
+                if pos + n > len * 8 {
+                    assert!(got.is_err(), "len {len} step {step}");
+                    break;
+                }
+                let mut expected = 0u64;
+                for bit in 0..n {
+                    let at = pos + bit;
+                    expected |= u64::from((source[at / 8] >> (at % 8)) & 1) << bit;
+                }
+                pos += n;
+                assert_eq!(got.unwrap(), expected, "len {len} step {step}");
+                assert_eq!(br.bits_read(), pos);
+            }
+        }
+    }
+    assert!(BitReader::new(&[0; 16]).get_bits(65).is_err());
+}
