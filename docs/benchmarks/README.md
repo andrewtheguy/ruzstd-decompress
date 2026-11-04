@@ -420,6 +420,92 @@ wasm. Every workload: [`results/run9-tables.md`](results/run9-tables.md).
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
 
+## 2026-11-04: Huffman literals two symbols to a lookup
+
+The question: on video and mixed tiles, the four-stream Huffman loop was
+44–59% of the time, and libzstd still 1.7–1.9 times faster. libzstd decodes
+the literals of most such blocks two symbols to a lookup (its X2 tables).
+Would ruzstd gain by doing the same, natively and in wasm?
+
+What the literals look like, counted over every compressed literals block:
+- Video and mixed: 98–99% of the literals' bytes come from blocks of codes up
+  to 11 bits long, compressed to 0.57–0.67 of their size, mostly in blocks
+  over 64 KB. A table indexed by 11 bits holding two symbols wherever both
+  codes fit in them takes 0.60–0.63 lookups a symbol.
+- The small tiles: 0.85–0.90 of their size, in blocks under 16 KB; 0.79–0.86
+  lookups a symbol, too few saved to pay for building the table.
+- Silesia: its literals are 12 MB of the 212 MB, 0.85–0.89 of their size.
+
+| | |
+|---|---|
+| **K** | `main` at `f295533` (the table builds and the ring buffer) |
+| **X** | K with the table of pairs (`fa966df`) |
+| **Z** | libzstd |
+
+The commit:
+- **A table of pairs**, made from the single symbols' table: an index's first
+  symbol is the single symbols' entry for it, and the bits after that code,
+  shifted up, index the same table for the second. Four bytes an entry: the
+  two symbols, their bits, and whether there is a second.
+- **The four streams decode from it** five lookups a stream a refill (55 of
+  the 56 bits a refill leaves), each writing two bytes and keeping one or
+  both. The window is reloaded without a branch. A stream's last few bytes
+  (fewer than 10), and the symbols in the last 8 bytes of its source, are
+  decoded from the single symbols' table.
+- **libzstd's choice, block by block** (`HUF_selectDecoder`): its estimates
+  of each table's build and decode, from the literals' size and ratio. The
+  small tiles and Silesia mostly keep the single symbols' table. A block that
+  repeats the previous table chooses again, building the pairs if it needs
+  them.
+- A test decodes random streams, under 2,000 random complete codes, from
+  both tables, and checks they give the same symbols and read the same bits.
+
+Tried and left out, each in the quick checks on lab1:
+- **The refill's branch kept**, as in the single symbols' loop: video 7–8%
+  faster natively, not 12%.
+- **The table of pairs' functions kept out of line**, and **the single
+  symbols' four-stream loop with the same branchless reload**: no gain on
+  any workload.
+- **The four streams' output positions packed into one `u32`.** For wasm
+  (`+simd128`), rustc 1.99 and zDesk's `nightly-2026-10-31` vectorize the
+  four positions' additions: every lookup moves the four entries into a
+  vector and the positions back out (`i32x4.replace_lane`, `extract_lane`).
+  Packed, the loop has no SIMD, and is slower: video 1% slower in wasm than K,
+  and 7.5% faster natively instead of 12%. The vectorized loop is not what
+  holds wasm back.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against K:
+
+| | X | libzstd |
+|---|---:|---:|
+| native | **−1.6%** | −15.5% |
+| wasm | **−1.7%** | |
+
+| workload | native K | native X | wasm K | wasm X | libzstd |
+|---|---:|---:|---:|---:|---:|
+| video 1920x1080 | 345 | 306 (−11.4%) | 420 | 391 (−6.9%) | 190 |
+| video 2880x1800@2 | 1142 | 1050 (−8.1%) | 1442 | 1354 (−6.1%) | 605 |
+| mixed 1920x1080, 200 MB | 523 | 490 (−6.4%) | 650 | 618 (−5.0%) | 304 |
+| mixed 2880x1800@2, 200 MB | 774 | 737 (−4.7%) | 986 | 946 (−4.0%) | 445 |
+| silesia `-3` | 426 | 428 (+0.5%) | 577 | 581 (+0.7%) | 218 |
+| silesia `-19` | 431 | 427 (−0.9%) | 580 | 578 (−0.3%) | 224 |
+
+ms a pass. The small tiles and the video corpus are within 2.2% of K either
+way, inside the spread of the runs. Every workload:
+[`results/run10-huffman-x2.md`](results/run10-huffman-x2.md).
+
+- On video and mixed tiles, libzstd's lead falls from 1.7–1.9 times to
+  1.6–1.7 times natively. By geomean over all workloads, libzstd is 1.16
+  times faster (1.18 against K).
+- Wasm gains about half of what native does. A profile of video in V8 puts
+  `decode_literals` at 52% of the time, from 60%: V8's code for the loop
+  moves registers around every variable shift, and spills the streams'
+  state.
+- The wasm build grows by 3.8 KB, to 241 KB.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
