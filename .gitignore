@@ -6,5 +6,8 @@ Cargo.lock
 /orig-zstd
 fuzz_decodecorpus
 perf.data*
-ruzstd/fuzz/corpus
+fuzz/corpus
 .idea
+tmp/
+CLAUDE.local.md
+.claude/settings.local.json
