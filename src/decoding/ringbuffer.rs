@@ -439,8 +439,7 @@ mod tests {
         };
         let mut rb = RingBuffer::new();
         let mut model: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        let steps = if cfg!(miri) { 2_000 } else { 200_000 };
-        for step in 0..steps {
+        for step in 0..200_000 {
             match next(4) {
                 0 => {
                     let data: alloc::vec::Vec<u8> =
