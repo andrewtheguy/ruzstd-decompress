@@ -43,9 +43,8 @@ impl<'a> SequenceExecutor<'a> {
                     have: self.literals.len(),
                 });
             }
-            // Pass all remaining literals so the copy can overshoot instead of calling memcpy
-            let literals = &self.literals[self.literals_copy_counter..];
-            self.buffer.push_prefix(literals, seq.ll as usize);
+            self.buffer
+                .push(&self.literals[self.literals_copy_counter..high]);
             self.literals_copy_counter += seq.ll as usize;
         }
 

@@ -31,6 +31,10 @@ on a quiet machine:
 
 On `master` the same ratios are about 5.3x and 5.4x.
 
+These totals include commit 3 (`cc92967`), which `peek-perf` later removes to avoid adding
+new `unsafe` code (see [commit 3](#3-cc92967-copy-literals-with-overshooting-chunked-copies-instead-of-memcpy)).
+That commit measured about 4% of `decode_all` time on both inputs.
+
 Measured on an AMD Ryzen AI MAX+ 395 (Zen 5, x86_64), rustc 1.96.0. Nothing was measured on
 other CPUs or on aarch64.
 
@@ -77,6 +81,11 @@ perf showed all three being called as real functions from the hot loops.
 inlining it in this commit made z000033 3.6% slower. Commit 8 solves that differently.
 
 ### 3. `cc92967` Copy literals with overshooting chunked copies instead of memcpy
+
+> **Removed on `peek-perf`:** the commit "Remove the overshooting literal copy" undoes this
+> change so that the branch adds no new `unsafe` blocks. Literal runs are copied with an
+> exact `push` again, and `extend_from_prefix` and `push_prefix` are gone. The commits after
+> this one still apply; commit 5 calls `push` instead of `push_prefix`.
 
 **What:** Literal runs are now copied with the existing `copy_bytes_overshooting` (16-byte
 chunks) instead of an exact `extend_from_slice`, which compiled to a glibc `memcpy` call per

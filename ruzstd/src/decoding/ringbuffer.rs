@@ -192,45 +192,6 @@ impl RingBuffer {
         self.tail = (self.tail + len) % self.cap;
     }
 
-    /// Append the first `len` bytes of `data`.
-    ///
-    /// Behaves like `extend(&data[..len])`, but the bytes in `data` after `len` let the copy
-    /// overshoot in fixed-size chunks instead of calling memcpy, which is much faster for the
-    /// many short copies done when executing sequences.
-    #[inline(always)]
-    pub fn extend_from_prefix(&mut self, data: &[u8], len: usize) {
-        assert!(len <= data.len());
-        if len == 0 {
-            return;
-        }
-
-        self.reserve(len);
-
-        let ((f1_ptr, f1_len), (f2_ptr, f2_len)) = self.free_slice_parts();
-        debug_assert!(f1_len + f2_len >= len, "{} + {} < {}", f1_len, f2_len, len);
-
-        let in_f1 = usize::min(len, f1_len);
-        let in_f2 = len - in_f1;
-
-        // SAFETY: The source ranges lie within `data` and the destination ranges are the free
-        // sections, which end before the occupied data, so overshooting stays inside both.
-        // `in_f1 + in_f2 = len`, so exactly `len` bytes are initialized, upholding invariant 2.
-        unsafe {
-            if in_f1 > 0 {
-                copy_bytes_overshooting((data.as_ptr(), data.len()), (f1_ptr, f1_len), in_f1);
-            }
-            if in_f2 > 0 {
-                copy_bytes_overshooting(
-                    (data.as_ptr().add(in_f1), data.len() - in_f1),
-                    (f2_ptr, f2_len),
-                    in_f2,
-                );
-            }
-        }
-        // SAFETY: Upholds invariant 3 by wrapping `tail` around.
-        self.tail = (self.tail + len) % self.cap;
-    }
-
     /// Advance head past `amount` elements, effectively removing
     /// them from the buffer.
     pub fn drop_first_n(&mut self, amount: usize) {
@@ -976,39 +937,5 @@ mod tests {
         rb.extend_from_within(0, 4);
         assert_eq!(b"11", rb.as_slices().0);
         assert_eq!(b"111111", rb.as_slices().1);
-    }
-
-    #[test]
-    fn extend_from_prefix_matches_model() {
-        use alloc::collections::VecDeque;
-        use alloc::vec::Vec;
-
-        let source: Vec<u8> = (0..100u8).collect();
-        // Every head/tail position, every copy length (including ones that wrap and ones
-        // that end right before the live data) and every amount of readable slack after it.
-        for start in 0..40 {
-            for len in 0..40 {
-                for slack in [0, 1, 7, 15, 16, 17, 40] {
-                    let mut rb = RingBuffer::new();
-                    rb.reserve(40);
-                    let mut model = VecDeque::new();
-
-                    let filler = [0xAAu8; 40];
-                    rb.extend(&filler[..start]);
-                    rb.drop_first_n(start);
-                    rb.extend(&filler[..20]);
-                    model.extend(&filler[..20]);
-
-                    let data = &source[..len + slack];
-                    rb.extend_from_prefix(data, len);
-                    model.extend(&data[..len]);
-
-                    let (a, b) = rb.as_slices();
-                    let got: Vec<u8> = a.iter().chain(b).copied().collect();
-                    let want: Vec<u8> = model.iter().copied().collect();
-                    assert_eq!(got, want, "start {start} len {len} slack {slack}");
-                }
-            }
-        }
     }
 }

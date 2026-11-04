@@ -76,13 +76,6 @@ impl DecodeBuffer {
         self.total_output_counter += data.len() as u64;
     }
 
-    /// Push the first `len` bytes of `data`, using the rest of `data` to copy faster.
-    #[inline(always)]
-    pub fn push_prefix(&mut self, data: &[u8], len: usize) {
-        self.buffer.extend_from_prefix(data, len);
-        self.total_output_counter += len as u64;
-    }
-
     #[inline(always)]
     pub fn repeat(&mut self, offset: usize, match_length: usize) -> Result<(), DecodeBufferError> {
         if offset > self.buffer.len() {
