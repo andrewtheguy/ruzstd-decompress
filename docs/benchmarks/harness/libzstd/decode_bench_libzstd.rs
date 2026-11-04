@@ -53,11 +53,15 @@ fn load_tiles(path: &str, most: usize) -> (Vec<u8>, Vec<Tile>) {
 
 /// The tiles decoded by libzstd: a planar tile's frame in one call into a
 /// buffer of the most it can be, and the still stream's bodies fed in order to
-/// one streaming context, the bitmap what each body's blocks put out.
+/// one streaming context, the bitmap what each body's blocks put out. One
+/// context for every planar tile and one for the still stream, reset for a new
+/// stream, as the ruzstd harness keeps its decoders.
 fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
     let mut planar = zstd::bulk::Decompressor::new().unwrap();
     let mut bitmap: Vec<u8> = Vec::new();
-    let mut still: Option<Decoder<'static>> = None;
+    let mut still = Decoder::new().unwrap();
+    still.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(STILL_WINDOW_LOG_MOST)).unwrap();
+    let mut in_still = false;
     let (mut out, mut hash) = (0u64, 0xcbf29ce484222325u64);
     for t in tiles {
         let body = &data[t.at..t.at + t.len];
@@ -68,11 +72,12 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
             planar.decompress_to_buffer(body, &mut bitmap).unwrap();
         } else {
             if body.starts_with(&ZSTD_MAGIC) {
-                let mut d = Decoder::new().unwrap();
-                d.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(STILL_WINDOW_LOG_MOST)).unwrap();
-                still = Some(d);
+                // A session reset: the window's most stays set.
+                still.reinit().unwrap();
+                in_still = true;
             }
-            let d = still.as_mut().expect("a body that continues no stream");
+            assert!(in_still, "a body that continues no stream");
+            let d = &mut still;
             bitmap.resize(most, 0);
             let mut input = InBuffer::around(body);
             let mut output = OutBuffer::around(&mut bitmap[..]);

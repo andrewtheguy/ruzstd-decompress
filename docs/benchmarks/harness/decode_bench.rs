@@ -50,11 +50,15 @@ fn load_tiles(path: &str, most: usize) -> (Vec<u8>, Vec<Tile>) {
 }
 
 /// The tiles decoded as `WlshareTiles::planar` and `::still` decode them, the
-/// bitmap left in one reused buffer. Returns the bytes out and, with `check`,
-/// a hash over every bitmap.
+/// bitmap left in one reused buffer: one decoder for every planar tile and one
+/// for the still stream, each reset for a tile or a new stream rather than made
+/// anew. Returns the bytes out and, with `check`, a hash over every bitmap.
 fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
     let mut bitmap: Vec<u8> = Vec::new();
-    let mut still: Option<FrameDecoder> = None;
+    let mut planar = FrameDecoder::new();
+    let mut still = FrameDecoder::new();
+    still.set_max_window_size(STILL_WINDOW_MOST);
+    let mut in_still = false;
     let (mut out, mut hash) = (0u64, 0xcbf29ce484222325u64);
     for t in tiles {
         let body = &data[t.at..t.at + t.len];
@@ -62,7 +66,7 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
         if t.kind == 0 {
             bitmap.clear();
             let mut source = body;
-            let frame = StreamingDecoder::new(&mut source).unwrap();
+            let frame = StreamingDecoder::new_with_decoder(&mut source, &mut planar).unwrap();
             let mut capped = Read::take(frame, most as u64 + 1);
             capped.read_to_end(&mut bitmap).unwrap();
             assert!(bitmap.len() <= most);
@@ -71,12 +75,11 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
         } else {
             let mut source = body;
             if body.starts_with(&ZSTD_MAGIC) {
-                let mut frame = FrameDecoder::new();
-                frame.set_max_window_size(STILL_WINDOW_MOST);
-                frame.init(&mut source).unwrap();
-                still = Some(frame);
+                still.init(&mut source).unwrap();
+                in_still = true;
             }
-            let frame = still.as_mut().expect("a body that continues no stream");
+            assert!(in_still, "a body that continues no stream");
+            let frame = &mut still;
             frame.collect_to_writer(io::sink()).unwrap();
             let held = |f: &FrameDecoder| {
                 let (a, b) = f.peek();
