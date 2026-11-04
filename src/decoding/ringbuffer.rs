@@ -1,15 +1,18 @@
 use crate::io::Read;
-use alloc::vec;
 use alloc::vec::Vec;
 
-/// A ring buffer of bytes over an initialised `Vec`, without unsafe code.
+/// A ring buffer of bytes over a `Vec`, without unsafe code.
 ///
-/// `head..tail` (or `head..` then `..tail` once it wraps) is the data; the rest is
-/// free, one byte of it always kept as the sentinel that tells full from empty.
-/// The whole of `buf` is initialised, so a copy may read past the data it wants
-/// and write past the end of the data, into the free space, where that is faster.
+/// The ring is `cap` bytes. `head..tail` (or `head..cap` then `..tail` once it wraps) is
+/// the data; the rest is free, one byte of it always kept as the sentinel that tells full
+/// from empty. `buf` holds the ring's first `buf.len()` bytes, initialised a step ahead of
+/// the furthest the tail has written, so that a new or grown buffer is not zeroed whole
+/// before it is used: a frame of a few kilobytes then costs a few kilobytes. Within
+/// `buf.len()`, a copy may read past the data it wants and write past the end of the data,
+/// into the free space, where that is faster.
 pub struct RingBuffer {
     buf: Vec<u8>,
+    cap: usize,
     head: usize,
     tail: usize,
 }
@@ -17,10 +20,15 @@ pub struct RingBuffer {
 /// The size a short copy is rounded up to, when there is room for it.
 const CHUNK: usize = 16;
 
+/// How far past what a write needs the ring is initialised, so that it is done in a few
+/// large fills rather than one for each write.
+const INIT_AHEAD: usize = 16 * 1024;
+
 impl RingBuffer {
     pub fn new() -> Self {
         RingBuffer {
             buf: Vec::new(),
+            cap: 0,
             head: 0,
             tail: 0,
         }
@@ -28,7 +36,7 @@ impl RingBuffer {
 
     #[cfg(test)]
     fn cap(&self) -> usize {
-        self.buf.len()
+        self.cap
     }
 
     /// Return the number of bytes in the buffer.
@@ -62,7 +70,7 @@ impl RingBuffer {
     #[inline(never)]
     #[cold]
     fn reserve_amortized(&mut self, amount: usize) {
-        let cap = self.buf.len();
+        let cap = self.cap;
         // We always need at least 1 unused element as the sentinel, so add 1 to the required capacity
         let required = cap + amount;
 
@@ -78,21 +86,39 @@ impl RingBuffer {
 
         vprintln!("Reallocate ringbuffer to fit: {} KB", new_cap / 1024);
 
-        let mut new_buf = vec![0u8; new_cap];
+        // Only the data is copied; the rest is initialised as the tail reaches it.
+        let mut new_buf = Vec::with_capacity(new_cap);
         let (s1, s2) = self.as_slices();
-        let (l1, l2) = (s1.len(), s2.len());
-        new_buf[..l1].copy_from_slice(s1);
-        new_buf[l1..l1 + l2].copy_from_slice(s2);
+        new_buf.extend_from_slice(s1);
+        new_buf.extend_from_slice(s2);
+        self.tail = new_buf.len();
         self.buf = new_buf;
+        self.cap = new_cap;
         self.head = 0;
-        self.tail = l1 + l2;
+    }
+
+    /// Initialise the ring up to `end`, at most `cap`, before the tail writes there.
+    #[inline(always)]
+    fn init_to(&mut self, end: usize) {
+        if end > self.buf.len() {
+            self.init_ahead(end);
+        }
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn init_ahead(&mut self, end: usize) {
+        debug_assert!(end <= self.cap);
+        // Within `buf`'s capacity, which is `cap`: no reallocation.
+        self.buf.resize(usize::min(end + INIT_AHEAD, self.cap), 0);
     }
 
     #[allow(dead_code)]
     pub fn push_back(&mut self, byte: u8) {
         self.reserve(1);
+        self.init_to(self.tail + 1);
         self.buf[self.tail] = byte;
-        self.tail = (self.tail + 1) % self.buf.len();
+        self.advance_tail(1);
     }
 
     /// Fetch the byte stored at the selected index from the buffer, returning it, or
@@ -100,7 +126,7 @@ impl RingBuffer {
     #[allow(dead_code)]
     pub fn get(&self, idx: usize) -> Option<u8> {
         if idx < self.len() {
-            Some(self.buf[(self.head + idx) % self.buf.len()])
+            Some(self.buf[(self.head + idx) % self.cap])
         } else {
             None
         }
@@ -110,8 +136,8 @@ impl RingBuffer {
     #[inline(always)]
     fn advance_tail(&mut self, len: usize) {
         let tail = self.tail + len;
-        self.tail = if tail >= self.buf.len() {
-            tail - self.buf.len()
+        self.tail = if tail >= self.cap {
+            tail - self.cap
         } else {
             tail
         };
@@ -124,9 +150,31 @@ impl RingBuffer {
             return;
         }
         self.reserve(len);
+        let tail = self.tail;
+        // Where a write from the tail may run to in one piece, initialised: the reserve leaves
+        // room up to the head if that is ahead.
+        let limit = if tail >= self.head {
+            self.buf.len()
+        } else {
+            self.head
+        };
+        if tail + len <= limit {
+            self.buf[tail..tail + len].copy_from_slice(data);
+            self.advance_tail(len);
+        } else {
+            self.extend_wrapping(data);
+        }
+    }
+
+    /// [`Self::extend`] where the data wraps at the end of the ring, or reaches past what is
+    /// initialised.
+    #[cold]
+    fn extend_wrapping(&mut self, data: &[u8]) {
+        let len = data.len();
         let (f1, _) = self.free_slice_lengths_ordered();
         let in_f1 = usize::min(len, f1);
         let tail = self.tail;
+        self.init_to(tail + in_f1);
         self.buf[tail..tail + in_f1].copy_from_slice(&data[..in_f1]);
         if in_f1 < len {
             self.buf[..len - in_f1].copy_from_slice(&data[in_f1..]);
@@ -140,14 +188,14 @@ impl RingBuffer {
     pub fn truncate(&mut self, len: usize) {
         debug_assert!(len <= self.len());
         if len < self.len() {
-            self.tail = (self.head + len) % self.buf.len();
+            self.tail = (self.head + len) % self.cap;
         }
     }
 
     pub fn drop_first_n(&mut self, amount: usize) {
         debug_assert!(amount <= self.len());
         let amount = usize::min(amount, self.len());
-        self.head = (self.head + amount) % self.buf.len().max(1);
+        self.head = (self.head + amount) % self.cap.max(1);
     }
 
     /// Return the size of the two contiguous occupied sections of memory used
@@ -156,7 +204,7 @@ impl RingBuffer {
         if self.tail >= self.head {
             (self.tail - self.head, 0)
         } else {
-            (self.buf.len() - self.head, self.tail)
+            (self.cap - self.head, self.tail)
         }
     }
 
@@ -165,7 +213,7 @@ impl RingBuffer {
         if self.tail >= self.head {
             (&self.buf[self.head..self.tail], &[])
         } else {
-            (&self.buf[self.head..], &self.buf[..self.tail])
+            (&self.buf[self.head..self.cap], &self.buf[..self.tail])
         }
     }
 
@@ -183,7 +231,7 @@ impl RingBuffer {
         if self.tail < self.head {
             (self.head - self.tail, 0)
         } else {
-            (self.buf.len() - self.tail, self.head)
+            (self.cap - self.tail, self.head)
         }
     }
 
@@ -196,15 +244,16 @@ impl RingBuffer {
         debug_assert!(start + len <= self.len());
         self.reserve(len);
 
-        let cap = self.buf.len();
+        let cap = self.cap;
         let mut src = self.head + start;
         if src >= cap {
             src -= cap;
         }
         let dst = self.tail;
-        // How far a write from the tail may run without reaching the data.
+        // How far a write from the tail may run without reaching the data, or past what is
+        // initialised.
         let room = if dst >= self.head {
-            cap - dst
+            self.buf.len() - dst
         } else {
             self.head - dst
         };
@@ -214,7 +263,10 @@ impl RingBuffer {
             // Contiguous on both sides, with room to round the copy up: whole
             // chunks, the bytes past `len` read from anywhere in the buffer and
             // written into free space. A chunk never reads what an earlier one
-            // wrote within `len`, as the source ends at or before `dst`.
+            // wrote within `len`, as the source ends at or before `dst`. It reads
+            // within what is initialised: a source before `dst` ends before
+            // `dst + rounded`, and one after it is in the wrapped part, which the
+            // tail has passed.
             if rounded == CHUNK {
                 self.buf.copy_within(src..src + CHUNK, dst);
             } else {
@@ -235,8 +287,10 @@ impl RingBuffer {
     /// overlap.
     #[cold]
     fn copy_wrapping(&mut self, mut src: usize, len: usize) {
-        let cap = self.buf.len();
+        let cap = self.cap;
         let mut dst = self.tail;
+        // Up to the end of the ring if it wraps, and what it wraps to was data before.
+        self.init_to(usize::min(dst + len, cap));
         let mut left = len;
         while left > 0 {
             let n = left.min(cap - src).min(cap - dst);
@@ -261,6 +315,7 @@ impl RingBuffer {
         let (f1, _) = self.free_slice_lengths_ordered();
         let fill1 = usize::min(f1, fill_length);
         let tail = self.tail;
+        self.init_to(tail + fill1);
         self.buf[tail..tail + fill1].fill(fill_with);
         if fill1 < fill_length {
             self.buf[..fill_length - fill1].fill(fill_with);
@@ -280,6 +335,7 @@ impl RingBuffer {
         let (f1, _) = self.free_slice_lengths_ordered();
         let fill1 = usize::min(f1, fill_length);
         let tail = self.tail;
+        self.init_to(tail + fill1);
         read.read_exact(&mut self.buf[tail..tail + fill1])?;
         if fill1 < fill_length {
             read.read_exact(&mut self.buf[..fill_length - fill1])?;
@@ -431,6 +487,26 @@ mod tests {
         rb.extend_from_within(0, 4);
         assert_eq!(b"11", rb.as_slices().0);
         assert_eq!(b"111111", rb.as_slices().1);
+    }
+
+    /// A reserve allocates, but initialises only as far as the tail writes, a step ahead.
+    #[test]
+    fn initialised_as_written() {
+        let mut rb = RingBuffer::new();
+        rb.reserve(1 << 20);
+        assert!(rb.cap() > 1 << 20);
+        assert_eq!(rb.buf.len(), 0);
+        rb.extend(b"0123456789");
+        rb.extend_from_within(0, 10);
+        rb.extend_and_fill(7, 5);
+        assert_eq!(rb.buf.len(), 10 + super::INIT_AHEAD);
+        assert_eq!(
+            rb.as_slices().0,
+            b"01234567890123456789\x07\x07\x07\x07\x07"
+        );
+        // Grown, only the data is copied.
+        rb.reserve(1 << 21);
+        assert_eq!(rb.buf.len(), 25);
     }
 
     /// Random extends, drops and copies from within, checked against a plain
