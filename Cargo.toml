@@ -14,7 +14,6 @@ categories = ["compression"]
 [dependencies]
 # Locked behind the `hash` feature flag
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"], optional = true }
-fastrand = { version = "2.5", optional = true }
 
 # Internal feature, only used when building as part of libstd, not part of the
 # stable interface of this crate.
@@ -23,14 +22,11 @@ alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-all
 
 [dev-dependencies]
 criterion = "0.8"
-rand = "0.10"
 zstd = "0.14"
 
 [features]
 default = ["hash", "std"]
-dict_builder = ["std", "dep:fastrand"]
 hash = ["dep:twox-hash"]
-fuzz_exports = []
 std = []
 
 # Internal feature, only used when building as part of libstd, not part of the

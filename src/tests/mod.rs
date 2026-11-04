@@ -838,8 +838,6 @@ fn test_literals_left_after_sequences_bounded_by_block_maximum_size() {
 pub mod bit_reader;
 pub mod decode_corpus;
 pub mod dict_test;
-#[cfg(feature = "std")]
-pub mod encode_corpus;
 pub mod fuzz_regressions;
 
 #[cfg(feature = "std")]
@@ -854,13 +852,13 @@ fn verbose_disabled() {
 #[test]
 fn peek_shows_what_collect_retains() {
     use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
-    use crate::encoding::{CompressionLevel, compress_to_vec};
 
     // Several blocks' worth, which does not all repeat.
     let data: Vec<u8> = (0..400_000u32)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8 ^ (i / 1000) as u8)
         .collect();
-    let compressed = compress_to_vec(&data[..], CompressionLevel::Fastest);
+    // Compressed by libzstd at level 1, which the zstd crate binds.
+    let compressed = zstd::bulk::compress(&data, 1).unwrap();
     let mut decoder = FrameDecoder::new();
     let mut source = &compressed[..];
     decoder.init(&mut source).unwrap();
