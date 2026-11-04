@@ -46,7 +46,6 @@ impl DecodeBuffer {
     pub fn reset(&mut self, window_size: usize) {
         self.window_size = window_size;
         self.buffer.clear();
-        self.buffer.reserve(self.window_size);
         self.dict_content.clear();
         self.total_output_counter = 0;
         #[cfg(feature = "hash")]
@@ -57,6 +56,11 @@ impl DecodeBuffer {
 
     pub fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// Make room for `amount` more bytes.
+    pub fn reserve(&mut self, amount: usize) {
+        self.buffer.reserve(amount);
     }
 
     /// Undo the bytes added since the buffer was `len` long, which have not been

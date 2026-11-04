@@ -25,7 +25,38 @@ impl<'s> BitReader<'s> {
         self.idx -= n;
     }
 
+    /// Read `n` bits, at most 64, the first bit read the lowest.
+    #[inline]
     pub fn get_bits(&mut self, n: usize) -> Result<u64, GetBitsError> {
+        if n > 56 {
+            return self.get_bits_wide(n);
+        }
+        if self.bits_left() < n {
+            return Err(GetBitsError::NotEnoughRemainingBits {
+                requested: n,
+                remaining: self.bits_left(),
+            });
+        }
+        // The 8 bytes from the current one, which hold all `n` bits, short of the source's end
+        // padded with zeroes.
+        let byte = self.idx / 8;
+        let window = match self.source.get(byte..byte + 8) {
+            Some(bytes) => u64::from_le_bytes(bytes.try_into().unwrap()),
+            None => {
+                let rest = &self.source[byte..];
+                let mut bytes = [0; 8];
+                bytes[..rest.len()].copy_from_slice(rest);
+                u64::from_le_bytes(bytes)
+            }
+        };
+        let value = (window >> (self.idx % 8)) & ((1 << n) - 1);
+        self.idx += n;
+        Ok(value)
+    }
+
+    /// [`Self::get_bits`] for more than 56 bits, which 8 bytes may not hold: in two reads.
+    #[cold]
+    fn get_bits_wide(&mut self, n: usize) -> Result<u64, GetBitsError> {
         if n > 64 {
             return Err(GetBitsError::TooManyBits {
                 num_requested_bits: n,
@@ -38,56 +69,9 @@ impl<'s> BitReader<'s> {
                 remaining: self.bits_left(),
             });
         }
-
-        let old_idx = self.idx;
-
-        let bits_left_in_current_byte = 8 - (self.idx % 8);
-        let bits_not_needed_in_current_byte = 8 - bits_left_in_current_byte;
-
-        //collect bits from the currently pointed to byte
-        let mut value = u64::from(self.source[self.idx / 8] >> bits_not_needed_in_current_byte);
-
-        if bits_left_in_current_byte >= n {
-            //no need for fancy stuff
-
-            //just mask all but the needed n bit
-            value &= (1 << n) - 1;
-            self.idx += n;
-        } else {
-            self.idx += bits_left_in_current_byte;
-
-            //n spans over multiple bytes
-            let full_bytes_needed = (n - bits_left_in_current_byte) / 8;
-            let bits_in_last_byte_needed = n - bits_left_in_current_byte - full_bytes_needed * 8;
-
-            assert!(
-                bits_left_in_current_byte + full_bytes_needed * 8 + bits_in_last_byte_needed == n
-            );
-
-            let mut bit_shift = bits_left_in_current_byte; //this many bits are already set in value
-
-            assert!(self.idx.is_multiple_of(8));
-
-            //collect full bytes
-            for _ in 0..full_bytes_needed {
-                value |= u64::from(self.source[self.idx / 8]) << bit_shift;
-                self.idx += 8;
-                bit_shift += 8;
-            }
-
-            assert!(n - bit_shift == bits_in_last_byte_needed);
-
-            if bits_in_last_byte_needed > 0 {
-                let val_las_byte =
-                    u64::from(self.source[self.idx / 8]) & ((1 << bits_in_last_byte_needed) - 1);
-                value |= val_las_byte << bit_shift;
-                self.idx += bits_in_last_byte_needed;
-            }
-        }
-
-        assert!(self.idx == old_idx + n);
-
-        Ok(value)
+        let low = self.get_bits(32)?;
+        let high = self.get_bits(n - 32)?;
+        Ok(low | (high << 32))
     }
 }
 

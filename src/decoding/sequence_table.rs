@@ -2,8 +2,8 @@
 //! state holds what decoding it needs, the code's value and extra bits as well as the next
 //! state's, so a sequence is three lookups and no translation of codes.
 
-use crate::decoding::errors::{DecodeSequenceError, FSEDecoderError};
-use crate::fse::FSETable;
+use crate::decoding::errors::{DecodeSequenceError, FSEDecoderError, FSETableError};
+use crate::fse::{FSETable, build_states};
 use alloc::vec::Vec;
 
 /// One state of a sequence decoding table.
@@ -86,38 +86,56 @@ impl SeqTable {
         }
     }
 
-    /// Take the states of `fse`, a table of `kind`'s codes.
-    pub fn build_from_fse(&mut self, fse: &FSETable, kind: SeqKind) {
-        self.sized();
-        for (entry, state) in self.entries.iter_mut().zip(&fse.decode) {
-            let (base_value, nb_add_bits) = kind.code_value(state.symbol);
-            *entry = SeqEntry {
-                base_value,
-                next_state: state.base_line as u16,
-                nb_add_bits,
-                nb_bits: state.num_bits,
-            };
-        }
-        self.accuracy_log = Some(fse.accuracy_log);
-        self.holds_predefined = false;
+    /// Build the table of `fse`'s distribution (read with [`FSETable::read_distribution`]), a
+    /// table of `kind`'s codes.
+    pub fn build_from_fse(&mut self, fse: &FSETable, kind: SeqKind) -> Result<(), FSETableError> {
+        self.build(fse.accuracy_log, &fse.symbol_probabilities, kind)
     }
 
     /// Take the predefined distribution's states, unless the table already holds them.
-    pub fn build_predefined(
-        &mut self,
-        fse: &mut FSETable,
-        kind: SeqKind,
-    ) -> Result<(), crate::decoding::errors::FSETableError> {
+    pub fn build_predefined(&mut self, kind: SeqKind) -> Result<(), FSETableError> {
         let (acc_log, distribution): (u8, &[i32]) = match kind {
             SeqKind::LiteralLength => (LL_DEFAULT_ACC_LOG, &LL_DEFAULT_DISTRIBUTION),
             SeqKind::MatchLength => (ML_DEFAULT_ACC_LOG, &ML_DEFAULT_DISTRIBUTION),
             SeqKind::Offset => (OF_DEFAULT_ACC_LOG, &OF_DEFAULT_DISTRIBUTION),
         };
         if !self.holds_predefined {
-            fse.build_from_probabilities(acc_log, distribution)?;
-            self.build_from_fse(fse, kind);
+            self.build(acc_log, distribution, kind)?;
             self.holds_predefined = true;
         }
+        self.accuracy_log = Some(acc_log);
+        Ok(())
+    }
+
+    /// The states of a distribution of `kind`'s codes, each with its code's value, built
+    /// straight from the probabilities as libzstd builds them (`ZSTD_buildFSETable`).
+    fn build(
+        &mut self,
+        acc_log: u8,
+        probabilities: &[i32],
+        kind: SeqKind,
+    ) -> Result<(), FSETableError> {
+        self.accuracy_log = None;
+        self.holds_predefined = false;
+        self.sized();
+        let entries: &mut [SeqEntry; SIZE] = self
+            .entries
+            .as_mut_slice()
+            .try_into()
+            .expect("sized to SIZE");
+        build_states(
+            acc_log,
+            probabilities,
+            |state, code, nb_bits, next_state| {
+                let (base_value, nb_add_bits) = kind.code_value(code);
+                entries[state & (SIZE - 1)] = SeqEntry {
+                    base_value,
+                    next_state: next_state as u16,
+                    nb_add_bits,
+                    nb_bits,
+                };
+            },
+        )?;
         self.accuracy_log = Some(acc_log);
         Ok(())
     }
@@ -259,45 +277,49 @@ mod tests {
         }
     }
 
-    /// A table built from an FSE table has its states, in order, with each code's value.
+    /// A table built from a distribution has the FSE table's states, in order, with each
+    /// code's value.
     #[test]
     fn built_from_fse_states() {
         let mut fse = FSETable::new(crate::blocks::sequence_section::MAX_LITERAL_LENGTH_CODE);
-        let mut table = SeqTable::new();
-        assert!(table.states().is_err());
-        table
-            .build_predefined(&mut fse, SeqKind::LiteralLength)
+        fse.build_from_probabilities(LL_DEFAULT_ACC_LOG, &LL_DEFAULT_DISTRIBUTION)
             .unwrap();
-        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
-        for (state, entry) in fse.decode.iter().enumerate() {
-            let (base_value, nb_add_bits) = SeqKind::LiteralLength.code_value(entry.symbol);
-            assert_eq!(
-                at(table.states().unwrap().1, state),
+        let expected: alloc::vec::Vec<SeqEntry> = fse
+            .decode
+            .iter()
+            .map(|entry| {
+                let (base_value, nb_add_bits) = SeqKind::LiteralLength.code_value(entry.symbol);
                 SeqEntry {
                     base_value,
                     next_state: entry.base_line as u16,
                     nb_add_bits,
                     nb_bits: entry.num_bits,
                 }
-            );
-        }
-        // Kept across a reset, as a new frame does, then taken again without a build.
-        let states: alloc::vec::Vec<SeqEntry> = (0..64)
-            .map(|state| at(table.states().unwrap().1, state))
+            })
             .collect();
-        table.reset();
-        assert!(table.states().is_err());
-        fse.reset();
-        table
-            .build_predefined(&mut fse, SeqKind::LiteralLength)
-            .unwrap();
-        assert!(fse.decode.is_empty(), "rebuilt");
-        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
-        assert!(
+        let states = |table: &SeqTable| -> alloc::vec::Vec<SeqEntry> {
             (0..64)
                 .map(|state| at(table.states().unwrap().1, state))
-                .eq(states.iter().copied())
-        );
+                .collect()
+        };
+
+        let mut table = SeqTable::new();
+        assert!(table.states().is_err());
+        table.build_from_fse(&fse, SeqKind::LiteralLength).unwrap();
+        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
+        assert_eq!(states(&table), expected);
+
+        // The predefined table is the same, kept across a reset, as a new frame does, and
+        // taken again without a build.
+        let mut table = SeqTable::new();
+        table.build_predefined(SeqKind::LiteralLength).unwrap();
+        assert_eq!(states(&table), expected);
+        table.reset();
+        assert!(table.states().is_err());
+        table.entries[0] = SeqEntry::default();
+        table.build_predefined(SeqKind::LiteralLength).unwrap();
+        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
+        assert_eq!(states(&table)[0], SeqEntry::default(), "not rebuilt");
 
         table.build_rle(20, SeqKind::LiteralLength);
         assert_eq!(table.states().unwrap().0, 0);
@@ -311,13 +333,7 @@ mod tests {
             }
         );
         // An RLE table is not the predefined one any more.
-        table
-            .build_predefined(&mut fse, SeqKind::LiteralLength)
-            .unwrap();
-        assert!(
-            (0..64)
-                .map(|state| at(table.states().unwrap().1, state))
-                .eq(states.iter().copied())
-        );
+        table.build_predefined(SeqKind::LiteralLength).unwrap();
+        assert_eq!(states(&table), expected);
     }
 }
