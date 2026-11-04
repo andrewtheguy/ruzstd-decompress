@@ -316,14 +316,14 @@ impl HuffmanTable {
         at: &mut usize,
     ) {
         let entry = pairs[(*window >> (64 - MAX_MAX_NUM_BITS)) as usize];
-        out[*at..*at + 2].copy_from_slice(&entry.symbols);
-        *window <<= entry.num_bits;
+        out[*at..*at + 2].copy_from_slice(&entry.symbols());
+        *window = entry.shift(*window);
         *at += entry.len();
     }
 
     /// [`Self::decode_4_streams`] from the table of pairs, [`PAIRS_A_REFILL`] lookups a stream a
-    /// refill, while every stream has [`PAIRS_OUT`] bytes of output left to take them; the rest
-    /// one symbol at a time from `decode`.
+    /// refill, while every stream has [`PAIRS_OUT`] bytes of output left to take them and can
+    /// refill fast; then each stream on its own (see [`Self::decode_stream_pairs`]).
     fn decode_4_streams_pairs(&self, brs: &mut [BitReaderReversed<'_>; 4], outs: [&mut [u8]; 4]) {
         let pairs = self.pairs();
         let [out0, out1, out2, out3] = outs;
@@ -375,10 +375,37 @@ impl HuffmanTable {
 
         *brs = [b0, b1, b2, b3];
         let [br0, br1, br2, br3] = brs;
-        self.decode_stream(br0, &mut out0[at0..]);
-        self.decode_stream(br1, &mut out1[at1..]);
-        self.decode_stream(br2, &mut out2[at2..]);
-        self.decode_stream(br3, &mut out3[at3..]);
+        self.decode_stream_pairs(br0, &mut out0[at0..]);
+        self.decode_stream_pairs(br1, &mut out1[at1..]);
+        self.decode_stream_pairs(br2, &mut out2[at2..]);
+        self.decode_stream_pairs(br3, &mut out3[at3..]);
+    }
+
+    /// The rest of one stream after the four together, which stop at the first to near its
+    /// source's end: from the table of pairs, as they do, while it can refill fast and has the
+    /// output; the rest one symbol at a time from `decode`.
+    fn decode_stream_pairs(&self, br: &mut BitReaderReversed<'_>, out: &mut [u8]) {
+        let pairs = self.pairs();
+        let mut b = br.clone();
+        let mut at = 0;
+        if b.can_refill_fast() {
+            b.ensure_bits_fast(57);
+            let mut w = b.sentinel_window();
+            while let Some(c) = room(out, at) {
+                let mut d = 0;
+                for _ in 0..PAIRS_A_REFILL {
+                    Self::decode_pair_aligned(pairs, &mut w, c, &mut d);
+                }
+                at += d;
+                if !b.can_refill_fast() {
+                    break;
+                }
+                w = b.refill_window_fast(w);
+            }
+            b.consume_to_sentinel(w);
+        }
+        *br = b;
+        self.decode_stream(br, &mut out[at..]);
     }
 
     /// Read from `source` and decode the input, populating the huffman decoding table.
@@ -701,22 +728,38 @@ pub struct Entry {
 }
 
 /// An entry of the table of pairs: the one or two symbols an index starts with, and their codes'
-/// bits together.
+/// bits together, in one `u32`, so that the table's build writes it in one store and a lookup
+/// takes each part with one or two operations. From the lowest bit: the first symbol and the
+/// second (or anything when there is none), 8 bits each; at bit 16, 1 when there is a second;
+/// and from bit 20, the bits, or in wasm two to their power (see [`Self::shift`]).
 #[derive(Copy, Clone, Debug, Default)]
-struct PairEntry {
-    /// The first symbol, then the second, or anything when there is one.
-    symbols: [u8; 2],
-    num_bits: u8,
-    /// 1 when the entry holds two symbols, else 0.
-    has_second: u8,
-}
+struct PairEntry(u32);
 
 impl PairEntry {
     fn new(first: u8, second: u8, num_bits: u8, len: u8) -> PairEntry {
-        PairEntry {
-            symbols: [first, second],
-            num_bits,
-            has_second: len - 1,
+        let bits = if cfg!(target_family = "wasm") {
+            1 << num_bits
+        } else {
+            u32::from(num_bits)
+        };
+        PairEntry(u32::from(first) | u32::from(second) << 8 | u32::from(len - 1) << 16 | bits << 20)
+    }
+
+    /// The first symbol, then the second.
+    #[inline(always)]
+    fn symbols(self) -> [u8; 2] {
+        (self.0 as u16).to_le_bytes()
+    }
+
+    /// `window` with the entry's bits shifted out. In wasm by a multiplication: V8's code for
+    /// x86-64 puts a variable shift's count in `cl`, moving registers around for each, and a
+    /// multiplication can take any of them.
+    #[inline(always)]
+    fn shift(self, window: u64) -> u64 {
+        if cfg!(target_family = "wasm") {
+            window.wrapping_mul(u64::from(self.0 >> 20))
+        } else {
+            window << (self.0 >> 20 & 63)
         }
     }
 
@@ -724,7 +767,7 @@ impl PairEntry {
     /// stores of a refill's lookups need no bounds checks.
     #[inline(always)]
     fn len(self) -> usize {
-        1 + usize::from(self.has_second & 1)
+        1 + (self.0 >> 16 & 1) as usize
     }
 }
 
