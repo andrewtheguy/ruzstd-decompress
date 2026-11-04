@@ -12,11 +12,16 @@ for r in rows:
     med[k + (r["variant"],)].append(r["median_ms"])
     checks[r["file"]].add(r["check"])
     size[r["file"]] = (r["in"], r["out"])
+if not any(r["variant"] == base for r in rows):
+    sys.exit(f"no rows for the baseline {base}")
 bad = {f: c for f, c in checks.items() if len(c) > 1}
 print("outputs differ:", bad if bad else "none")
 for plat in [p for p in ("native", "wasm") if any(r["platform"] == p for r in rows)]:
     # A variant without a build for this platform (libzstd has no wasm) is left out of it
     variants = sorted({r["variant"] for r in rows if r["platform"] == plat})
+    if base not in variants:
+        print(f"\n## {plat}: skipped, no {base} rows")
+        continue
     print(f"\n## {plat}: ms per pass (median of rounds), and vs {base}\n")
     print("| workload | MB out | " + " | ".join(variants) + f" | spread {base} |")
     print("|---|---:|" + "---:|" * len(variants) + "---:|")

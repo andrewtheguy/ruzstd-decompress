@@ -155,8 +155,8 @@ The heaviest workloads, ms a pass:
 Every workload: [`results/run3-peek-perf.md`](results/run3-peek-perf.md)
 (`summary.py results/run3-peek-perf.jsonl M`).
 
-- The video and mixed tiles, where the time goes in zDesk, decode in under
-  half the time, natively and in wasm. The general corpora gain 6–25%.
+- The video and mixed tiles, where the time goes in zDesk, decode in 38–49% of
+  M's time natively and 41–53% in wasm. The general corpora gain 6–25%.
 - libzstd's lead over ruzstd falls from 2.6 times to 1.8 times natively over
   all, and on the video and mixed tiles from 4.5–6.7 times to 2.2–2.5 times.
 - `decode` and `interop` fuzzing, four minutes each, found nothing.
