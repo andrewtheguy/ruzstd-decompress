@@ -2,13 +2,14 @@ use super::super::blocks::sequence_section::ModeType;
 use super::super::blocks::sequence_section::Sequence;
 use super::super::blocks::sequence_section::SequencesHeader;
 use super::scratch::FSEScratch;
+use super::sequence_table::SeqKind;
+#[cfg(test)]
+use super::sequence_table::{LL_DEFAULT_ACC_LOG, LL_DEFAULT_DISTRIBUTION};
 use crate::bit_io::BitReaderReversed;
 use crate::blocks::sequence_section::{
     MAX_LITERAL_LENGTH_CODE, MAX_MATCH_LENGTH_CODE, MAX_OFFSET_CODE,
 };
 use crate::decoding::errors::DecodeSequenceError;
-use crate::fse::FSEDecoder;
-use alloc::vec::Vec;
 
 /// Decode the provided source as a series of sequences, passing each one to `execute`
 /// as soon as it is decoded.
@@ -16,7 +17,7 @@ pub fn decode_sequences<E: From<DecodeSequenceError>>(
     section: &SequencesHeader,
     source: &[u8],
     scratch: &mut FSEScratch,
-    execute: impl FnMut(Sequence) -> Result<(), E>,
+    mut execute: impl FnMut(Sequence) -> Result<(), E>,
 ) -> Result<(), E> {
     let bytes_read = maybe_update_fse_tables(section, source, scratch)?;
 
@@ -40,101 +41,32 @@ pub fn decode_sequences<E: From<DecodeSequenceError>>(
         return Err(DecodeSequenceError::ExtraPadding { skipped_bits }.into());
     }
 
-    if scratch.ll_rle.is_some() || scratch.ml_rle.is_some() || scratch.of_rle.is_some() {
-        decode_sequences_with_rle(section, &mut br, scratch, execute)
-    } else {
-        decode_sequences_without_rle(section, &mut br, scratch, execute)
-    }
-}
-
-#[inline(always)]
-fn decode_sequences_with_rle<E: From<DecodeSequenceError>>(
-    section: &SequencesHeader,
-    br: &mut BitReaderReversed<'_>,
-    scratch: &FSEScratch,
-    mut execute: impl FnMut(Sequence) -> Result<(), E>,
-) -> Result<(), E> {
-    let mut ll_dec = FSEDecoder::new(&scratch.literal_lengths);
-    let mut ml_dec = FSEDecoder::new(&scratch.match_lengths);
-    let mut of_dec = FSEDecoder::new(&scratch.offsets);
-
-    if scratch.ll_rle.is_none() {
-        ll_dec.init_state(br).map_err(DecodeSequenceError::from)?;
-    }
-    if scratch.of_rle.is_none() {
-        of_dec.init_state(br).map_err(DecodeSequenceError::from)?;
-    }
-    if scratch.ml_rle.is_none() {
-        ml_dec.init_state(br).map_err(DecodeSequenceError::from)?;
-    }
+    // An RLE table is a table of one state that reads no bits, so it needs no case of its own.
+    let (ll_table, ml_table, of_table) = (&scratch.ll, &scratch.ml, &scratch.of);
+    let mut ll_state = br.get_bits(ll_table.accuracy_log()?) as usize;
+    let mut of_state = br.get_bits(of_table.accuracy_log()?) as usize;
+    let mut ml_state = br.get_bits(ml_table.accuracy_log()?) as usize;
 
     for seq_idx in 0..section.num_sequences {
-        //get the codes from either the RLE byte or from the decoder
-        let ll_code = if let Some(ll_rle) = scratch.ll_rle {
-            ll_rle
-        } else {
-            ll_dec.decode_symbol()
-        };
-        let ml_code = if let Some(ml_rle) = scratch.ml_rle {
-            ml_rle
-        } else {
-            ml_dec.decode_symbol()
-        };
-        let of_code = if let Some(of_rle) = scratch.of_rle {
-            of_rle
-        } else {
-            of_dec.decode_symbol()
-        };
+        let ll = ll_table.get(ll_state);
+        let ml = ml_table.get(ml_state);
+        let of = of_table.get(of_state);
 
-        let (ll_value, ll_num_bits) = lookup_ll_code(ll_code);
-        let (ml_value, ml_num_bits) = lookup_ml_code(ml_code);
-
-        //println!("Sequence: {}", i);
-        //println!("of stat: {}", of_dec.state);
-        //println!("of Code: {}", of_code);
-        //println!("ll stat: {}", ll_dec.state);
-        //println!("ll bits: {}", ll_num_bits);
-        //println!("ll Code: {}", ll_value);
-        //println!("ml stat: {}", ml_dec.state);
-        //println!("ml bits: {}", ml_num_bits);
-        //println!("ml Code: {}", ml_value);
-        //println!("");
-
-        if of_code > MAX_OFFSET_CODE {
-            return Err(DecodeSequenceError::UnsupportedOffset {
-                offset_code: of_code,
-            }
-            .into());
-        }
-
-        let (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_num_bits, ll_num_bits);
-        let offset = obits as u32 + (1u32 << of_code);
-
-        if offset == 0 {
-            return Err(DecodeSequenceError::ZeroOffset.into());
-        }
-
+        let (of_add, ml_add, ll_add) =
+            br.get_bits_triple(of.nb_add_bits, ml.nb_add_bits, ll.nb_add_bits);
+        // An offset code's value is 1 << code, so offsets are never 0.
         let seq = Sequence {
-            ll: ll_value + ll_add as u32,
-            ml: ml_value + ml_add as u32,
-            of: offset,
+            ll: ll.base_value + ll_add as u32,
+            ml: ml.base_value + ml_add as u32,
+            of: of.base_value + of_add as u32,
         };
 
         if seq_idx + 1 < section.num_sequences {
-            //println!(
-            //    "Bits left: {} ({} bytes)",
-            //    br.bits_remaining(),
-            //    br.bits_remaining() / 8,
-            //);
-            if scratch.ll_rle.is_none() {
-                ll_dec.update_state(br);
-            }
-            if scratch.ml_rle.is_none() {
-                ml_dec.update_state(br);
-            }
-            if scratch.of_rle.is_none() {
-                of_dec.update_state(br);
-            }
+            let (ll_next, ml_next, of_next) =
+                br.get_bits_triple(ll.nb_bits, ml.nb_bits, of.nb_bits);
+            ll_state = usize::from(ll.next_state) + ll_next as usize;
+            ml_state = usize::from(ml.next_state) + ml_next as usize;
+            of_state = usize::from(of.next_state) + of_next as usize;
         }
 
         if br.bits_remaining() < 0 {
@@ -151,140 +83,6 @@ fn decode_sequences_with_rle<E: From<DecodeSequenceError>>(
         .into())
     } else {
         Ok(())
-    }
-}
-
-#[inline(always)]
-fn decode_sequences_without_rle<E: From<DecodeSequenceError>>(
-    section: &SequencesHeader,
-    br: &mut BitReaderReversed<'_>,
-    scratch: &FSEScratch,
-    mut execute: impl FnMut(Sequence) -> Result<(), E>,
-) -> Result<(), E> {
-    let mut ll_dec = FSEDecoder::new(&scratch.literal_lengths);
-    let mut ml_dec = FSEDecoder::new(&scratch.match_lengths);
-    let mut of_dec = FSEDecoder::new(&scratch.offsets);
-
-    ll_dec.init_state(br).map_err(DecodeSequenceError::from)?;
-    of_dec.init_state(br).map_err(DecodeSequenceError::from)?;
-    ml_dec.init_state(br).map_err(DecodeSequenceError::from)?;
-
-    for seq_idx in 0..section.num_sequences {
-        let ll_code = ll_dec.decode_symbol();
-        let ml_code = ml_dec.decode_symbol();
-        let of_code = of_dec.decode_symbol();
-
-        let (ll_value, ll_num_bits) = lookup_ll_code(ll_code);
-        let (ml_value, ml_num_bits) = lookup_ml_code(ml_code);
-
-        if of_code > MAX_OFFSET_CODE {
-            return Err(DecodeSequenceError::UnsupportedOffset {
-                offset_code: of_code,
-            }
-            .into());
-        }
-
-        let (obits, ml_add, ll_add) = br.get_bits_triple(of_code, ml_num_bits, ll_num_bits);
-        let offset = obits as u32 + (1u32 << of_code);
-
-        if offset == 0 {
-            return Err(DecodeSequenceError::ZeroOffset.into());
-        }
-
-        let seq = Sequence {
-            ll: ll_value + ll_add as u32,
-            ml: ml_value + ml_add as u32,
-            of: offset,
-        };
-
-        if seq_idx + 1 < section.num_sequences {
-            //println!(
-            //    "Bits left: {} ({} bytes)",
-            //    br.bits_remaining(),
-            //    br.bits_remaining() / 8,
-            //);
-            ll_dec.update_state(br);
-            ml_dec.update_state(br);
-            of_dec.update_state(br);
-        }
-
-        if br.bits_remaining() < 0 {
-            return Err(DecodeSequenceError::NotEnoughBytesForNumSequences.into());
-        }
-
-        execute(seq)?;
-    }
-
-    if br.bits_remaining() > 0 {
-        Err(DecodeSequenceError::ExtraBits {
-            bits_remaining: br.bits_remaining(),
-        }
-        .into())
-    } else {
-        Ok(())
-    }
-}
-
-/// Look up the provided state value from a literal length table predefined
-/// by the Zstandard reference document. Returns a tuple of (value, number of bits).
-///
-/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#appendix-a---decoding-tables-for-predefined-codes>
-fn lookup_ll_code(code: u8) -> (u32, u8) {
-    match code {
-        0..=15 => (u32::from(code), 0),
-        16 => (16, 1),
-        17 => (18, 1),
-        18 => (20, 1),
-        19 => (22, 1),
-        20 => (24, 2),
-        21 => (28, 2),
-        22 => (32, 3),
-        23 => (40, 3),
-        24 => (48, 4),
-        25 => (64, 6),
-        26 => (128, 7),
-        27 => (256, 8),
-        28 => (512, 9),
-        29 => (1024, 10),
-        30 => (2048, 11),
-        31 => (4096, 12),
-        32 => (8192, 13),
-        33 => (16384, 14),
-        34 => (32768, 15),
-        35 => (65536, 16),
-        _ => unreachable!("Illegal literal length code was: {}", code),
-    }
-}
-
-/// Look up the provided state value from a match length table predefined
-/// by the Zstandard reference document. Returns a tuple of (value, number of bits).
-///
-/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#appendix-a---decoding-tables-for-predefined-codes>
-fn lookup_ml_code(code: u8) -> (u32, u8) {
-    match code {
-        0..=31 => (u32::from(code) + 3, 0),
-        32 => (35, 1),
-        33 => (37, 1),
-        34 => (39, 1),
-        35 => (41, 1),
-        36 => (43, 2),
-        37 => (47, 2),
-        38 => (51, 3),
-        39 => (59, 3),
-        40 => (67, 4),
-        41 => (83, 4),
-        42 => (99, 5),
-        43 => (131, 7),
-        44 => (259, 8),
-        45 => (515, 9),
-        46 => (1027, 10),
-        47 => (2051, 11),
-        48 => (4099, 12),
-        49 => (8195, 13),
-        50 => (16387, 14),
-        51 => (32771, 15),
-        52 => (65539, 16),
-        _ => unreachable!("Illegal match length code was: {}", code),
     }
 }
 
@@ -314,7 +112,9 @@ fn maybe_update_fse_tables(
 
             vprintln!("Updating ll table");
             vprintln!("Used bytes: {}", bytes);
-            scratch.ll_rle = None;
+            scratch
+                .ll
+                .build_from_fse(&scratch.literal_lengths, SeqKind::LiteralLength);
         }
         ModeType::RLE => {
             vprintln!("Use RLE ll table");
@@ -325,15 +125,13 @@ fn maybe_update_fse_tables(
             if source[0] > MAX_LITERAL_LENGTH_CODE {
                 return Err(DecodeSequenceError::MissingByteForRleMlTable);
             }
-            scratch.ll_rle = Some(source[0]);
+            scratch.ll.build_rle(source[0], SeqKind::LiteralLength);
         }
         ModeType::Predefined => {
             vprintln!("Use predefined ll table");
-            scratch.literal_lengths.build_from_probabilities(
-                LL_DEFAULT_ACC_LOG,
-                &Vec::from(&LITERALS_LENGTH_DEFAULT_DISTRIBUTION[..]),
-            )?;
-            scratch.ll_rle = None;
+            scratch
+                .ll
+                .build_predefined(&mut scratch.literal_lengths, SeqKind::LiteralLength)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat ll table");
@@ -349,7 +147,7 @@ fn maybe_update_fse_tables(
             vprintln!("Updating of table");
             vprintln!("Used bytes: {}", bytes);
             bytes_read += bytes;
-            scratch.of_rle = None;
+            scratch.of.build_from_fse(&scratch.offsets, SeqKind::Offset);
         }
         ModeType::RLE => {
             vprintln!("Use RLE of table");
@@ -360,15 +158,13 @@ fn maybe_update_fse_tables(
             if of_source[0] > MAX_OFFSET_CODE {
                 return Err(DecodeSequenceError::MissingByteForRleMlTable);
             }
-            scratch.of_rle = Some(of_source[0]);
+            scratch.of.build_rle(of_source[0], SeqKind::Offset);
         }
         ModeType::Predefined => {
             vprintln!("Use predefined of table");
-            scratch.offsets.build_from_probabilities(
-                OF_DEFAULT_ACC_LOG,
-                &Vec::from(&OFFSET_DEFAULT_DISTRIBUTION[..]),
-            )?;
-            scratch.of_rle = None;
+            scratch
+                .of
+                .build_predefined(&mut scratch.offsets, SeqKind::Offset)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat of table");
@@ -384,7 +180,9 @@ fn maybe_update_fse_tables(
             bytes_read += bytes;
             vprintln!("Updating ml table");
             vprintln!("Used bytes: {}", bytes);
-            scratch.ml_rle = None;
+            scratch
+                .ml
+                .build_from_fse(&scratch.match_lengths, SeqKind::MatchLength);
         }
         ModeType::RLE => {
             vprintln!("Use RLE ml table");
@@ -395,15 +193,13 @@ fn maybe_update_fse_tables(
             if ml_source[0] > MAX_MATCH_LENGTH_CODE {
                 return Err(DecodeSequenceError::MissingByteForRleMlTable);
             }
-            scratch.ml_rle = Some(ml_source[0]);
+            scratch.ml.build_rle(ml_source[0], SeqKind::MatchLength);
         }
         ModeType::Predefined => {
             vprintln!("Use predefined ml table");
-            scratch.match_lengths.build_from_probabilities(
-                ML_DEFAULT_ACC_LOG,
-                &Vec::from(&MATCH_LENGTH_DEFAULT_DISTRIBUTION[..]),
-            )?;
-            scratch.ml_rle = None;
+            scratch
+                .ml
+                .build_predefined(&mut scratch.match_lengths, SeqKind::MatchLength)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat ml table");
@@ -414,46 +210,11 @@ fn maybe_update_fse_tables(
     Ok(bytes_read)
 }
 
-// The default Literal Length decoding table uses an accuracy logarithm of 6 bits.
-const LL_DEFAULT_ACC_LOG: u8 = 6;
-/// If [ModeType::Predefined] is selected for a symbol type, its FSE decoding
-/// table is generated using a predefined distribution table.
-///
-/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#literals-length>
-const LITERALS_LENGTH_DEFAULT_DISTRIBUTION: [i32; 36] = [
-    4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1,
-    -1, -1, -1, -1,
-];
-
-// The default Match Length decoding table uses an accuracy logarithm of 6 bits.
-const ML_DEFAULT_ACC_LOG: u8 = 6;
-/// If [ModeType::Predefined] is selected for a symbol type, its FSE decoding
-/// table is generated using a predefined distribution table.
-///
-/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#match-length>
-const MATCH_LENGTH_DEFAULT_DISTRIBUTION: [i32; 53] = [
-    1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1,
-];
-
-// The default Match Length decoding table uses an accuracy logarithm of 5 bits.
-const OF_DEFAULT_ACC_LOG: u8 = 5;
-/// If [ModeType::Predefined] is selected for a symbol type, its FSE decoding
-/// table is generated using a predefined distribution table.
-///
-/// <https://github.com/facebook/zstd/blob/dev/doc/zstd_compression_format.md#offset-codes>
-const OFFSET_DEFAULT_DISTRIBUTION: [i32; 29] = [
-    1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
-];
-
 #[test]
 fn test_ll_default() {
     let mut table = crate::fse::FSETable::new(MAX_LITERAL_LENGTH_CODE);
     table
-        .build_from_probabilities(
-            LL_DEFAULT_ACC_LOG,
-            &Vec::from(&LITERALS_LENGTH_DEFAULT_DISTRIBUTION[..]),
-        )
+        .build_from_probabilities(LL_DEFAULT_ACC_LOG, &LL_DEFAULT_DISTRIBUTION)
         .unwrap();
 
     #[cfg(feature = "std")]

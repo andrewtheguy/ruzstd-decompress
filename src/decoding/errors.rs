@@ -757,8 +757,6 @@ pub enum DecodeSequenceError {
     FSEDecoderError(FSEDecoderError),
     FSETableError(FSETableError),
     ExtraPadding { skipped_bits: i32 },
-    UnsupportedOffset { offset_code: u8 },
-    ZeroOffset,
     NotEnoughBytesForNumSequences,
     ExtraBits { bits_remaining: isize },
     MissingCompressionMode,
@@ -791,16 +789,6 @@ impl core::fmt::Display for DecodeSequenceError {
                     "Padding at the end of the sequence_section was more than a byte long: {skipped_bits} bits. Probably caused by data corruption",
                 )
             }
-            DecodeSequenceError::UnsupportedOffset { offset_code } => {
-                write!(
-                    f,
-                    "Do not support offsets bigger than 1<<32; got: {offset_code}",
-                )
-            }
-            DecodeSequenceError::ZeroOffset => write!(
-                f,
-                "Read an offset == 0. That is an illegal value for offsets"
-            ),
             DecodeSequenceError::NotEnoughBytesForNumSequences => write!(
                 f,
                 "Bytestream did not contain enough bytes to decode num_sequences"

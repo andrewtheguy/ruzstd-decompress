@@ -18,3 +18,4 @@ mod ringbuffer;
 pub(crate) mod scratch;
 pub(crate) mod sequence_execution;
 pub(crate) mod sequence_section_decoder;
+pub(crate) mod sequence_table;

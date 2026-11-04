@@ -4,6 +4,7 @@ use core::convert::TryInto;
 use crate::decoding::errors::DictionaryDecodeError;
 use crate::decoding::scratch::FSEScratch;
 use crate::decoding::scratch::HuffmanScratch;
+use crate::decoding::sequence_table::SeqKind;
 
 /// Zstandard includes support for "raw content" dictionaries, that store bytes optionally used
 /// during sequence execution.
@@ -102,6 +103,12 @@ impl Dictionary {
             return Err(DictionaryDecodeError::NotEnoughBytes);
         }
         let raw_tables = &raw_tables[ll_size..];
+        let fse = &mut new_dict.fse;
+        fse.of.build_from_fse(&fse.offsets, SeqKind::Offset);
+        fse.ml
+            .build_from_fse(&fse.match_lengths, SeqKind::MatchLength);
+        fse.ll
+            .build_from_fse(&fse.literal_lengths, SeqKind::LiteralLength);
 
         if raw_tables.len() < 12 {
             return Err(DictionaryDecodeError::NotEnoughBytes);
