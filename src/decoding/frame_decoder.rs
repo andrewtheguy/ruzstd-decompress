@@ -108,14 +108,9 @@ impl FrameDecoderState {
         let window_size = frame.window_size()?;
         Self::check_window_size(window_size, max_window_size)?;
         let mut decoder_scratch = DecoderScratch::new(window_size as usize);
-        // A frame that gives its size never holds more than that, nor more than its window:
-        // room for it at once, rather than grown to it a doubling at a time. At most a
-        // block's worth, which a block of a few bytes can make anyway, so that a header
-        // claiming a large frame costs nothing until the data does.
-        let room = window_size
-            .min(frame.frame_content_size())
-            .min(u64::from(crate::common::MAX_BLOCK_SIZE));
-        decoder_scratch.buffer.reserve(room as usize);
+        decoder_scratch
+            .buffer
+            .reserve(Self::initial_room(&frame, window_size));
         Ok(FrameDecoderState {
             frame_header: frame,
             frame_finished: false,
@@ -136,10 +131,24 @@ impl FrameDecoderState {
         self.frame_finished = false;
         self.block_counter = 0;
         self.decoder_scratch.reset(window_size as usize);
+        self.decoder_scratch
+            .buffer
+            .reserve(Self::initial_room(&self.frame_header, window_size));
         self.bytes_read_counter = u64::from(header_size);
         self.check_sum = None;
         self.using_dict = None;
         Ok(())
+    }
+
+    /// The room a frame's buffer is given before it decodes anything. A frame that gives its
+    /// size never holds more than that, nor more than its window: room for it at once, rather
+    /// than grown to it a doubling at a time. At most a block's worth, which a block of a few
+    /// bytes can make anyway, so that a header claiming a large frame costs nothing until the
+    /// data does.
+    fn initial_room(frame: &frame::FrameHeader, window_size: u64) -> usize {
+        window_size
+            .min(frame.frame_content_size())
+            .min(u64::from(crate::common::MAX_BLOCK_SIZE)) as usize
     }
 
     /// Reject a frame whose declared window exceeds the limit, before allocation.

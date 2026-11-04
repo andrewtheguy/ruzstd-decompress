@@ -46,7 +46,6 @@ impl DecodeBuffer {
     pub fn reset(&mut self, window_size: usize) {
         self.window_size = window_size;
         self.buffer.clear();
-        self.buffer.reserve(self.window_size);
         self.dict_content.clear();
         self.total_output_counter = 0;
         #[cfg(feature = "hash")]
