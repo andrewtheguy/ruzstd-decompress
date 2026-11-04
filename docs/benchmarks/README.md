@@ -712,6 +712,95 @@ spread (4.1%). Every workload:
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   the weights' overrun above, and nothing after the fix.
 
+## 2026-11-04: the table of pairs' loop in wasm
+
+The question: the table of pairs (run 10) made video 8–11% faster natively but
+only 6–7% in wasm, where the literals were still 60% of video's time in V8's
+profile. What in V8's code for the loop costs, and can it be avoided?
+
+What V8's code for the four-stream loop showed, on video 1920x1080:
+- **Every variable shift's count goes through `cl`.** x86-64 takes the count
+  of a shift by a register in `cl` alone (V8's code has no BMI2 `shlx`, which
+  the processor has), and
+  `rcx` also held the entry or the index, so each lookup's shift came with up
+  to three moves between registers.
+- **Two of the four streams' windows were in memory**, loaded and stored at
+  each lookup: the four windows, four output pointers, the table and the
+  memory's base are more than V8 has registers for.
+- **The four output positions in one vector**, as in run 10: each round of
+  four lookups moves their entries into a vector and the positions back out,
+  and V8 builds each vector constant again where it is used.
+- **The streams' ends.** The four streams decode together while all of them
+  have 8 bytes of source left; the first to near its end stops them all, and
+  the other three went on a symbol at a time from the single symbols' table.
+  `decode_stream` was 4% of video.
+- **The table's build** (3% of video) wrote each entry as four byte stores.
+
+| | |
+|---|---|
+| **A5** | `main` at `0e3496f` (collected as decoded, released as `v0.9.2-alpha.5`) |
+| **HW** | A5 with the commit (`4869e70`) |
+| **Z** | libzstd |
+
+The commit:
+- **In wasm, the window moves on by a multiplication**: by two to the power of
+  the entry's bits, which is the shift modulo 2^64, and a multiplication takes
+  any registers. Natively the shift stays; the multiplication made video 5–7%
+  slower there.
+- **The entry is one `u32`**: the two symbols, whether there is a second, and
+  from bit 20 the bits (natively) or two to their power (wasm, at most 2^11).
+  The build writes it in one store.
+- **Each stream finishes from the table of pairs** after the four stop
+  together, a stream at a time, and only its last bytes from the single
+  symbols' table. In the quick checks this was worth as much as the
+  multiplication on video in wasm, and nothing without it.
+
+Tried and left out, in the quick checks on lab1 (video, mixed and silesia,
+native and wasm):
+- **Two streams at a time**, so that their state fits in V8's registers:
+  video 15% slower in wasm and 25–40% natively.
+- **The multiplication natively too**: video 5–7% slower natively, mixed 3–6%.
+- **The entry holding how many symbols it has, masked with 3**, which saves
+  an addition and one of the vector constants a round: slower on both (video
+  2.5% natively against the entry alone), the masked count also needing 14
+  bytes of output a refill, not 10.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against A5:
+
+| | HW | libzstd |
+|---|---:|---:|
+| native | −0.3% | +2.2% |
+| wasm | **−0.8%** | |
+
+| workload | native A5 | native HW | wasm A5 | wasm HW | libzstd |
+|---|---:|---:|---:|---:|---:|
+| video 1920x1080 | 270 | 267 (−1.1%) | 354 | 337 (**−4.6%**) | 191 |
+| video 2880x1800@2 | 877 | 874 (−0.3%) | 1145 | 1074 (**−6.2%**) | 613 |
+| mixed 1920x1080, 200 MB | 419 | 416 (−0.9%) | 548 | 514 (**−6.3%**) | 302 |
+| mixed 2880x1800@2, 200 MB | 637 | 618 (−3.0%) | 793 | 780 (−1.6%) | 446 |
+| silesia `-3` | 339 | 334 (−1.7%) | 449 | 459 (+2.3%) | 215 |
+| silesia `-19` | 333 | 339 (+1.6%) | 460 | 463 (+0.8%) | 220 |
+| uncover 1920x1080 | 1.87 | 1.90 (+1.9%) | 2.34 | 2.36 (+0.9%) | 1.50 |
+
+ms a pass. The small tiles mostly decode their literals from the single
+symbols' table, which this does not change, and are within 2.2% of A5 either
+way. Silesia's +2.3% in wasm is inside its rounds' spread (5.2%). Every
+workload: [`results/run13-huffman-wasm.md`](results/run13-huffman-wasm.md).
+
+- The gain is smaller than the quick checks had it (video 1920x1080 −7.7% in
+  wasm, mixed −5.4%), and mixed 2880x1800@2 gains a quarter of what mixed
+  1920x1080 does.
+- In wasm, video now takes 1.23–1.26 times its native time, from 1.31.
+- A5 collects as it decodes (`v0.9.2-alpha.5`), so its planar frames are no
+  longer hashed: its video is 5% faster natively than run 12's TB. By geomean
+  natively, libzstd now takes 1.03 times HW's time. ruzstd is still
+  1.37–1.43 times slower on video and mixed, 1.5 times on silesia, and
+  1.1–1.3 times on uncover.
+- The wasm build grows by 0.7 KB, to 248 KB: the single stream's loop.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

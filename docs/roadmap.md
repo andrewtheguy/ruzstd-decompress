@@ -1,27 +1,18 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-04 (after the
-table builds, [`benchmarks/README.md`](benchmarks/README.md)). The figures
-are from `perf` profiles on lab1, natively unless they say wasm; zDesk's
-workload is the tiles, decoded in WebAssembly. The crate stays free of unsafe
-code.
+table of pairs' loop in wasm, [`benchmarks/README.md`](benchmarks/README.md)).
+The figures are from `perf` profiles on lab1, natively unless they say wasm;
+zDesk's workload is the tiles, decoded in WebAssembly. The crate stays free of
+unsafe code.
 
-By geomean, ruzstd and libzstd are now even natively, with the harness
+By geomean natively, libzstd takes 1.03 times ruzstd's time, with the harness
 keeping its decoders across tiles as zDesk's page does. ruzstd is faster on
 the still, drag, browser and terminal tiles; uncover is 1.1–1.3 times slower,
-and video, mixed and silesia 1.4–1.5 times.
+video and mixed 1.4 times, and silesia 1.5 times. In wasm, video takes
+1.23–1.26 times its native time.
 
-## 1. The Huffman loops in wasm
-
-The table of pairs made video 8–11% faster natively but 6–7% in wasm, where
-`decode_literals` is still 52% of video's time. In V8's code for the loop,
-every variable shift moves its count into `cl` and the streams' state is
-spilled; LLVM also vectorizes the four output positions' additions for
-`simd128` (packing them into one `u32` avoids that, and was slower). Worth
-trying: two streams to a loop, which needs fewer registers, or fewer lookups a
-refill.
-
-## 2. The sequences, again
+## 1. The sequences, again
 
 The sequence loop and its copies are still about a third of uncover's time.
 What is left of them:
@@ -32,7 +23,7 @@ What is left of them:
   and the block's decoded length, which could be checked once a block from
   the sums.
 
-## 3. What is left of the table builds
+## 2. What is left of the table builds
 
 On uncover, which builds 847 sequence tables and 88 Huffman tables a pass:
 - The sequence tables' build, 13% natively and 12% in wasm. Natively the loop
@@ -47,6 +38,18 @@ On uncover, which builds 847 sequence tables and 88 Huffman tables a pass:
   length.
 - Keeping a table that is the same as the last: 69% of terminal's sequence
   tables are, 1% of uncover's.
+
+## 3. The Huffman loops in wasm
+
+The table of pairs' loop now moves its windows on by a multiplication in
+wasm, and each stream finishes from the table of pairs: video 5–6% faster in
+wasm. In V8's code for the loop, two of the four streams' windows are still
+in memory, and the four output positions still go through a vector each round
+of lookups (packing them into one `u32` avoided that, and was slower). Two
+streams to a loop, which fits in the registers, was much slower (video 15% in
+wasm). What is left: fewer lookups a refill, or the single symbols' table,
+which the small tiles and silesia mostly use, with the multiplication too
+(its entries would need 4 bytes, not 2).
 
 ## 4. Smaller
 
