@@ -131,11 +131,8 @@ impl<V: AsMut<Vec<u8>>> HuffmanEncoder<'_, '_, V> {
             self.writer.change_bits(size_idx, encoded_len as u8, 8);
         } else {
             self.writer.write_bits(weights.len() as u8 + 127, 8);
-            let pairs = weights.chunks_exact(2);
-            let remainder = pairs.remainder();
-            for pair in pairs.into_iter() {
-                let weight1 = pair[0];
-                let weight2 = pair[1];
+            let (pairs, remainder) = weights.as_chunks::<2>();
+            for &[weight1, weight2] in pairs {
                 assert!(weight1 < 16);
                 assert!(weight2 < 16);
                 self.writer.write_bits(weight2, 4);
