@@ -8,7 +8,9 @@ for v in "$@"; do
   C=$S/benchcrates/$v
   mkdir -p $C/src
   cp $S/harness/decode_bench.rs $C/src/main.rs
-  cp $S/variants/$v/rust-toolchain.toml $C/
+  # The variant's own toolchain pin if it has one, else the default (stable)
+  rm -f $C/rust-toolchain.toml
+  if [ -e $S/variants/$v/rust-toolchain.toml ]; then cp $S/variants/$v/rust-toolchain.toml $C/; fi
   cat > $C/Cargo.toml <<TOML
 [package]
 name = "decode_bench"

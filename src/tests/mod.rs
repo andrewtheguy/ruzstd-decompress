@@ -886,3 +886,45 @@ fn peek_shows_what_collect_retains() {
     out.extend_from_slice(&decoder.collect().unwrap());
     assert_eq!(out, data);
 }
+
+/// A block that fails to decode adds nothing to the output: `peek` shows after the
+/// error what it showed before the block. Sequences are executed as they are decoded,
+/// so a block whose bitstream turns out bad at its end has to be undone.
+#[test]
+fn failed_block_adds_no_output() {
+    use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
+
+    let data: Vec<u8> = (0..160_000u32)
+        .map(|i| ((i.wrapping_mul(2_654_435_761) >> 24) as u8 % 7) ^ (i / 1000) as u8)
+        .collect();
+    let compressed = zstd::bulk::compress(&data, 3).unwrap();
+    let peeked = |decoder: &FrameDecoder| {
+        let (a, b) = decoder.peek();
+        [a, b].concat()
+    };
+    let mut failed_with_output_before = 0;
+    for at in (0..compressed.len()).step_by(31) {
+        for bit in [0x01u8, 0x80] {
+            let mut corrupt = compressed.clone();
+            corrupt[at] ^= bit;
+            let mut decoder = FrameDecoder::new();
+            let mut source = &corrupt[..];
+            if decoder.init(&mut source).is_err() {
+                continue;
+            }
+            while !decoder.is_finished() {
+                let before = peeked(&decoder);
+                match decoder.decode_blocks(&mut source, BlockDecodingStrategy::UptoBlocks(1)) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        assert_eq!(peeked(&decoder), before, "byte {at} bit {bit:#x}");
+                        failed_with_output_before += usize::from(!before.is_empty());
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    // Errors past the first block were reached, not only ones in the frame header.
+    assert!(failed_with_output_before > 0);
+}

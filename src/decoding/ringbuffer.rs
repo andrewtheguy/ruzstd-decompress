@@ -136,6 +136,14 @@ impl RingBuffer {
 
     /// Advance head past `amount` elements, effectively removing
     /// them from the buffer.
+    /// Drop the newest bytes, keeping the first `len`.
+    pub fn truncate(&mut self, len: usize) {
+        debug_assert!(len <= self.len());
+        if len < self.len() {
+            self.tail = (self.head + len) % self.buf.len();
+        }
+    }
+
     pub fn drop_first_n(&mut self, amount: usize) {
         debug_assert!(amount <= self.len());
         let amount = usize::min(amount, self.len());
@@ -440,7 +448,7 @@ mod tests {
         let mut rb = RingBuffer::new();
         let mut model: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         for step in 0..200_000 {
-            match next(4) {
+            match next(5) {
                 0 => {
                     let data: alloc::vec::Vec<u8> =
                         (0..next(40)).map(|_| next(256) as u8).collect();
@@ -451,6 +459,11 @@ mod tests {
                     let n = next(model.len() + 1);
                     rb.drop_first_n(n);
                     model.drain(..n);
+                }
+                2 if !model.is_empty() => {
+                    let n = next(model.len() + 1);
+                    rb.truncate(n);
+                    model.truncate(n);
                 }
                 _ if !model.is_empty() => {
                     let start = next(model.len());

@@ -59,6 +59,14 @@ impl DecodeBuffer {
         self.buffer.len()
     }
 
+    /// Undo the bytes added since the buffer was `len` long, which have not been
+    /// drained (and so not hashed) yet.
+    pub fn truncate(&mut self, len: usize) {
+        let dropped = self.buffer.len() - len;
+        self.buffer.truncate(len);
+        self.total_output_counter -= dropped as u64;
+    }
+
     pub fn extend_and_fill(&mut self, fill_with: u8, fill_length: usize) {
         self.buffer.extend_and_fill(fill_with, fill_length);
     }
@@ -76,6 +84,7 @@ impl DecodeBuffer {
         self.total_output_counter += data.len() as u64;
     }
 
+    #[inline(always)]
     pub fn repeat(&mut self, offset: usize, match_length: usize) -> Result<(), DecodeBufferError> {
         if offset > self.buffer.len() {
             self.repeat_from_dict(offset, match_length)

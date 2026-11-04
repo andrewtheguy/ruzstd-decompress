@@ -1,6 +1,5 @@
 //! Structures that wrap around various decoders to make decoding easier.
 
-use super::super::blocks::sequence_section::Sequence;
 use super::decode_buffer::DecodeBuffer;
 use crate::decoding::dictionary::Dictionary;
 use crate::fse::FSETable;
@@ -22,7 +21,6 @@ pub struct DecoderScratch {
     pub offset_hist: [u32; 3],
 
     pub literals_buffer: Vec<u8>,
-    pub sequences: Vec<Sequence>,
     pub block_content_buffer: Vec<u8>,
 }
 
@@ -45,14 +43,12 @@ impl DecoderScratch {
 
             block_content_buffer: Vec::new(),
             literals_buffer: Vec::new(),
-            sequences: Vec::new(),
         }
     }
 
     pub fn reset(&mut self, window_size: usize) {
         self.offset_hist = [1, 4, 8];
         self.literals_buffer.clear();
-        self.sequences.clear();
         self.block_content_buffer.clear();
 
         self.buffer.reset(window_size);

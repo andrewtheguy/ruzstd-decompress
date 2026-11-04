@@ -106,6 +106,61 @@ The raw lines are the `.jsonl` beside them.
   which ruzstd's does not: its figures for the small still-heavy samples at
   2880x1800@2 (still, terminal, drag) are pessimistic.
 
+## 2026-11-04: the `peek-perf` decoder commits
+
+The question: what do the safe decoder commits of the `peek-perf` branch buy
+here? They are Peter Knego's, written against the old `ruzstd/` layout and
+moved onto `master`:
+
+- inlining `FSEDecoder::update_state` and `DecodeBuffer::repeat`;
+- executing each sequence as it is decoded, with no `Vec` of sequences;
+- Huffman literals decoded with one table lookup a symbol, the four streams
+  interleaved in one loop;
+- the reverse bit reader's refill inlined, its end-of-source case cold.
+
+The branch's overshooting literal copy (unsafe, and reverted on the branch
+itself) is left out, as is its doubling repeat, which `master` has had since
+D.
+
+| | |
+|---|---|
+| **M** | `master` at `7bcbd58` (D, as merged) |
+| **P** | M with the four commits |
+| **Z** | libzstd, as before |
+
+The same workloads, machine, profile and method as above, but on rustc
+`1.99.1 (58cf8f9c3 2026-10-13)`, stable, for both: the repository no longer
+pins a toolchain. Every variant decoded every workload to the same output.
+
+Geomean over the 18 workloads, against M:
+
+| | P | libzstd |
+|---|---:|---:|
+| native | **−31.9%** | −62.4% |
+| wasm | **−27.4%** | |
+
+The heaviest workloads, ms a pass:
+
+| workload | native M | native P | wasm M | wasm P | libzstd |
+|---|---:|---:|---:|---:|---:|
+| video 1920x1080 | 1252 | 471 (−62.4%) | 1434 | 588 (−59.0%) | 188 |
+| video 2880x1800@2 | 3521 | 1492 (−57.6%) | 4087 | 1963 (−52.0%) | 602 |
+| mixed 1920x1080, 200 MB | 1668 | 688 (−58.8%) | 1946 | 869 (−55.3%) | 305 |
+| mixed 2880x1800@2, 200 MB | 1995 | 970 (−51.4%) | 2363 | 1262 (−46.6%) | 446 |
+| enwik9 `-3` | 3357 | 2623 (−21.9%) | 4227 | 3653 (−13.6%) | 1130 |
+| enwik9 `-19` | 2504 | 2218 (−11.4%) | 3229 | 2938 (−9.0%) | 1099 |
+| silesia `-3` | 637 | 481 (−24.5%) | 799 | 657 (−17.7%) | 213 |
+| silesia `-19` | 570 | 477 (−16.3%) | 716 | 672 (−6.2%) | 219 |
+
+Every workload: [`results/run3-peek-perf.md`](results/run3-peek-perf.md)
+(`summary.py results/run3-peek-perf.jsonl M`).
+
+- The video and mixed tiles, where the time goes in zDesk, decode in 38–49% of
+  M's time natively and 41–53% in wasm. The general corpora gain 6–25%.
+- libzstd's lead over ruzstd falls from 2.6 times to 1.8 times natively over
+  all, and on the video and mixed tiles from 4.5–6.7 times to 2.2–2.5 times.
+- `decode` and `interop` fuzzing, four minutes each, found nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
@@ -127,5 +182,7 @@ and results.
    into `bin/Z-native`.
 4. [`run.sh`](harness/run.sh) `OUT.jsonl VARIANT…` (wasm through
    [`run-wasi.mjs`](harness/run-wasi.mjs); `PLATFORMS=native` for native alone),
-   on a quiet machine, then [`summary.py`](harness/summary.py) `OUT.jsonl` for
-   the tables (`uv run --python 3.13 python -I summary.py OUT.jsonl`).
+   on a quiet machine, then [`summary.py`](harness/summary.py) `OUT.jsonl
+   [BASE]` for the tables against BASE, A by default (`uv run --python 3.13
+   python -I summary.py OUT.jsonl M`). `build.sh` uses a variant's
+   `rust-toolchain.toml` if it has one, else the default toolchain.

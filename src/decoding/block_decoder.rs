@@ -12,7 +12,7 @@ use crate::decoding::errors::{
     DecompressBlockError,
 };
 use crate::decoding::scratch::DecoderScratch;
-use crate::decoding::sequence_execution::execute_sequences;
+use crate::decoding::sequence_execution::SequenceExecutor;
 use crate::io::Read;
 
 pub struct BlockDecoder {
@@ -190,14 +190,28 @@ impl BlockDecoder {
         vprintln!("Slice for sequences: {}", raw.len());
 
         if seq_section.num_sequences != 0 {
-            decode_sequences(
-                &seq_section,
-                raw,
-                &mut workspace.fse,
-                &mut workspace.sequences,
-            )?;
-            vprintln!("Executing sequences");
-            execute_sequences(workspace, max_block_decoded_len)?;
+            // Sequences are executed as they are decoded, so an error in a later one, or in
+            // the end of the bitstream, comes after part of the block is in the buffer. Undo
+            // that part and the offset history, so a failed block adds nothing.
+            let len_before = workspace.buffer.len();
+            let offset_hist_before = workspace.offset_hist;
+            let mut executor = SequenceExecutor::new(
+                &mut workspace.buffer,
+                &workspace.literals_buffer,
+                &mut workspace.offset_hist,
+                max_block_decoded_len,
+            );
+            let result = decode_sequences(&seq_section, raw, &mut workspace.fse, |seq| {
+                executor
+                    .execute(seq)
+                    .map_err(DecompressBlockError::ExecuteSequencesError)
+            })
+            .and_then(|()| executor.finish().map_err(Into::into));
+            if let Err(err) = result {
+                workspace.buffer.truncate(len_before);
+                workspace.offset_hist = offset_hist_before;
+                return Err(err);
+            }
         } else {
             if !raw.is_empty() {
                 return Err(DecompressBlockError::DecodeSequenceError(
@@ -207,7 +221,6 @@ impl BlockDecoder {
                 ));
             }
             workspace.buffer.push(&workspace.literals_buffer);
-            workspace.sequences.clear();
         }
 
         Ok(())
