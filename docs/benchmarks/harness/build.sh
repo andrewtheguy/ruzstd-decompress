@@ -7,7 +7,11 @@ mkdir -p $S/bin
 for v in "$@"; do
   C=$S/benchcrates/$v
   mkdir -p $C/src
-  cp $S/harness/decode_bench.rs $C/src/main.rs
+  # The harness of the variant's own commit if it has one, since the decoder's API changes
+  # with it; else the scratch copy.
+  H=$S/variants/$v/docs/benchmarks/harness/decode_bench.rs
+  [ -e $H ] || H=$S/harness/decode_bench.rs
+  cp $H $C/src/main.rs
   # The variant's own toolchain pin if it has one, else the default (stable)
   rm -f $C/rust-toolchain.toml
   if [ -e $S/variants/$v/rust-toolchain.toml ]; then cp $S/variants/$v/rust-toolchain.toml $C/; fi

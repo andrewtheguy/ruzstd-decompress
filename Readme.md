@@ -66,7 +66,7 @@ recommended approach.
 #### Use the lower level FrameDecoder
 
 For an example see the src/bin/zstd.rs file. Basically you can decode the frame until either a
-given block count has been decoded or the decodebuffer has reached a certain size. Then you can collect no longer needed bytes from the buffer and do something with them, discard them and resume decoding the frame in a loop until the frame has been decoded completely.
+given block count has been decoded or the decodebuffer has reached a certain size. Then you can collect the bytes decoded so far and do something with them, and resume decoding the frame in a loop until the frame has been decoded completely. Collecting gives every byte as soon as its block is decoded; the decoder keeps the window that later blocks copy from by itself.
 
 ## Roadmap
 

@@ -11,28 +11,32 @@ use crate::decoding::errors::DecodeBufferError;
 pub const LITERALS_PADDING: usize = 16;
 const _: () = assert!(LITERALS_PADDING >= super::ringbuffer::CHUNK - 1);
 
+/// The frame's decoded bytes: those not yet collected, and before them as many of the
+/// collected ones as the window needs, which blocks to come may copy from.
 pub struct DecodeBuffer {
     buffer: RingBuffer,
+    /// How many of the buffer's first bytes have been collected: kept only for the window.
+    collected: usize,
     pub dict_content: Vec<u8>,
 
     pub window_size: usize,
     total_output_counter: u64,
+    /// The hash of the bytes dropped from the buffer; those still in it are hashed when the
+    /// checksum is asked for (see [`DecodeBuffer::checksum`]), so that collecting them early
+    /// costs nothing more.
     #[cfg(feature = "hash")]
-    pub hash: twox_hash::XxHash64,
+    hash: twox_hash::XxHash64,
 }
 
+/// Reads the bytes not yet collected, as many as fit.
 impl Read for DecodeBuffer {
     fn read(&mut self, target: &mut [u8]) -> Result<usize, Error> {
-        let max_amount = self.can_drain_to_window_size().unwrap_or(0);
-        let amount = max_amount.min(target.len());
-
         let mut written = 0;
-        self.drain_to(amount, |buf| {
+        self.collect_with(target.len(), |buf| {
             target[written..][..buf.len()].copy_from_slice(buf);
             written += buf.len();
             (buf.len(), Ok(()))
-        })?;
-        Ok(amount)
+        })
     }
 }
 
@@ -40,6 +44,7 @@ impl DecodeBuffer {
     pub fn new(window_size: usize) -> DecodeBuffer {
         DecodeBuffer {
             buffer: RingBuffer::new(),
+            collected: 0,
             dict_content: Vec::new(),
             window_size,
             total_output_counter: 0,
@@ -51,6 +56,7 @@ impl DecodeBuffer {
     pub fn reset(&mut self, window_size: usize) {
         self.window_size = window_size;
         self.buffer.clear();
+        self.collected = 0;
         self.dict_content.clear();
         self.total_output_counter = 0;
         #[cfg(feature = "hash")]
@@ -69,8 +75,9 @@ impl DecodeBuffer {
     }
 
     /// Undo the bytes added since the buffer was `len` long, which have not been
-    /// drained (and so not hashed) yet.
+    /// collected (and so not hashed) yet.
     pub fn truncate(&mut self, len: usize) {
+        debug_assert!(len >= self.collected);
         let dropped = self.buffer.len() - len;
         self.buffer.truncate(len);
         self.total_output_counter -= dropped as u64;
@@ -181,145 +188,79 @@ impl DecodeBuffer {
         }
     }
 
-    /// Check if and how many bytes can currently be drawn from the buffer
-    pub fn can_drain_to_window_size(&self) -> Option<usize> {
-        if self.buffer.len() > self.window_size {
-            Some(self.buffer.len() - self.window_size)
-        } else {
-            None
-        }
+    /// The XXH64 of every byte decoded since the reset, collected or not.
+    #[cfg(feature = "hash")]
+    pub fn checksum(&self) -> u64 {
+        let mut hash = self.hash.clone();
+        let (a, b) = self.buffer.as_slices();
+        hash.write(a);
+        hash.write(b);
+        hash.finish()
     }
 
-    //How many bytes can be drained if the window_size does not have to be maintained
-    pub fn can_drain(&self) -> usize {
-        self.buffer.len()
+    /// How many bytes are decoded and not yet collected.
+    pub fn can_collect(&self) -> usize {
+        self.buffer.len() - self.collected
     }
 
-    /// Every byte in the buffer, the window retained for decoding among them, in
-    /// order as the two parts of the ring buffer, without draining any.
-    pub fn as_slices(&self) -> (&[u8], &[u8]) {
-        self.buffer.as_slices()
-    }
-
-    /// Drain as much as possible while retaining enough so that decoding si still possible with the required window_size
-    /// At best call only if can_drain_to_window_size reports a 'high' number of bytes to reduce allocations
-    pub fn drain_to_window_size(&mut self) -> Option<Vec<u8>> {
-        //TODO investigate if it is possible to return the std::vec::Drain iterator directly without collecting here
-        match self.can_drain_to_window_size() {
-            None => None,
-            Some(can_drain) => {
-                let mut vec = Vec::with_capacity(can_drain);
-                self.drain_to(can_drain, |buf| {
-                    vec.extend_from_slice(buf);
-                    (buf.len(), Ok(()))
-                })
-                .ok()?;
-                Some(vec)
-            }
-        }
-    }
-
-    pub fn drain_to_window_size_writer(&mut self, mut sink: impl Write) -> Result<usize, Error> {
-        match self.can_drain_to_window_size() {
-            None => Ok(0),
-            Some(can_drain) => self.drain_to(can_drain, |buf| write_all_bytes(&mut sink, buf)),
-        }
-    }
-
-    /// drain the buffer completely
-    pub fn drain(&mut self) -> Vec<u8> {
-        let (slice1, slice2) = self.buffer.as_slices();
-        #[cfg(feature = "hash")]
-        {
-            self.hash.write(slice1);
-            self.hash.write(slice2);
-        }
-
-        let mut vec = Vec::with_capacity(slice1.len() + slice2.len());
-        vec.extend_from_slice(slice1);
-        vec.extend_from_slice(slice2);
-        self.buffer.clear();
+    /// Every byte not yet collected.
+    pub fn collect(&mut self) -> Vec<u8> {
+        let mut vec = Vec::with_capacity(self.can_collect());
+        let collected = self.collect_with(usize::MAX, |buf| {
+            vec.extend_from_slice(buf);
+            (buf.len(), Ok(()))
+        });
+        debug_assert!(collected.is_ok());
         vec
     }
 
-    pub fn drain_to_writer(&mut self, mut sink: impl Write) -> Result<usize, Error> {
-        let write_limit = self.buffer.len();
-        self.drain_to(write_limit, |buf| write_all_bytes(&mut sink, buf))
+    /// Write every byte not yet collected to `sink`, and return how many it took.
+    pub fn collect_to_writer(&mut self, mut sink: impl Write) -> Result<usize, Error> {
+        self.collect_with(usize::MAX, |buf| write_all_bytes(&mut sink, buf))
     }
 
-    pub fn read_all(&mut self, target: &mut [u8]) -> Result<usize, Error> {
-        let amount = self.buffer.len().min(target.len());
-
-        let mut written = 0;
-        self.drain_to(amount, |buf| {
-            target[written..][..buf.len()].copy_from_slice(buf);
-            written += buf.len();
-            (buf.len(), Ok(()))
-        })?;
-        Ok(amount)
-    }
-
-    /// Semantics of write_bytes:
-    /// Should dump as many of the provided bytes as possible to whatever sink until no bytes are left or an error is encountered
-    /// Return how many bytes have actually been dumped to the sink.
-    fn drain_to(
+    /// Hand up to `amount` of the bytes not yet collected, in order, to `write_bytes`, which
+    /// takes as many of those it is given as it can and says how many and whether it failed;
+    /// then drop the collected bytes that are past the window. Returns how many were taken.
+    fn collect_with(
         &mut self,
         amount: usize,
         mut write_bytes: impl FnMut(&[u8]) -> (usize, Result<(), Error>),
     ) -> Result<usize, Error> {
-        if amount == 0 {
-            return Ok(0);
-        }
-
-        struct DrainGuard<'a> {
-            buffer: &'a mut RingBuffer,
-            amount: usize,
-        }
-
-        impl Drop for DrainGuard<'_> {
-            fn drop(&mut self) {
-                if self.amount != 0 {
-                    self.buffer.drop_first_n(self.amount);
-                }
+        let (a, b) = self.buffer.as_slices();
+        let in_a = self.collected.min(a.len());
+        let parts = [&a[in_a..], &b[self.collected - in_a..]];
+        let mut written = 0;
+        let mut result = Ok(());
+        for part in parts {
+            let n = part.len().min(amount - written);
+            if n == 0 {
+                continue;
+            }
+            let (taken, part_result) = write_bytes(&part[..n]);
+            written += taken;
+            if part_result.is_err() || taken < n {
+                result = part_result;
+                break;
             }
         }
+        self.collected += written;
 
-        let mut drain_guard = DrainGuard {
-            buffer: &mut self.buffer,
-            amount: 0,
-        };
-
-        let (slice1, slice2) = drain_guard.buffer.as_slices();
-        let n1 = slice1.len().min(amount);
-        let n2 = slice2.len().min(amount - n1);
-
-        if n1 != 0 {
-            let (written1, res1) = write_bytes(&slice1[..n1]);
+        // The window is the newest `window_size` bytes, collected or not.
+        let past_window = self.buffer.len().saturating_sub(self.window_size);
+        let dropped = past_window.min(self.collected);
+        if dropped > 0 {
             #[cfg(feature = "hash")]
-            self.hash.write(&slice1[..written1]);
-            drain_guard.amount += written1;
-
-            // Apparently this is what clippy thinks is the best way of expressing this
-            res1?;
-
-            // Only if the first call to write_bytes was not a partial write we can continue with slice2
-            // Partial writes SHOULD never happen without res1 being an error, but lets just protect against it anyways.
-            if written1 == n1 && n2 != 0 {
-                let (written2, res2) = write_bytes(&slice2[..n2]);
-                #[cfg(feature = "hash")]
-                self.hash.write(&slice2[..written2]);
-                drain_guard.amount += written2;
-
-                // Apparently this is what clippy thinks is the best way of expressing this
-                res2?;
+            {
+                let (a, b) = self.buffer.as_slices();
+                let in_a = dropped.min(a.len());
+                self.hash.write(&a[..in_a]);
+                self.hash.write(&b[..dropped - in_a]);
             }
+            self.buffer.drop_first_n(dropped);
+            self.collected -= dropped;
         }
-
-        let amount_written = drain_guard.amount;
-        // Make sure we don't accidentally drop `DrainGuard` earlier.
-        drop(drain_guard);
-
-        Ok(amount_written)
+        result.map(|()| written)
     }
 }
 
@@ -373,23 +314,20 @@ mod tests {
             write_len: 10,
         };
 
+        // Each collect writes every new byte, and the buffer keeps the window of 100.
         let mut decode_buf = DecodeBuffer::new(100);
         decode_buf.push(b"0123456789");
         decode_buf.repeat(10, 90).unwrap();
         let repeats = 1000;
         for _ in 0..repeats {
-            assert_eq!(decode_buf.len(), 100);
             decode_buf.repeat(10, 50).unwrap();
-            assert_eq!(decode_buf.len(), 150);
-            decode_buf
-                .drain_to_window_size_writer(&mut short_writer)
-                .unwrap();
+            decode_buf.collect_to_writer(&mut short_writer).unwrap();
+            assert_eq!(decode_buf.can_collect(), 0);
             assert_eq!(decode_buf.len(), 100);
         }
 
-        assert_eq!(short_writer.buf.len(), repeats * 50);
-        decode_buf.drain_to_writer(&mut short_writer).unwrap();
-        assert_eq!(short_writer.buf.len(), repeats * 50 + 100);
+        assert_eq!(short_writer.buf.len(), 100 + repeats * 50);
+        assert!(short_writer.buf.chunks(10).all(|ten| ten == b"0123456789"));
     }
 
     #[test]
@@ -423,51 +361,86 @@ mod tests {
             block_every: 5,
         };
 
+        // A write that fails leaves what was not written to be collected again.
         let mut decode_buf = DecodeBuffer::new(100);
         decode_buf.push(b"0123456789");
         decode_buf.repeat(10, 90).unwrap();
         let repeats = 1000;
         for _ in 0..repeats {
-            assert_eq!(decode_buf.len(), 100);
             decode_buf.repeat(10, 50).unwrap();
-            assert_eq!(decode_buf.len(), 150);
-            loop {
-                match decode_buf.drain_to_window_size_writer(&mut short_writer) {
-                    Ok(written) => {
-                        if written == 0 {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        if e.kind() == ErrorKind::WouldBlock {
-                            continue;
-                        } else {
-                            panic!("Unexpected error {:?}", e);
-                        }
-                    }
+            while decode_buf.can_collect() > 0 {
+                match decode_buf.collect_to_writer(&mut short_writer) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                    Err(e) => panic!("Unexpected error {:?}", e),
                 }
             }
             assert_eq!(decode_buf.len(), 100);
         }
 
-        assert_eq!(short_writer.buf.len(), repeats * 50);
-        loop {
-            match decode_buf.drain_to_writer(&mut short_writer) {
-                Ok(written) => {
-                    if written == 0 {
-                        break;
+        assert_eq!(short_writer.buf.len(), 100 + repeats * 50);
+        assert!(short_writer.buf.chunks(10).all(|ten| ten == b"0123456789"));
+    }
+
+    /// Bytes pushed and repeated, with collects and reads of every size between, against a
+    /// `Vec` of the output: each byte is collected once, in order, as soon as it is added,
+    /// and the window is kept, as far back as a match may reach, however much was collected.
+    #[test]
+    fn collects_as_decoded_and_keeps_the_window() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for round in 0..300 {
+            let window = 1 + next(300);
+            let mut decode_buf = DecodeBuffer::new(window);
+            let mut model: Vec<u8> = Vec::new();
+            let mut out: Vec<u8> = Vec::new();
+            for _ in 0..200 {
+                let op = next(4);
+                match op {
+                    0 => {
+                        let data: Vec<u8> = (0..next(100)).map(|_| next(256) as u8).collect();
+                        decode_buf.push(&data);
+                        model.extend_from_slice(&data);
+                    }
+                    1 if !model.is_empty() => {
+                        let offset = 1 + next(model.len().min(window));
+                        let length = next(150);
+                        decode_buf.repeat(offset, length).unwrap();
+                        for _ in 0..length {
+                            model.push(model[model.len() - offset]);
+                        }
+                    }
+                    2 => out.extend_from_slice(&decode_buf.collect()),
+                    _ => {
+                        let mut target = vec![0; next(80)];
+                        let n = crate::io::Read::read(&mut decode_buf, &mut target).unwrap();
+                        out.extend_from_slice(&target[..n]);
                     }
                 }
-                Err(e) => {
-                    if e.kind() == ErrorKind::WouldBlock {
-                        continue;
-                    } else {
-                        panic!("Unexpected error {:?}", e);
-                    }
+                assert_eq!(out, model[..out.len()], "round {round}");
+                assert_eq!(decode_buf.can_collect(), model.len() - out.len());
+                // The window and what is not yet collected; once collected, no more.
+                let kept = window.max(decode_buf.can_collect()).min(model.len());
+                assert!(decode_buf.len() >= kept, "round {round}");
+                if op >= 2 {
+                    assert_eq!(decode_buf.len(), kept, "round {round}");
+                }
+                #[cfg(feature = "hash")]
+                {
+                    use core::hash::Hasher;
+                    let mut hash = twox_hash::XxHash64::with_seed(0);
+                    hash.write(&model);
+                    assert_eq!(decode_buf.checksum(), hash.finish(), "round {round}");
                 }
             }
+            out.extend_from_slice(&decode_buf.collect());
+            assert_eq!(out, model, "round {round}");
         }
-        assert_eq!(short_writer.buf.len(), repeats * 50 + 100);
     }
 
     /// A repeat whose match overlaps what it writes, at every offset and
@@ -484,9 +457,8 @@ mod tests {
                 for _ in 0..match_length {
                     expected.push(expected[expected.len() - offset]);
                 }
-                let (a, b) = decode_buf.as_slices();
                 assert_eq!(
-                    [a, b].concat(),
+                    decode_buf.collect(),
                     expected,
                     "offset {offset}, length {match_length}"
                 );
