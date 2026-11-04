@@ -1,0 +1,46 @@
+diff -ru a/src/decoding/decode_buffer.rs b/src/decoding/decode_buffer.rs
+--- a/src/decoding/decode_buffer.rs	2026-11-03 19:30:42.000000000 -0800
++++ b/src/decoding/decode_buffer.rs	2026-11-03 19:44:47.979482327 -0800
+@@ -111,32 +111,16 @@
+     }
+ 
+     fn repeat_in_chunks(&mut self, offset: usize, match_length: usize, start_idx: usize) {
+-        // We have at max offset bytes in one chunk, the last one can be smaller
+-        let mut start_idx = start_idx;
+-        let mut copied_counter_left = match_length;
+-        // TODO this can  be optimized further I think.
+-        // Each time we copy a chunk we have a repetiton of length 'offset', so we can copy offset * iteration many bytes from start_idx
+-        while copied_counter_left > 0 {
+-            let chunksize = usize::min(offset, copied_counter_left);
+-
+-            // SAFETY: Requirements checked:
+-            // 1. start_idx + chunksize must be <= self.buffer.len()
+-            //      We know that:
+-            //      1. start_idx starts at buffer.len() - offset
+-            //      2. chunksize <= offset (== offset for each iteration but the last, and match_length modulo offset in the last iteration)
+-            //      3. the buffer grows by offset many bytes each iteration but the last
+-            //      4. start_idx is increased by the same amount as the buffer grows each iteration
+-            //
+-            //      Thus follows: start_idx + chunksize == self.buffer.len() in each iteration but the last, where match_length modulo offset == chunksize < offset
+-            //          Meaning: start_idx + chunksize <= self.buffer.len()
+-            //
+-            // 2. explicitly reserved enough memory for the whole match_length
+-            unsafe {
+-                self.buffer
+-                    .extend_from_within_unchecked(start_idx, chunksize)
+-            };
+-            copied_counter_left -= chunksize;
+-            start_idx += chunksize;
++        // Doubling: after each copy `start_idx..` holds twice as many whole periods.
++        let mut available = offset;
++        let mut left = match_length;
++        while left > 0 {
++            let chunk = usize::min(available, left);
++            // SAFETY: start_idx + chunk <= start_idx + available == self.buffer.len(),
++            // and match_length bytes were reserved.
++            unsafe { self.buffer.extend_from_within_unchecked(start_idx, chunk) };
++            left -= chunk;
++            available += chunk;
+         }
+     }
+ 
