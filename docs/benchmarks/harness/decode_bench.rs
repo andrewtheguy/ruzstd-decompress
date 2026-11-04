@@ -155,7 +155,30 @@ fn time(mut f: impl FnMut()) -> Vec<f64> {
     times
 }
 
+/// glibc's malloc moves its mmap and trim thresholds as blocks are freed, so whether a pass's new
+/// decoder gets its buffers from the heap or as fresh pages to fault in turns on the build's
+/// allocation pattern: up to twice the time of a small workload, and a different answer for two
+/// builds of the same code. Both thresholds fixed keep them on the heap; either one alone does not.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn fix_malloc_thresholds() {
+    unsafe extern "C" {
+        fn mallopt(param: i32, value: i32) -> i32;
+    }
+    const M_TRIM_THRESHOLD: i32 = -1;
+    const M_MMAP_THRESHOLD: i32 = -3;
+    // SAFETY: mallopt only sets malloc's tuning parameters. The values are the ones the
+    // measurements of 2026-11-04 were made with, through GLIBC_TUNABLES.
+    let set = unsafe {
+        mallopt(M_MMAP_THRESHOLD, 64 << 20) == 1 && mallopt(M_TRIM_THRESHOLD, 256 << 20) == 1
+    };
+    assert!(set, "mallopt refused the thresholds");
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn fix_malloc_thresholds() {}
+
 fn main() {
+    fix_malloc_thresholds();
     let args: Vec<String> = std::env::args().collect();
     let (mode, path) = (args[1].as_str(), args[2].as_str());
     let (times, bytes_in, bytes_out, check) = match mode {

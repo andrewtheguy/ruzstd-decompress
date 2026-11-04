@@ -225,8 +225,11 @@ native workloads:
 
 So those earlier figures, and their libzstd ratios, say as much about glibc as
 about the decoders. The large workloads (video, mixed, the corpora) moved by
-under 4%. `run.sh` now fixes the thresholds. wasm's allocator does not give
-memory back, so its runs are unaffected.
+under 4%. Fixing either threshold alone made it worse for both, 1.4–1.8 ms; only
+the pair holds. Both harnesses now set the same pair themselves at start
+(`mallopt`, on glibc: a 64 MiB mmap threshold and a 256 MiB trim threshold), so
+no setting of the environment is needed. wasm's allocator does
+not give memory back, so its runs are unaffected.
 
 Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
 nothing.
@@ -258,8 +261,7 @@ and results.
    on the timing machine; [`libzstd/`](harness/libzstd) is built the same way
    into `bin/Z-native`.
 4. [`run.sh`](harness/run.sh) `OUT.jsonl VARIANT…` (wasm through
-   [`run-wasi.mjs`](harness/run-wasi.mjs); `PLATFORMS=native` for native alone;
-   it fixes glibc's malloc thresholds unless `GLIBC_TUNABLES` is set),
+   [`run-wasi.mjs`](harness/run-wasi.mjs); `PLATFORMS=native` for native alone),
    on a quiet machine, then [`summary.py`](harness/summary.py) `OUT.jsonl
    [BASE]` for the tables against BASE, A by default (`uv run --python 3.13
    python -I summary.py OUT.jsonl M`). `build.sh` uses a variant's
