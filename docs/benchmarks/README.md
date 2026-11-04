@@ -259,6 +259,88 @@ On the video clip ruzstd is ahead: there is nothing to decode, only blocks to
 copy, so that compares how the two harnesses take the output, not the
 decoders.
 
+## 2026-11-04: the Huffman literals' loop
+
+The question: on video and mixed tiles, where ruzstd was furthest behind
+libzstd, most of the time is Huffman literals. A `perf` profile put 62% of
+video and 34% of mixed in `decode_4_streams`. Can that loop be made faster
+without unsafe code?
+
+| | |
+|---|---|
+| **U** | `master` at `2e3fb1d` (the sequence tables) |
+| **F** | U with the new loop (`src/huff0/huff0_decoder.rs`) |
+| **Z** | libzstd |
+
+The loop, in steps, each kept only if the quick checks on lab1 (video,
+mixed, silesia, native and wasm) said so:
+
+1. **Local readers and fixed chunks.** It runs on copies of the four stream
+   readers, so their state can stay in registers; before, every symbol stored
+   its reader's bit count back to memory. The output is taken `N` bytes at a
+   time as arrays, `N` a constant chosen from the codes' longest, so the stores
+   need no bounds check.
+2. **A fixed 11-bit table.** The table always has 2048 entries, a shorter
+   code's entry repeated for every value of the bits after it. The index is
+   then a fixed shift, and needs no bounds check.
+3. **A left-aligned window, libzstd's chain.** Each symbol comes off the top
+   of a register holding the reader's bits: the index is a fixed shift of it,
+   and the next window one shift by the entry's length. A sentinel bit at the
+   bottom counts the bits used, so a stream's state in the loop is that one
+   register.
+4. **The fast range.** The loop runs only while every stream has 8 bytes of
+   source left, so a refill cannot reach the end. Then the slow refill, which
+   takes the reader by reference, is not in the loop, and the readers stay in
+   registers. In wasm, the store that reference forced had been the loop's
+   hottest instruction. The last symbols are decoded on the readers
+   themselves.
+5. **Tables allocated on their first build.** zDesk makes a decoder for every
+   planar tile. Before this, each new decoder zeroed its tables: the Huffman
+   table's 4 KB and the three sequence tables' 12 KB.
+
+Tried and left out:
+- **Two streams at a time** instead of four: slower on both, worse natively
+  (+7% on video against `master`).
+- **A 32-bit bit count** to save wasm's 8-bit masks: no change.
+- **The cold refill taking the reader by value.** It got the readers out of
+  memory in wasm (−7% video), but cost the sequence loop natively, which
+  small, very compressible tiles are mostly made of (drag +8%, terminal +5%).
+  Step 4 gets the same in wasm without that cost.
+- **Narrower tables for short codes** (7, 8 and 9 bits wide): no help to the
+  small tiles, and slower video in wasm.
+- **Per-tile functions in the harness**, to keep the timing loop out of V8's
+  unoptimized tier: wasm-opt inlines a function with one caller, whatever Rust
+  asks. Running with `--no-liftoff` showed the tier was not costing anything.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against U:
+
+| | F |
+|---|---:|
+| native | **−6.2%** |
+| wasm | **−5.6%** |
+
+| workload | native U | native F | wasm U | wasm F | libzstd |
+|---|---:|---:|---:|---:|---:|
+| video 1920x1080 | 462 | 361 (−21.9%) | 595 | 490 (−17.7%) | 190 |
+| video 2880x1800@2 | 1472 | 1226 (−16.7%) | 1895 | 1612 (−14.9%) | 609 |
+| mixed 1920x1080, 200 MB | 674 | 550 (−18.4%) | 856 | 717 (−16.3%) | 302 |
+| mixed 2880x1800@2, 200 MB | 946 | 852 (−10.0%) | 1227 | 1058 (−13.8%) | 444 |
+| silesia `-3` | 444 | 447 (+0.8%) | 580 | 564 (−2.8%) | 218 |
+| silesia `-19` | 436 | 443 (+1.6%) | 593 | 570 (−3.9%) | 223 |
+
+The smaller tiles are between −9% and +2%, the gains on browser and still and
+the losses (drag, uncover 1920x1080 in wasm) within their rounds' spread.
+Every workload: [`results/run7-huffman.md`](results/run7-huffman.md).
+
+- libzstd's lead natively falls from 2.4 times to 1.9–2.0 on video, and from
+  2.1–2.2 to 1.8–1.9 on mixed. Over all, by geomean, it falls from 1.46 to 1.37
+  times.
+- The wasm build is 237 KB, from 215: the loop is compiled once for each of
+  four `N`.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
