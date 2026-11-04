@@ -74,7 +74,7 @@ impl Dictionary {
         }
         let raw_tables = &raw_tables[huf_size as usize..];
 
-        let of_size = new_dict.fse.offsets.build_decoder(
+        let of_size = new_dict.fse.offsets.read_distribution(
             raw_tables,
             crate::decoding::sequence_section_decoder::OF_MAX_LOG,
         )?;
@@ -84,7 +84,7 @@ impl Dictionary {
         }
         let raw_tables = &raw_tables[of_size..];
 
-        let ml_size = new_dict.fse.match_lengths.build_decoder(
+        let ml_size = new_dict.fse.match_lengths.read_distribution(
             raw_tables,
             crate::decoding::sequence_section_decoder::ML_MAX_LOG,
         )?;
@@ -94,7 +94,7 @@ impl Dictionary {
         }
         let raw_tables = &raw_tables[ml_size..];
 
-        let ll_size = new_dict.fse.literal_lengths.build_decoder(
+        let ll_size = new_dict.fse.literal_lengths.read_distribution(
             raw_tables,
             crate::decoding::sequence_section_decoder::LL_MAX_LOG,
         )?;
@@ -104,11 +104,11 @@ impl Dictionary {
         }
         let raw_tables = &raw_tables[ll_size..];
         let fse = &mut new_dict.fse;
-        fse.of.build_from_fse(&fse.offsets, SeqKind::Offset);
+        fse.of.build_from_fse(&fse.offsets, SeqKind::Offset)?;
         fse.ml
-            .build_from_fse(&fse.match_lengths, SeqKind::MatchLength);
+            .build_from_fse(&fse.match_lengths, SeqKind::MatchLength)?;
         fse.ll
-            .build_from_fse(&fse.literal_lengths, SeqKind::LiteralLength);
+            .build_from_fse(&fse.literal_lengths, SeqKind::LiteralLength)?;
 
         if raw_tables.len() < 12 {
             return Err(DictionaryDecodeError::NotEnoughBytes);

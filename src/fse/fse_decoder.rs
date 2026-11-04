@@ -78,9 +78,6 @@ pub struct FSETable {
     /// If a symbol probability is set to `-1`, it means that the probability of a symbol
     /// occurring in the data is less than one.
     pub symbol_probabilities: Vec<i32>, //used while building the decode Vector
-    /// The number of times each symbol occurs (The first entry being 0x0, the second being 0x1) and so on
-    /// up until the highest possible symbol (255).
-    symbol_counter: Vec<u32>,
 }
 
 impl FSETable {
@@ -89,8 +86,7 @@ impl FSETable {
         FSETable {
             max_symbol,
             symbol_probabilities: Vec::with_capacity(256), //will never be more than 256 symbols because u8
-            symbol_counter: Vec::with_capacity(256), //will never be more than 256 symbols because u8
-            decode: Vec::new(),                      //depending on acc_log.
+            decode: Vec::new(),                            //depending on acc_log.
             accuracy_log: 0,
         }
     }
@@ -98,7 +94,6 @@ impl FSETable {
     /// Reset `self` and update `self`'s state to mirror the provided table.
     pub fn reinit_from(&mut self, other: &Self) {
         self.reset();
-        self.symbol_counter.extend_from_slice(&other.symbol_counter);
         self.symbol_probabilities
             .extend_from_slice(&other.symbol_probabilities);
         self.decode.extend_from_slice(&other.decode);
@@ -107,7 +102,6 @@ impl FSETable {
 
     /// Empty the table and clear all internal state.
     pub fn reset(&mut self) {
-        self.symbol_counter.clear();
         self.symbol_probabilities.clear();
         self.decode.clear();
         self.accuracy_log = 0;
@@ -115,15 +109,26 @@ impl FSETable {
 
     /// returns how many BYTEs (not bits) were read while building the decoder
     pub fn build_decoder(&mut self, source: &[u8], max_log: u8) -> Result<usize, FSETableError> {
-        self.accuracy_log = 0;
-
-        let bytes_read = self.read_probabilities(source, max_log)?;
+        let bytes_read = self.read_distribution(source, max_log)?;
         self.build_decoding_table()?;
 
         Ok(bytes_read)
     }
 
+    /// Read a table's description, its accuracy log and probabilities, but build no table,
+    /// for a caller that builds its own from them (see [`build_states`]). Returns how many
+    /// bytes were read.
+    pub fn read_distribution(
+        &mut self,
+        source: &[u8],
+        max_log: u8,
+    ) -> Result<usize, FSETableError> {
+        self.accuracy_log = 0;
+        self.read_probabilities(source, max_log)
+    }
+
     /// Given the provided accuracy log, build a decoding table from that log.
+    #[cfg(test)]
     pub fn build_from_probabilities(
         &mut self,
         acc_log: u8,
@@ -145,14 +150,8 @@ impl FSETable {
                 got: self.symbol_probabilities.len(),
             });
         }
-
-        self.decode.clear();
-
         let table_size = 1 << self.accuracy_log;
-        if self.decode.len() < table_size {
-            self.decode.reserve(table_size - self.decode.len());
-        }
-        //fill with dummy entries
+        self.decode.clear();
         self.decode.resize(
             table_size,
             Entry {
@@ -161,63 +160,18 @@ impl FSETable {
                 symbol: 0,
             },
         );
-
-        let mut negative_idx = table_size; //will point to the highest index with is already occupied by a negative-probability-symbol
-
-        //first scan for all -1 probabilities and place them at the top of the table
-        for symbol in 0..self.symbol_probabilities.len() {
-            if self.symbol_probabilities[symbol] == -1 {
-                negative_idx -= 1;
-                let entry = &mut self.decode[negative_idx];
-                entry.symbol = symbol as u8;
-                entry.base_line = 0;
-                entry.num_bits = self.accuracy_log;
-            }
-        }
-
-        //then place in a semi-random order all of the other symbols
-        let mut position = 0;
-        for idx in 0..self.symbol_probabilities.len() {
-            let symbol = idx as u8;
-            if self.symbol_probabilities[idx] <= 0 {
-                continue;
-            }
-
-            //for each probability point the symbol gets on slot
-            let prob = self.symbol_probabilities[idx];
-            for _ in 0..prob {
-                let entry = &mut self.decode[position];
-                entry.symbol = symbol;
-
-                position = next_position(position, table_size);
-                while position >= negative_idx {
-                    position = next_position(position, table_size);
-                    //everything above negative_idx is already taken
+        let decode = &mut self.decode[..];
+        build_states(
+            self.accuracy_log,
+            &self.symbol_probabilities,
+            |state, symbol, num_bits, base_line| {
+                decode[state] = Entry {
+                    base_line,
+                    num_bits,
+                    symbol,
                 }
-            }
-        }
-
-        // baselines and num_bits can only be calculated when all symbols have been spread
-        self.symbol_counter.clear();
-        self.symbol_counter
-            .resize(self.symbol_probabilities.len(), 0);
-        for idx in 0..negative_idx {
-            let entry = &mut self.decode[idx];
-            let symbol = entry.symbol;
-            let prob = self.symbol_probabilities[symbol as usize];
-
-            let symbol_count = self.symbol_counter[symbol as usize];
-            let (bl, nb) = calc_baseline_and_numbits(table_size as u32, prob as u32, symbol_count);
-
-            //println!("symbol: {:2}, table: {}, prob: {:3}, count: {:3}, bl: {:3}, nb: {:2}", symbol, table_size, prob, symbol_count, bl, nb);
-
-            assert!(nb <= self.accuracy_log);
-            self.symbol_counter[symbol as usize] += 1;
-
-            entry.base_line = bl;
-            entry.num_bits = nb;
-        }
-        Ok(())
+            },
+        )
     }
 
     /// Read the accuracy log and the probability table from the source and return the number of bytes
@@ -308,6 +262,89 @@ impl FSETable {
     }
 }
 
+/// Work out the states of the table of `probabilities`, of `1 << acc_log` states, and hand
+/// each to `state` in order: its index, symbol, the bits read for the next state and the
+/// base they are added to.
+///
+/// As libzstd builds it (`FSE_buildDTable`): a symbol of probability `p` has the states
+/// `p..2 * p`, given out in table order, and state `x` reads `nb = log - floor(log2(x))`
+/// bits onto a base of `(x << nb) - table_size`. A "less than one" probability is one
+/// state, at the top of the table. The probabilities must sum to the table's size, a "less
+/// than one" counting one, as [`FSETable`] checks when it reads them.
+#[inline(always)]
+pub(crate) fn build_states(
+    acc_log: u8,
+    probabilities: &[i32],
+    mut state: impl FnMut(usize, u8, u8, u32),
+) -> Result<(), FSETableError> {
+    if acc_log > MAX_ACC_LOG {
+        return Err(FSETableError::AccLogTooBig {
+            got: acc_log,
+            max: MAX_ACC_LOG,
+        });
+    }
+    if probabilities.len() > 256 {
+        return Err(FSETableError::TooManySymbols {
+            got: probabilities.len(),
+        });
+    }
+    let table_size = 1 << acc_log;
+    let mut symbols = [0u8; MAX_TABLE_SIZE];
+    let symbols = &mut symbols[..table_size];
+
+    // Each symbol's next state, and the "less than one" symbols at the top of the table.
+    let mut next = [0u16; 256];
+    let mut high = table_size;
+    for (symbol, &prob) in probabilities.iter().enumerate() {
+        if prob == -1 {
+            high -= 1;
+            symbols[high] = symbol as u8;
+            next[symbol] = 1;
+        } else {
+            next[symbol] = prob.max(0) as u16;
+        }
+    }
+
+    // The other symbols, spread over the rest in a semi-random order: first laid out in a
+    // row, a symbol's run written 8 bytes at a time, then placed one by one, so neither step
+    // has a loop as long as a symbol's probability.
+    let mut row = [0u8; MAX_TABLE_SIZE + 8];
+    let mut end = 0;
+    for (symbol, &prob) in probabilities.iter().enumerate() {
+        let run = prob.max(0) as usize;
+        let mut at = end;
+        loop {
+            row[at..at + 8].fill(symbol as u8);
+            at += 8;
+            if at >= end + run {
+                break;
+            }
+        }
+        end += run;
+    }
+    let mask = table_size - 1;
+    let step = (table_size >> 1) + (table_size >> 3) + 3;
+    let mut position = 0;
+    for &symbol in &row[..high] {
+        symbols[position] = symbol;
+        position = (position + step) & mask;
+        while position >= high {
+            // everything from `high` up is taken
+            position = (position + step) & mask;
+        }
+    }
+
+    // Each state's bits and base, from the symbol's states in table order.
+    for (index, &symbol) in symbols.iter().enumerate() {
+        let next = &mut next[symbol as usize];
+        let x = u32::from(*next);
+        *next += 1;
+        let num_bits = acc_log - (u32::BITS - 1 - x.leading_zeros()) as u8;
+        state(index, symbol, num_bits, (x << num_bits) - table_size as u32);
+    }
+    Ok(())
+}
+
 /// A single entry in an FSE table.
 #[derive(Copy, Clone, Debug)]
 pub struct Entry {
@@ -320,6 +357,10 @@ pub struct Entry {
     pub symbol: u8,
 }
 
+/// The largest accuracy log of any table zstd has (literal and match lengths).
+const MAX_ACC_LOG: u8 = 9;
+const MAX_TABLE_SIZE: usize = 1 << MAX_ACC_LOG;
+
 /// This value is added to the first 4 bits of the stream to determine the
 /// `Accuracy_Log`
 const ACC_LOG_OFFSET: u8 = 5;
@@ -329,39 +370,119 @@ fn highest_bit_set(x: u32) -> u32 {
     u32::BITS - x.leading_zeros()
 }
 
-//utility functions for building the decoding table from probabilities
-/// Calculate the position of the next entry of the table given the current
-/// position and size of the table.
-fn next_position(mut p: usize, table_size: usize) -> usize {
-    p += (table_size >> 1) + (table_size >> 3) + 3;
-    p &= table_size - 1;
-    p
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn calc_baseline_and_numbits(
-    num_states_total: u32,
-    num_states_symbol: u32,
-    state_number: u32,
-) -> (u32, u8) {
-    if num_states_symbol == 0 {
-        return (0, 0);
+    // The table as built before, a state at a time, as a model.
+
+    /// Calculate the position of the next entry of the table given the current
+    /// position and size of the table.
+    fn next_position(mut p: usize, table_size: usize) -> usize {
+        p += (table_size >> 1) + (table_size >> 3) + 3;
+        p &= table_size - 1;
+        p
     }
-    let num_state_slices = if 1 << (highest_bit_set(num_states_symbol) - 1) == num_states_symbol {
-        num_states_symbol
-    } else {
-        1 << (highest_bit_set(num_states_symbol))
-    }; //always power of two
 
-    let num_double_width_state_slices = num_state_slices - num_states_symbol; //leftovers to the power of two need to be distributed
-    let num_single_width_state_slices = num_states_symbol - num_double_width_state_slices; //these will not receive a double width slice of states
-    let slice_width = num_states_total / num_state_slices; //size of a single width slice of states
-    let num_bits = highest_bit_set(slice_width) - 1; //number of bits needed to read for one slice
+    fn calc_baseline_and_numbits(
+        num_states_total: u32,
+        num_states_symbol: u32,
+        state_number: u32,
+    ) -> (u32, u8) {
+        if num_states_symbol == 0 {
+            return (0, 0);
+        }
+        let num_state_slices = if 1 << (highest_bit_set(num_states_symbol) - 1) == num_states_symbol
+        {
+            num_states_symbol
+        } else {
+            1 << (highest_bit_set(num_states_symbol))
+        }; //always power of two
 
-    if state_number < num_double_width_state_slices {
-        let baseline = num_single_width_state_slices * slice_width + state_number * slice_width * 2;
-        (baseline, num_bits as u8 + 1)
-    } else {
-        let index_shifted = state_number - num_double_width_state_slices;
-        ((index_shifted * slice_width), num_bits as u8)
+        let num_double_width_state_slices = num_state_slices - num_states_symbol; //leftovers to the power of two need to be distributed
+        let num_single_width_state_slices = num_states_symbol - num_double_width_state_slices; //these will not receive a double width slice of states
+        let slice_width = num_states_total / num_state_slices; //size of a single width slice of states
+        let num_bits = highest_bit_set(slice_width) - 1; //number of bits needed to read for one slice
+
+        if state_number < num_double_width_state_slices {
+            let baseline =
+                num_single_width_state_slices * slice_width + state_number * slice_width * 2;
+            (baseline, num_bits as u8 + 1)
+        } else {
+            let index_shifted = state_number - num_double_width_state_slices;
+            ((index_shifted * slice_width), num_bits as u8)
+        }
+    }
+
+    fn model(acc_log: u8, probs: &[i32]) -> Vec<(u8, u8, u32)> {
+        let table_size = 1usize << acc_log;
+        let mut decode = alloc::vec![(0u8, 0u8, 0u32); table_size];
+        let mut negative_idx = table_size;
+        for (symbol, &prob) in probs.iter().enumerate() {
+            if prob == -1 {
+                negative_idx -= 1;
+                decode[negative_idx] = (symbol as u8, acc_log, 0);
+            }
+        }
+        let mut position = 0;
+        for (symbol, &prob) in probs.iter().enumerate() {
+            for _ in 0..prob.max(0) {
+                decode[position].0 = symbol as u8;
+                position = next_position(position, table_size);
+                while position >= negative_idx {
+                    position = next_position(position, table_size);
+                }
+            }
+        }
+        let mut counter = alloc::vec![0u32; probs.len()];
+        for entry in &mut decode[..negative_idx] {
+            let prob = probs[entry.0 as usize] as u32;
+            let (bl, nb) =
+                calc_baseline_and_numbits(table_size as u32, prob, counter[entry.0 as usize]);
+            counter[entry.0 as usize] += 1;
+            entry.1 = nb;
+            entry.2 = bl;
+        }
+        decode
+    }
+
+    /// The table matches the model's for random distributions of every size, with and
+    /// without "less than one" probabilities.
+    #[test]
+    fn build_matches_model() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % u64::from(n)) as u32
+        };
+        for _ in 0..3000 {
+            let acc_log = 5 + next(5) as u8;
+            // Probabilities that sum to the table's size, a "less than one" counting one.
+            let mut left = 1i32 << acc_log;
+            let mut probs = Vec::new();
+            while left > 0 {
+                let prob = match next(6) {
+                    0 => 0,
+                    1 => -1,
+                    2 => left,
+                    _ => 1 + next(left as u32) as i32,
+                };
+                left -= prob.max(0) + i32::from(prob == -1);
+                probs.push(prob);
+            }
+            if probs.len() > 256 {
+                continue;
+            }
+            let mut table = FSETable::new(255);
+            table.build_from_probabilities(acc_log, &probs).unwrap();
+            let got: Vec<_> = table
+                .decode
+                .iter()
+                .map(|e| (e.symbol, e.num_bits, e.base_line))
+                .collect();
+            assert_eq!(got, model(acc_log, &probs), "{acc_log} {probs:?}");
+        }
     }
 }

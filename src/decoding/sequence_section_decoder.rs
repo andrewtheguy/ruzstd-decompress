@@ -109,14 +109,16 @@ fn maybe_update_fse_tables(
 
     match modes.ll_mode() {
         ModeType::FSECompressed => {
-            let bytes = scratch.literal_lengths.build_decoder(source, LL_MAX_LOG)?;
+            let bytes = scratch
+                .literal_lengths
+                .read_distribution(source, LL_MAX_LOG)?;
             bytes_read += bytes;
 
             vprintln!("Updating ll table");
             vprintln!("Used bytes: {}", bytes);
             scratch
                 .ll
-                .build_from_fse(&scratch.literal_lengths, SeqKind::LiteralLength);
+                .build_from_fse(&scratch.literal_lengths, SeqKind::LiteralLength)?;
         }
         ModeType::RLE => {
             vprintln!("Use RLE ll table");
@@ -131,9 +133,7 @@ fn maybe_update_fse_tables(
         }
         ModeType::Predefined => {
             vprintln!("Use predefined ll table");
-            scratch
-                .ll
-                .build_predefined(&mut scratch.literal_lengths, SeqKind::LiteralLength)?;
+            scratch.ll.build_predefined(SeqKind::LiteralLength)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat ll table");
@@ -145,11 +145,13 @@ fn maybe_update_fse_tables(
 
     match modes.of_mode() {
         ModeType::FSECompressed => {
-            let bytes = scratch.offsets.build_decoder(of_source, OF_MAX_LOG)?;
+            let bytes = scratch.offsets.read_distribution(of_source, OF_MAX_LOG)?;
             vprintln!("Updating of table");
             vprintln!("Used bytes: {}", bytes);
             bytes_read += bytes;
-            scratch.of.build_from_fse(&scratch.offsets, SeqKind::Offset);
+            scratch
+                .of
+                .build_from_fse(&scratch.offsets, SeqKind::Offset)?;
         }
         ModeType::RLE => {
             vprintln!("Use RLE of table");
@@ -164,9 +166,7 @@ fn maybe_update_fse_tables(
         }
         ModeType::Predefined => {
             vprintln!("Use predefined of table");
-            scratch
-                .of
-                .build_predefined(&mut scratch.offsets, SeqKind::Offset)?;
+            scratch.of.build_predefined(SeqKind::Offset)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat of table");
@@ -178,13 +178,15 @@ fn maybe_update_fse_tables(
 
     match modes.ml_mode() {
         ModeType::FSECompressed => {
-            let bytes = scratch.match_lengths.build_decoder(ml_source, ML_MAX_LOG)?;
+            let bytes = scratch
+                .match_lengths
+                .read_distribution(ml_source, ML_MAX_LOG)?;
             bytes_read += bytes;
             vprintln!("Updating ml table");
             vprintln!("Used bytes: {}", bytes);
             scratch
                 .ml
-                .build_from_fse(&scratch.match_lengths, SeqKind::MatchLength);
+                .build_from_fse(&scratch.match_lengths, SeqKind::MatchLength)?;
         }
         ModeType::RLE => {
             vprintln!("Use RLE ml table");
@@ -199,9 +201,7 @@ fn maybe_update_fse_tables(
         }
         ModeType::Predefined => {
             vprintln!("Use predefined ml table");
-            scratch
-                .ml
-                .build_predefined(&mut scratch.match_lengths, SeqKind::MatchLength)?;
+            scratch.ml.build_predefined(SeqKind::MatchLength)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat ml table");
