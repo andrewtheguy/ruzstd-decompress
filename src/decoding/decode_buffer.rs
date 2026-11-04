@@ -89,20 +89,7 @@ impl DecodeBuffer {
                 // We need to copy in chunks.
                 self.repeat_in_chunks(offset, match_length, start_idx);
             } else {
-                // can just copy parts of the existing buffer
-                // SAFETY: Requirements checked:
-                // 1. start_idx + match_length must be <= self.buffer.len()
-                //      We know that:
-                //      1. start_idx = self.buffer.len() - offset
-                //      2. end_idx = start_idx + match_length
-                //      3. end_idx <= self.buffer.len()
-                //      Thus follows: start_idx + match_length <= self.buffer.len()
-                //
-                // 2. explicitly reserved enough memory for the whole match_length
-                unsafe {
-                    self.buffer
-                        .extend_from_within_unchecked(start_idx, match_length)
-                };
+                self.buffer.extend_from_within(start_idx, match_length);
             }
 
             self.total_output_counter += match_length as u64;
@@ -111,32 +98,17 @@ impl DecodeBuffer {
     }
 
     fn repeat_in_chunks(&mut self, offset: usize, match_length: usize, start_idx: usize) {
-        // We have at max offset bytes in one chunk, the last one can be smaller
-        let mut start_idx = start_idx;
-        let mut copied_counter_left = match_length;
-        // TODO this can  be optimized further I think.
-        // Each time we copy a chunk we have a repetiton of length 'offset', so we can copy offset * iteration many bytes from start_idx
-        while copied_counter_left > 0 {
-            let chunksize = usize::min(offset, copied_counter_left);
-
-            // SAFETY: Requirements checked:
-            // 1. start_idx + chunksize must be <= self.buffer.len()
-            //      We know that:
-            //      1. start_idx starts at buffer.len() - offset
-            //      2. chunksize <= offset (== offset for each iteration but the last, and match_length modulo offset in the last iteration)
-            //      3. the buffer grows by offset many bytes each iteration but the last
-            //      4. start_idx is increased by the same amount as the buffer grows each iteration
-            //
-            //      Thus follows: start_idx + chunksize == self.buffer.len() in each iteration but the last, where match_length modulo offset == chunksize < offset
-            //          Meaning: start_idx + chunksize <= self.buffer.len()
-            //
-            // 2. explicitly reserved enough memory for the whole match_length
-            unsafe {
-                self.buffer
-                    .extend_from_within_unchecked(start_idx, chunksize)
-            };
-            copied_counter_left -= chunksize;
-            start_idx += chunksize;
+        // The match overlaps what it writes: it repeats the last `offset` bytes.
+        // Once one copy of them is written, `start_idx..` holds two whole periods,
+        // so each copy can take twice what the one before took, from the same
+        // start, until the match is written.
+        let mut available = offset;
+        let mut left = match_length;
+        while left > 0 {
+            let chunk = usize::min(available, left);
+            self.buffer.extend_from_within(start_idx, chunk);
+            left -= chunk;
+            available += chunk;
         }
     }
 
@@ -465,5 +437,29 @@ mod tests {
             }
         }
         assert_eq!(short_writer.buf.len(), repeats * 50 + 100);
+    }
+
+    /// A repeat whose match overlaps what it writes, at every offset and
+    /// length up to a few chunks, checked against copying a byte at a time.
+    #[test]
+    fn repeat_matches_bytewise() {
+        let prefix: Vec<u8> = (0..64u8).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
+        for offset in 1..=64 {
+            for match_length in 1..=200 {
+                let mut decode_buf = DecodeBuffer::new(1 << 20);
+                decode_buf.push(&prefix);
+                decode_buf.repeat(offset, match_length).unwrap();
+                let mut expected = prefix.clone();
+                for _ in 0..match_length {
+                    expected.push(expected[expected.len() - offset]);
+                }
+                let (a, b) = decode_buf.as_slices();
+                assert_eq!(
+                    [a, b].concat(),
+                    expected,
+                    "offset {offset}, length {match_length}"
+                );
+            }
+        }
     }
 }
