@@ -244,8 +244,15 @@ and results.
    [`dump-tiles.sh`](harness/dump-tiles.sh), which writes
    `SCENARIO-SIZE-PICTURE.tiles`: a byte for the kind (0 planar, 1 still), `w`
    and `h` as u16, the length as u32, little endian, then the body.
-2. **The general corpora**: `enwik9` (mattmahoney.net) and the Silesia corpus as
-   one tar, each `zstd -3` and `zstd -19` into `corpus/`.
+2. **The general corpora**: the Silesia corpus as one tar, `zstd -3` and
+   `zstd -19`, and the first minute of `Multicolored_Explosions-4k.webm` (4K
+   VP9 video, no audio), cut without re-encoding (`ffmpeg -t 60 -c copy -an`:
+   129,927,535 bytes, SHA-256
+   `ba8a6a586890f80bd78a3a5180644d867882f7c5370c63573b5aec582ed66e54`),
+   `zstd -T0 -3`, into `corpus/`. The video is already compressed, so zstd
+   stores it as it is, in raw blocks: it measures that path. At `-19` it is the
+   same, so it is left out. `enwik9` at both levels was the third until
+   2026-11-04. It is text, which Silesia has, and it was the slowest workload.
 3. **The variants**: a tree each in `variants/A`… (a `git archive` of the
    commit, with the patches above), then [`build.sh`](harness/build.sh) `A B …`
    on the timing machine; [`libzstd/`](harness/libzstd) is built the same way
