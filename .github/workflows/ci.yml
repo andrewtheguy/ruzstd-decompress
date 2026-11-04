@@ -24,10 +24,8 @@ jobs:
           run: cargo +stable hack clippy --workspace --feature-powerset --exclude-features rustc-dep-of-std
         - name: cargo hack test
           run: cargo +stable hack test --workspace --feature-powerset --exclude-features rustc-dep-of-std
-        - name: Verify MSRV (cli)
-          run: cargo msrv verify --path cli/
-        - name: Verify MSRV (lib)
-          run: cargo msrv verify --path ruzstd/
+        - name: Verify MSRV
+          run: cargo msrv verify
 
   nightly-stuff:
     name: nightly lint, miri
