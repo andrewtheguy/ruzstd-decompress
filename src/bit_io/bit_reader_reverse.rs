@@ -3,6 +3,7 @@ use core::convert::TryInto;
 /// Zstandard encodes some types of data in a way that the data must be read
 /// back to front to decode it properly. `BitReaderReversed` provides a
 /// convenient interface to do that.
+#[derive(Clone)]
 pub struct BitReaderReversed<'s> {
     /// The index of the last read byte in the source.
     index: usize,
@@ -58,6 +59,28 @@ impl<'s> BitReaderReversed<'s> {
         }
     }
 
+    /// Whether [`Self::ensure_bits_fast`] can be used: at least 8 bytes of the source are left,
+    /// the most a refill moves by, so the next refill cannot reach the source's end.
+    #[inline(always)]
+    pub fn can_refill_fast(&self) -> bool {
+        self.index >= 8
+    }
+
+    /// [`Self::ensure_bits`] while [`Self::can_refill_fast`]: the refill never reaches the
+    /// source's end, so a loop of these has no call to `refill_slow`, which, taking the reader
+    /// by reference, would keep it in memory instead of registers.
+    #[inline(always)]
+    pub fn ensure_bits_fast(&mut self, n: u8) {
+        if self.bits_consumed + n > 64 {
+            let bytes_consumed = self.bits_consumed as usize / 8;
+            debug_assert!(self.index >= bytes_consumed);
+            self.index -= bytes_consumed;
+            self.bits_consumed &= 7;
+            self.bit_container =
+                u64::from_le_bytes((&self.source[self.index..][..8]).try_into().unwrap());
+        }
+    }
+
     /// Refill when fewer than `bytes_consumed` bytes of the source are left.
     #[cold]
     #[inline(never)]
@@ -95,7 +118,29 @@ impl<'s> BitReaderReversed<'s> {
         debug_assert!(self.bits_consumed < 8);
     }
 
-    /// Make sure at least `n` bits (at most 56) can be peeked and consumed without refilling.
+    /// The unread bits of the container, the next one highest, as `peek_bits` reads them, with a
+    /// sentinel 1 in place of the container's lowest bit. A caller takes bits off the top by
+    /// shifting the window left; the sentinel moves up with them, so its position is then how
+    /// many of the container's bits are consumed, which [`Self::consume_to_sentinel`] sets.
+    ///
+    /// Only after `ensure_bits(57)` (or its `_fast` form), which leaves at most 7 bits consumed,
+    /// and for at most 56
+    /// bits taken: then the lowest bit ever read is the container's bit 1, and the sentinel,
+    /// which ends at most at bit 63, is never shifted out.
+    #[inline(always)]
+    pub fn sentinel_window(&self) -> u64 {
+        debug_assert!(self.bits_consumed <= 7);
+        (self.bit_container | 1) << self.bits_consumed
+    }
+
+    /// Consume what has been taken off the top of `window`, from [`Self::sentinel_window`].
+    #[inline(always)]
+    pub fn consume_to_sentinel(&mut self, window: u64) {
+        self.bits_consumed = window.trailing_zeros() as u8;
+        debug_assert!(self.bits_consumed <= 63);
+    }
+
+    /// Make sure at least `n` bits (at most 57) can be peeked and consumed without refilling.
     #[inline(always)]
     pub fn ensure_bits(&mut self, n: u8) {
         if self.bits_consumed + n > 64 {
