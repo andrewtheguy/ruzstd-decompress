@@ -506,6 +506,90 @@ way, inside the spread of the runs. Every workload:
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
 
+## 2026-11-04: the sequence loop
+
+The question: on uncover tiles, decoding and executing the sequences was about
+40% of the time, and libzstd's loop took about half as long. Where did it go?
+
+A `perf` profile (native, uncover 1920x1080) said:
+- 12% was the bit reader: two refills a sequence, each with its branches, and
+  a check of the bits left;
+- 8% was the ring buffer, which made room three times a sequence (the
+  literals, the match, and the match's copy), and about 6% more was in
+  `memcpy`, `extend` and `repeat_in_chunks`;
+- a sequence's literals and match took two trips through the buffer, each
+  with its own checks of the data's length and wrapping.
+
+| | |
+|---|---|
+| **X** | `main` at `6ec54e8` (the table of pairs) |
+| **S** | X with the commit (`81a25fe`) |
+| **Z** | libzstd |
+
+The commit:
+- **A sequence in one copy** (`RingBuffer::push_sequence`): the literals and
+  then the match, with one check of the room from the tail, initialised, and
+  no reserve. The match's source must be in the data that runs on to where it
+  is written, whether the data wraps or not, and at least 16 bytes back;
+  pieces up to 32 bytes are copied in 16-byte chunks, longer ones in one copy.
+  The literals are followed by 16 bytes of padding for the chunks. It takes
+  89–98% of the tiles' sequences; the rest go the old way.
+- **The sequence loop reads a window of the reader's bits**, as the Huffman
+  loop does: a branchless refill a sequence, and a second only when the three
+  lengths' extra bits are more than 30, as libzstd's does on 64-bit. It runs
+  while the source has room for two refills, so it needs no check of the bits
+  left; the last sequences go the old way.
+- **The offset history** is updated by a pick and selects, not branches. A
+  test checks it against the old update in every case.
+- The ring buffer's test against a `Vec` takes sequences too, wrapped and
+  close ones included.
+
+Tried and left out, each in the quick checks on lab1:
+- **The fast copy only where the data does not wrap**: on 41% of uncover's
+  sequences, 67% of browser's and 81% of mixed's, it does. Mixed was 2–3%
+  slower than X natively.
+- **Every piece in 16-byte chunks**, however long: silesia 2–3% slower in wasm
+  than with the long ones in one copy.
+- **A match from less than 16 bytes back** as a repeated pattern, written a
+  chunk at a time (1–8% of the tiles' sequences): no faster, and 2 KB more
+  wasm.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against X:
+
+| | S | libzstd |
+|---|---:|---:|
+| native | **−10.4%** | −14.5% |
+| wasm | **−11.6%** | |
+
+| workload | native X | native S | wasm X | wasm S | libzstd |
+|---|---:|---:|---:|---:|---:|
+| terminal 1920x1080 | 0.78 | 0.73 (−6.8%) | 0.94 | 0.88 (−7.2%) | 0.72 |
+| uncover 1920x1080 | 2.25 | 1.98 (−12.0%) | 2.81 | 2.44 (−13.1%) | 1.45 |
+| still 1920x1080 | 0.34 | 0.30 (−12.8%) | 0.44 | 0.37 (−15.6%) | 0.49 |
+| drag 1920x1080 | 0.35 | 0.29 (−17.9%) | 0.44 | 0.36 (−17.2%) | 0.40 |
+| browser 1920x1080 | 4.50 | 4.17 (−7.4%) | 5.46 | 4.98 (−8.9%) | 4.81 |
+| video 1920x1080 | 306 | 298 (−2.6%) | 392 | 383 (−2.4%) | 190 |
+| video 2880x1800@2 | 1027 | 955 (−6.9%) | 1346 | 1196 (−11.2%) | 611 |
+| mixed 1920x1080, 200 MB | 488 | 461 (−5.6%) | 625 | 589 (−5.8%) | 302 |
+| mixed 2880x1800@2, 200 MB | 737 | 668 (−9.4%) | 959 | 873 (−8.9%) | 445 |
+| silesia `-3` | 426 | 338 (−20.6%) | 574 | 448 (−21.9%) | 216 |
+| silesia `-19` | 428 | 355 (−17.0%) | 583 | 459 (−21.3%) | 225 |
+
+ms a pass. The 2880x1800@2 small tiles gain 9–16% natively and 11–18% in
+wasm. The video corpus, raw blocks, which the commit does not change, is 1.3%
+slower natively and 3.0% in wasm, about the spread of its runs. Every
+workload: [`results/run11-sequences.md`](results/run11-sequences.md).
+
+- By geomean over all workloads, libzstd is now 1.05 times faster natively
+  (1.17 against X). ruzstd decodes still, drag, browser and the
+  2880x1800@2 terminal tiles faster than libzstd, and the 1920x1080 terminal
+  tiles about as fast; uncover is 1.2–1.4 times slower, and video, mixed and
+  silesia 1.5–1.6 times (from 1.6–2.0).
+- The wasm build grows by 3.1 KB, to 244 KB.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
