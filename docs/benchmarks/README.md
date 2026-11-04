@@ -590,6 +590,128 @@ workload: [`results/run11-sequences.md`](results/run11-sequences.md).
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
 
+## 2026-11-04: what was left of the table builds
+
+The question: on uncover tiles, building the sequences' tables was 14% of the
+time natively, reading their descriptions 6%, and filling the Huffman tables
+about 4%. What can be cut?
+
+What the profiles and counts said, natively unless they say wasm:
+- uncover builds 847 sequence tables a pass, of 32 to 128 states each, 63,200
+  states in all, at 4.5 ns a state (a microbenchmark rebuilding them, which
+  agrees with the profile). About two thirds of that is the loop working out
+  each state's bits and base, and a tenth the walk that spreads the symbols.
+  The loop is bound by its count of instructions, about 34 a state with the
+  rest, at 2.6 a cycle. Each symbol's count is a chain through memory, but
+  breaking it did not help (below).
+- Only 1% of uncover's tables are the same as the one before them (69% of
+  terminal's), so keeping a table between blocks would do little for it.
+- Reading a table's description spends most of its time on a chain from one
+  value to the next: the count of what is left, the leading zeros of that
+  count for the bits to read, then the read, each through a `Result`.
+- uncover builds 88 Huffman tables a pass, most of their codes at most 9 bits
+  long, and every build fills all 2048 entries: 180,000 entries for 119,000
+  literals. The fill went a symbol at a time, its length changing from one
+  symbol to the next.
+
+The harness changed first. zDesk's page now keeps one decoder for its planar
+tiles and one for the still stream, reset for each tile or stream, and the
+harness had gone on making a new one for each. Both harnesses now keep theirs
+for a pass; libzstd's already kept one context for the planar tiles. Every
+tile decodes to the same bitmap as before. Against the old harness, ruzstd's
+times fell by the setup the page no longer does: terminal 14% natively and in
+wasm, video 5%, still 2%; libzstd's moved within the noise. So this run's
+times are lower than run 11's for the same code, and are not to be set beside
+them.
+
+| | |
+|---|---|
+| **S** | `main` at `0168447` (the sequence loop, released as `v0.9.2-alpha.4`) |
+| **TB** | S with the commits (`a6506ad`) |
+| **Z** | libzstd |
+
+Both S and TB were built with the new harness (`cb43531`). The commits:
+- **The sequence tables' symbols without the walk.** With no "less than one"
+  probability the walk round the table skips no state, so its `k`th step is
+  `k * step` round the table, and state `u` holds the symbol laid out at `u`
+  times the inverse of the step (odd, so there is one). The states take their
+  symbols from there: no walk, and no array of the symbols. A table with "less
+  than one" symbols, about a fifth of uncover's, walks as before. The codes'
+  values come from arrays padded to 64, with no match on the kind or bounds
+  check a state. The microbenchmark went from 4.50 to 3.62 ns a state.
+- **The descriptions read as libzstd reads them** (`FSE_readNCount`): the bits
+  a value takes from a threshold that only falls, not a count of leading
+  zeros, read from a window of the source, the end checked once after the last
+  value. A test reads 200,000 random sources against the old reader.
+- **The Huffman table filled a code length at a time**: the symbols sorted by
+  their codes' lengths, each length in a loop of its own, on a fixed number of
+  entries each, which stores them as wide as they are.
+- **At most 255 weights.** The fuzzer found that a tree's FSE-coded weights
+  can run to 256 or 257, past a byte's symbols, which the new fill indexed out
+  of bounds; the old fill wrote symbol 256 as 0. They are now refused, with a
+  test. The check is one comparison a tree, made after the run.
+
+Tried and left out, in the microbenchmark (uncover's 847 tables, 4.18 ns a
+state with the padded values alone) and the quick checks on lab1:
+- **The next state's count loaded before this state's is stored**, so that two
+  states of a symbol in a row wait on no store: 4.41 ns. Three in a row of two
+  symbols still chain.
+- **The table's two halves side by side**, each with counts of its own, the
+  second's from a count of the first half's symbols: 4.75 ns.
+- **An entry built as one `u64`** to store it once: LLVM stored it in two
+  halves with shifts, 4.53 ns. libzstd's walk two at a time, without the
+  inverse: 4.30.
+- **The tables with "less than one" symbols without the walk too**, the
+  laid-out row given a gap at each step that comes to a top state: no faster
+  than walking them.
+
+In wasm the sequence tables' change did nothing: in V8's code the build is
+12% of uncover with it and without (the microbenchmark, run under V8, had it
+15% faster, and took twice the time the decoder spends in it). TB's gains in wasm
+are the descriptions' and the Huffman tables'.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against S:
+
+| | TB | libzstd |
+|---|---:|---:|
+| native | **−3.2%** | −2.7% |
+| wasm | **−2.2%** | |
+
+| workload | native S | native TB | wasm S | wasm TB | libzstd |
+|---|---:|---:|---:|---:|---:|
+| terminal 1920x1080 | 0.62 | 0.60 (−3.7%) | 0.75 | 0.72 (−3.5%) | 0.70 |
+| uncover 1920x1080 | 2.00 | 1.87 (−6.6%) | 2.45 | 2.35 (−3.8%) | 1.47 |
+| still 1920x1080 | 0.30 | 0.30 (−1.0%) | 0.37 | 0.36 (−0.8%) | 0.53 |
+| drag 1920x1080 | 0.30 | 0.29 (−3.3%) | 0.36 | 0.36 (+0.8%) | 0.42 |
+| browser 1920x1080 | 4.16 | 3.93 (−5.6%) | 5.01 | 4.79 (−4.3%) | 4.84 |
+| video 1920x1080 | 285 | 283 (−0.7%) | 363 | 367 (+1.1%) | 189 |
+| video 2880x1800@2 | 933 | 912 (−2.2%) | 1170 | 1159 (−1.0%) | 604 |
+| mixed 1920x1080, 200 MB | 447 | 442 (−1.2%) | 593 | 564 (−4.9%) | 305 |
+| mixed 2880x1800@2, 200 MB | 647 | 637 (−1.6%) | 827 | 819 (−0.9%) | 449 |
+| silesia `-3` | 338 | 331 (−2.1%) | 447 | 444 (−0.7%) | 216 |
+| silesia `-19` | 338 | 332 (−1.9%) | 457 | 456 (−0.2%) | 218 |
+
+ms a pass. The 2880x1800@2 small tiles gain 3.5–7.3% natively and 2.9–5.9%
+in wasm. Video and the corpora build few tables for what they decode, and
+move by about the spread of their runs; mixed in wasm (−4.9%) by about its
+spread (4.1%). Every workload:
+[`results/run12-table-builds.md`](results/run12-table-builds.md).
+
+- By geomean over all workloads, libzstd and ruzstd are now even natively
+  (libzstd 0.995 times TB's time, 1.03 times S's with this harness). ruzstd
+  decodes still, drag, browser and terminal tiles faster than libzstd
+  (libzstd's still figures are pessimistic, as before: its harness zero-fills
+  a bitmap for each still body); uncover is 1.1–1.3 times slower, and video,
+  mixed and silesia 1.4–1.5 times.
+- In TB's profile of uncover the sequence tables' build is still 13% natively
+  and 12% in wasm, and reading their descriptions 6%; the Huffman tables'
+  build is about 4% natively, half of it sorting the symbols by length.
+- The wasm build grows by 3.7 KB, to 248 KB: the Huffman fill's loop for each
+  of the eleven lengths.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  the weights' overrun above, and nothing after the fix.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
