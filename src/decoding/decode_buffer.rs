@@ -6,6 +6,11 @@ use core::hash::Hasher;
 use super::ringbuffer::RingBuffer;
 use crate::decoding::errors::DecodeBufferError;
 
+/// The bytes a block's literals are followed by for [`DecodeBuffer::push_sequence`], whose copy
+/// reads whole chunks of them.
+pub const LITERALS_PADDING: usize = 16;
+const _: () = assert!(LITERALS_PADDING >= super::ringbuffer::CHUNK - 1);
+
 pub struct DecodeBuffer {
     buffer: RingBuffer,
     pub dict_content: Vec<u8>,
@@ -81,6 +86,19 @@ impl DecodeBuffer {
         fill_length: usize,
     ) -> Result<(), crate::io::Error> {
         self.buffer.extend_from_reader(read, fill_length)
+    }
+
+    /// A sequence's `ll` literals, from the start of `literals`, then its match, if the buffer
+    /// can take them in its simple case (see [`RingBuffer::push_sequence`]): `literals` must
+    /// have [`LITERALS_PADDING`] bytes after the `ll`. Returns `false`, having changed nothing,
+    /// otherwise.
+    #[inline(always)]
+    pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
+        let done = self.buffer.push_sequence(literals, ll, offset, ml);
+        if done {
+            self.total_output_counter += (ll + ml) as u64;
+        }
+        done
     }
 
     pub fn push(&mut self, data: &[u8]) {

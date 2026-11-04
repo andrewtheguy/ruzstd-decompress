@@ -18,7 +18,10 @@ pub struct RingBuffer {
 }
 
 /// The size a short copy is rounded up to, when there is room for it.
-const CHUNK: usize = 16;
+pub(crate) const CHUNK: usize = 16;
+
+/// The longest piece of a sequence [`RingBuffer::push_sequence`] copies in whole chunks.
+const SHORT_COPY: usize = 2 * CHUNK;
 
 /// How far past what a write needs the ring is initialised, so that it is done in a few
 /// large fills rather than one for each write.
@@ -282,6 +285,63 @@ impl RingBuffer {
         self.advance_tail(len);
     }
 
+    /// A sequence's literals and then its match, in one go, where it is simple: the free space
+    /// from the tail has room for both rounded up to whole chunks, initialised, and the match's
+    /// source is at least [`CHUNK`] back, in the data that runs on to where it is written
+    /// without wrapping. Returns `false`, having changed nothing, otherwise.
+    ///
+    /// That is the data from the head when it does not wrap, else the part from the start of
+    /// the ring, which the tail is in: the free space then runs from the tail to the head.
+    ///
+    /// `literals` must hold the `ll` literals and then at least `CHUNK - 1` bytes more, which
+    /// the rounded copy reads. The rounded copies write past each piece, into free space,
+    /// which the match then overwrites from where the literals end. With the source at least
+    /// a chunk back, each chunk of the match reads only what is before it, the earlier
+    /// chunks' bytes included, as a copy of a byte at a time would.
+    #[inline(always)]
+    pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
+        let (head, tail) = (self.head, self.tail);
+        // Where the free space from the tail ends, within what is initialised (all of the ring
+        // once the data wraps), and where the data before the tail starts.
+        let (limit, data_start) = if tail >= head {
+            (self.buf.len(), head)
+        } else {
+            (head, 0)
+        };
+        // Rounded up, each piece takes less than one chunk more. The room left keeps the tail
+        // short of `cap`, or of the head, so it needs no wrapping and the sentinel stays free.
+        if tail + ll + ml + 2 * CHUNK > limit {
+            return false;
+        }
+        if offset > tail - data_start + ll || offset < CHUNK {
+            return false;
+        }
+        // Short pieces in whole chunks; long ones in one copy each, which is faster than chunks
+        // once there are a few, where the match does not overlap itself.
+        if ll <= SHORT_COPY {
+            let mut at = 0;
+            while at < ll {
+                self.buf[tail + at..tail + at + CHUNK].copy_from_slice(&literals[at..at + CHUNK]);
+                at += CHUNK;
+            }
+        } else {
+            self.buf[tail..tail + ll].copy_from_slice(&literals[..ll]);
+        }
+        let dst = tail + ll;
+        let src = dst - offset;
+        if ml <= SHORT_COPY || offset < ml {
+            let mut at = 0;
+            while at < ml {
+                self.buf.copy_within(src + at..src + at + CHUNK, dst + at);
+                at += CHUNK;
+            }
+        } else {
+            self.buf.copy_within(src..src + ml, dst);
+        }
+        self.tail = dst + ml;
+        true
+    }
+
     /// `len` bytes from `src` to the tail, either side wrapping at the end of
     /// the buffer. The source is data and the destination free, so they do not
     /// overlap.
@@ -523,8 +583,26 @@ mod tests {
         };
         let mut rb = RingBuffer::new();
         let mut model: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let mut sequences = 0;
         for step in 0..200_000 {
-            match next(5) {
+            match next(6) {
+                // A sequence: when the fast copy takes it, the literals then the match, byte by
+                // byte; when it does not, nothing.
+                3 if !model.is_empty() => {
+                    let ll = next(40);
+                    let padded: alloc::vec::Vec<u8> = (0..ll + super::CHUNK - 1)
+                        .map(|_| next(256) as u8)
+                        .collect();
+                    let offset = 1 + next(model.len() + ll + 8);
+                    let ml = 3 + next(60);
+                    if rb.push_sequence(&padded, ll, offset, ml) {
+                        sequences += 1;
+                        model.extend_from_slice(&padded[..ll]);
+                        for _ in 0..ml {
+                            model.push(model[model.len() - offset]);
+                        }
+                    }
+                }
                 0 => {
                     let data: alloc::vec::Vec<u8> =
                         (0..next(40)).map(|_| next(256) as u8).collect();
@@ -558,5 +636,9 @@ mod tests {
             let (a, b) = rb.as_slices();
             assert_eq!([a, b].concat(), model, "step {step}");
         }
+        assert!(
+            sequences > 5_000,
+            "only {sequences} sequences took the fast copy"
+        );
     }
 }
