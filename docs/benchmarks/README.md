@@ -341,6 +341,85 @@ Every workload: [`results/run7-huffman.md`](results/run7-huffman.md).
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
 
+## 2026-11-04: table builds and the ring buffer
+
+The question: after the Huffman loop, the small tiles (uncover, terminal,
+drag, still, browser) were where ruzstd was furthest behind libzstd for
+their size. zDesk makes a decoder for every planar tile, and every tile is a
+frame of its own, with its own tables. Where does their time go?
+
+A `perf` profile (native, uncover 1920x1080) said:
+- 27% was building FSE tables, a division for every state;
+- the forward bit reader, which reads the tables' descriptions, read a byte at
+  a time;
+- on terminal tiles, a third of the time was the ring buffer growing. A new
+  decoder's buffer started empty and doubled as it filled, each time zeroing a
+  buffer of the new size and copying the old one in: 4.8 MB zeroed a pass for
+  1.7 MB decoded.
+
+| | |
+|---|---|
+| **H** | `master` at `6621152` (the Huffman loop) |
+| **J** | H with the three commits |
+| **Z** | libzstd |
+
+The commits, each kept only if the quick checks on lab1 said so:
+
+1. **Tables built as libzstd builds them.** A symbol of probability `p` has
+   the states `p..2p`, so each state's bits and base come from a counter and a
+   leading-zero count. The symbols are laid out in a row 8 bytes at a time
+   before they are spread. The sequence tables are built straight from the
+   distribution; the FSE table in between is no longer built. A test checks the
+   tables against the old build for 3,000 random distributions.
+2. **The forward bit reader reads 8 bytes at a time.**
+3. **The ring buffer is initialised as it is written.** Growing copies only
+   the data, and the ring is initialised 16 KB ahead of where the tail writes,
+   so a buffer is never zeroed whole. A frame that gives its content size
+   reserves it at once, up to one block (128 KB), which a block of a few bytes
+   can make a decoder allocate anyway; a header that claims more costs nothing
+   until the data comes.
+
+Tried and left out:
+- **Each code's value looked up once per table**, not for each state, and the
+  spread written without bounds checks: no change.
+- **The initialised length checked on its own** before each copy: silesia 7%
+  slower in wasm. The check is folded into the bounds the copies already
+  test.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against H:
+
+| | J | libzstd |
+|---|---:|---:|
+| native | **−12.1%** | −26.4% |
+| wasm | **−9.4%** | |
+
+| workload | native H | native J | wasm H | wasm J | libzstd |
+|---|---:|---:|---:|---:|---:|
+| terminal 1920x1080 | 1.01 | 0.80 (−21.5%) | 1.15 | 0.96 (−16.7%) | 0.69 |
+| uncover 1920x1080 | 2.79 | 2.25 (−19.5%) | 3.24 | 2.84 (−12.5%) | 1.49 |
+| still 1920x1080 | 0.43 | 0.35 (−19.4%) | 0.52 | 0.44 (−15.8%) | 0.52 |
+| drag 1920x1080 | 0.43 | 0.35 (−18.7%) | 0.49 | 0.45 (−9.9%) | 0.39 |
+| browser 1920x1080 | 5.17 | 4.52 (−12.5%) | 6.04 | 5.42 (−10.2%) | 4.76 |
+| video 1920x1080 | 365 | 346 (−5.2%) | 488 | 422 (−13.6%) | 191 |
+| video 2880x1800@2 | 1224 | 1138 (−7.0%) | 1611 | 1424 (−11.6%) | 603 |
+| mixed 1920x1080, 200 MB | 556 | 527 (−5.3%) | 710 | 651 (−8.4%) | 306 |
+| mixed 2880x1800@2, 200 MB | 833 | 783 (−5.9%) | 1053 | 994 (−5.6%) | 451 |
+| silesia `-3` | 441 | 421 (−4.6%) | 583 | 571 (−2.2%) | 215 |
+| silesia `-19` | 445 | 429 (−3.5%) | 564 | 562 (−0.4%) | 222 |
+
+ms a pass. The 2880x1800@2 small tiles gain 11–18% natively and 7–12% in
+wasm. Every workload: [`results/run9-tables.md`](results/run9-tables.md).
+
+- Natively, J now decodes still, drag and browser tiles faster than libzstd,
+  and terminal within 1.2 times. Over all, by geomean, libzstd's lead falls
+  from 1.36 to 1.19 times. On video, mixed and silesia it is still 1.7–2.0
+  times: there libzstd decodes Huffman literals two symbols to a lookup (its
+  X2 tables), which ruzstd does not.
+- The wasm build is the same size, 237 KB.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
