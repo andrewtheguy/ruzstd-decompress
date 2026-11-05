@@ -1,42 +1,42 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-05 (after the
-sequences executed inline, [`benchmarks/README.md`](benchmarks/README.md)).
-The figures are from `perf` profiles on lab1, natively unless they say wasm;
-zDesk's workload is the tiles, decoded in WebAssembly. The crate stays free of
-unsafe code.
+sequences with the buffer's state in locals, run 18 of
+[`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
+from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
+as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so.
+zDesk decodes in WebAssembly. The crate stays free of unsafe code.
 
-By geomean natively, libzstd takes 1.12 times ruzstd-decompress's time, with the harness
-keeping its decoders across tiles as zDesk's page does. ruzstd-decompress is faster on
-the still, drag, browser and terminal tiles; uncover is 1.02–1.18 times
-slower, video, mixed and silesia 1.3–1.5 times. In wasm, video takes
-1.19–1.26 times its native time.
+Natively, by geomean over the 10 workloads, libzstd takes 0.84 times
+ruzstd-decompress's time: 0.72–0.75 on Silesia but `x-ray` (0.84), 0.60 on the GitHub frames with
+their dictionary, 0.81 without; ruzstd-decompress is faster on the raw blocks of the
+video clip (1.16) and terminal's tiles (1.54). In wasm, each takes 1.2–1.4 times its
+native time, the dictionary frames 1.6.
 
 ## 1. The sequences, again
 
-The sequence loop and its copies are still about 40% of uncover's time; the
-executor is now inline in the loop, which runs to the stream's end. Keeping
-the executor's state in registers (the offset history by value, the repeat
-picked by selects) was no faster, and nor was slicing each chunked copy once
-so that its chunks need no bounds checks (mixed and silesia 4–5% slower in
-wasm). Against libzstd on uncover natively, the sequences take 0.66 ms a pass
-to its 0.51, the sequence tables' build 0.25 to 0.17, the descriptions 0.10
-to 0.07, and the Huffman tables and literals about 0.36 to 0.16. What is left
-of them:
-- The 2–11% of sequences the fast copy does not take: matches from less than
-  16 bytes back (a repeated pattern was tried, and was no faster), and those
-  near the end of the initialised buffer or reaching into the dictionary.
-- The checks the executor still makes for each sequence: the literals' bound
-  and the block's decoded length, which could be checked once a block from
-  the sums.
-- The ring buffer's tail goes through memory each sequence, the next
-  sequence's destination waiting on it: a loop over the ring's buffer as a
-  slice, its tail in a register, would need the ring and the executor to
-  work as one.
+On silesia `-3` (lab2, before run 18), the sequences' decoding and execution were
+3.1 G instructions a pass to libzstd's 1.7 G, at a higher rate a cycle: the gap is
+the instructions. Natively, the fast loop now keeps the ring's and the executor's
+state in locals (4–6% off Silesia); in WebAssembly the same was 6–12% slower in V8,
+so that build executes them as before (run 18 lists what was tried). What is left:
+- **WebAssembly**: V8's code for the loop spills either way. A form of the loop it
+  takes better is not known; the forms tried are in run 18.
+- **The chunk copies' bounds checks**: three a chunk of the literals and of the
+  match, that the copy could check once for the sequence. Slicing each chunked copy
+  once was tried on lab1 (no faster natively, mixed and silesia 4–5% slower in wasm),
+  before the buffer's state was in locals.
+- The 2–11% of sequences the fast copy does not take (lab1, tiles): matches from
+  less than 16 bytes back (a repeated pattern was tried, and was no faster), and
+  those near the end of the initialised buffer.
+- libzstd's sequence loop is built for BMI2 when the processor has it (its
+  `_bmi2` functions), whose shifts take no `cl` register: the take of each field of
+  bits is 7 instructions here. The crate cannot pick a function at run time without
+  unsafe code; a build for `x86-64-v3` would show what it is worth.
 
 ## 2. What is left of the table builds
 
-On uncover, which builds 847 sequence tables and 88 Huffman tables a pass:
+On uncover (lab1), which builds 847 sequence tables and 88 Huffman tables a pass:
 - The sequence tables' build, 13% natively and 12% in wasm. Natively the loop
   over the states is bound by its instructions, about 3.6 ns a state; the
   tries at its chain of counts through memory were slower. In wasm, V8's code
@@ -57,7 +57,7 @@ On uncover, which builds 847 sequence tables and 88 Huffman tables a pass:
 
 The table of pairs' loop now moves its windows on by a multiplication in
 wasm, and each stream finishes from the table of pairs: video 5–6% faster in
-wasm. In V8's code for the loop, two of the four streams' windows are still
+wasm (lab1). In V8's code for the loop, two of the four streams' windows are still
 in memory, and the four output positions still go through a vector each round
 of lookups (packing them into one `u32` avoided that, and was slower). Two
 streams to a loop, which fits in the registers, was much slower (video 15% in
