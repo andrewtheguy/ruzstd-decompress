@@ -68,6 +68,12 @@ impl<'a> SequenceExecutor<'a> {
         self.check_decoded_len(self.seq_sum)
     }
 
+    /// [`Self::execute`], not inlined: for the few sequences decoded outside the fast loop.
+    #[inline(never)]
+    pub fn execute_out_of_line(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError> {
+        self.execute(seq)
+    }
+
     /// [`Self::execute`] where the buffer's fast copy does not apply: the data wraps, the match
     /// reaches into the dictionary or overlaps itself closely, or the buffer needs room.
     #[inline(never)]

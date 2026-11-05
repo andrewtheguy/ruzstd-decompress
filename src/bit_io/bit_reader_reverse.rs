@@ -1,5 +1,13 @@
 use core::convert::TryInto;
 
+/// The zero bytes before a [`BitReaderReversed::padded`] copy of a source.
+pub const PADDING: usize = 16;
+
+/// The most bytes of a source a [`BitReaderReversed::padded`] copy takes: those a reader has
+/// left when [`BitReaderReversed::can_refill_fast_twice`] stops holding, at most 14 before its
+/// window and the window's 8.
+pub const PADDED_LEFT: usize = 22;
+
 /// Zstandard encodes some types of data in a way that the data must be read
 /// back to front to decode it properly. `BitReaderReversed` provides a
 /// convenient interface to do that.
@@ -161,6 +169,35 @@ impl<'s> BitReaderReversed<'s> {
         (self.bit_container | 1) << self.bits_consumed
     }
 
+    /// The reader on a copy of what is left of its source, after [`PADDING`] zero bytes, in
+    /// `buf`: it reads on as this one would, the zeros past the source's start included, but
+    /// [`Self::can_refill_fast_twice`] holds until its window starts a byte before the
+    /// source's start, so that fast refills reach that start and past it. Its
+    /// [`Self::bits_remaining`] counts the zero bytes, `PADDING * 8` more than this one's.
+    ///
+    /// Only while the container holds the 8 bytes from `index`, as every refill leaves it but
+    /// one reaching the source's start, and at most [`PADDED_LEFT`] bytes are left; `None`
+    /// otherwise.
+    pub fn padded<'b>(
+        &self,
+        buf: &'b mut [u8; PADDING + PADDED_LEFT],
+    ) -> Option<BitReaderReversed<'b>> {
+        let left = self.index + 8;
+        if self.extra_bits != 0 || left > self.source.len() || left > PADDED_LEFT {
+            return None;
+        }
+        buf[..PADDING].fill(0);
+        buf[PADDING..PADDING + left].copy_from_slice(&self.source[..left]);
+        let buf: &'b [u8] = buf;
+        Some(BitReaderReversed {
+            index: self.index + PADDING,
+            bits_consumed: self.bits_consumed,
+            extra_bits: 0,
+            source: &buf[..PADDING + left],
+            bit_container: self.bit_container,
+        })
+    }
+
     /// Make sure at least `n` bits (at most 57) can be peeked and consumed without refilling.
     #[inline(always)]
     pub fn ensure_bits(&mut self, n: u8) {
@@ -318,5 +355,35 @@ mod test {
                 }
             }
         }
+    }
+
+    /// A padded copy reads on as the reader would, past the source's start too, whatever is
+    /// left: the reader read a step at a time and copied, where it can be, at every step.
+    #[test]
+    fn padded_reads_on_as_the_reader() {
+        use super::{BitReaderReversed, PADDED_LEFT, PADDING};
+        let source: alloc::vec::Vec<u8> = (0..60u32).map(|x| (x * 157 + 11) as u8).collect();
+        let steps: [u8; 6] = [7, 13, 1, 25, 0, 9];
+        let mut copies = 0;
+        for len in 0..source.len() {
+            let source = &source[..len];
+            let mut br = BitReaderReversed::new(source);
+            for (at, &n) in steps.iter().cycle().take(40).enumerate() {
+                let mut buf = [0xa5; PADDING + PADDED_LEFT];
+                if let Some(mut padded) = br.padded(&mut buf) {
+                    copies += 1;
+                    let mut ahead = br.clone();
+                    assert_eq!(
+                        padded.bits_remaining(),
+                        ahead.bits_remaining() + PADDING as isize * 8
+                    );
+                    for &m in steps.iter().cycle().skip(at).take(30) {
+                        assert_eq!(padded.get_bits(m), ahead.get_bits(m), "len {len} at {at}");
+                    }
+                }
+                br.get_bits(n);
+            }
+        }
+        assert!(copies > 500, "{copies}");
     }
 }

@@ -1,27 +1,33 @@
 # Roadmap
 
-What to make faster next, most promising first, as of 2026-11-04 (after
-hashing only frames with a checksum, [`benchmarks/README.md`](benchmarks/README.md)).
+What to make faster next, most promising first, as of 2026-11-05 (after the
+sequences executed inline, [`benchmarks/README.md`](benchmarks/README.md)).
 The figures are from `perf` profiles on lab1, natively unless they say wasm;
 zDesk's workload is the tiles, decoded in WebAssembly. The crate stays free of
 unsafe code.
 
-By geomean natively, libzstd takes 1.07 times ruzstd's time, with the harness
+By geomean natively, libzstd takes 1.12 times ruzstd's time, with the harness
 keeping its decoders across tiles as zDesk's page does. ruzstd is faster on
-the still, drag, browser and terminal tiles; uncover is 1.07–1.18 times
-slower, video and mixed 1.3–1.4 times, and silesia 1.5–1.6 times. In wasm,
-video takes 1.23–1.26 times its native time.
+the still, drag, browser and terminal tiles; uncover is 1.02–1.18 times
+slower, video, mixed and silesia 1.3–1.5 times. In wasm, video takes
+1.19–1.26 times its native time.
 
 ## 1. The sequences, again
 
-The sequence loop and its copies are still about a third of uncover's time.
-What is left of them:
+The sequence loop and its copies are still about 40% of uncover's time; the
+executor is now inline in the loop, which runs to the stream's end. Keeping
+the executor's state in registers (the offset history by value, the repeat
+picked by selects) was no faster. What is left of them:
 - The 2–11% of sequences the fast copy does not take: matches from less than
   16 bytes back (a repeated pattern was tried, and was no faster), and those
   near the end of the initialised buffer or reaching into the dictionary.
 - The checks the executor still makes for each sequence: the literals' bound
   and the block's decoded length, which could be checked once a block from
   the sums.
+- The ring buffer's tail goes through memory each sequence, the next
+  sequence's destination waiting on it: a loop over the ring's buffer as a
+  slice, its tail in a register, would need the ring and the executor to
+  work as one.
 
 ## 2. What is left of the table builds
 
