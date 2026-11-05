@@ -1,8 +1,8 @@
 #!/bin/bash
 # Every variant, native and wasm, with zDesk's egfx release profile: LTO, one codegen unit, panic=abort.
-# The harness is a crate of its own per variant, so ruzstd's dev-dependencies (libzstd's C) stay out.
+# The harness is a crate of its own per variant, so ruzstd-decompress's dev-dependencies (libzstd's C) stay out.
 set -e
-S=~/codes/staging-area/zstd-rs-tuned-scratch
+S=~/codes/staging-area/ruzstd-decompress-scratch
 mkdir -p $S/bin
 for v in "$@"; do
   C=$S/benchcrates/$v
@@ -15,6 +15,10 @@ for v in "$@"; do
   # The variant's own toolchain pin if it has one, else the default (stable)
   rm -f $C/rust-toolchain.toml
   if [ -e $S/variants/$v/rust-toolchain.toml ]; then cp $S/variants/$v/rust-toolchain.toml $C/; fi
+  # The variant's package, under the name its harness uses: a commit from before the rename
+  # calls the crate ruzstd.
+  P=$(sed -n 's/^name = "\(.*\)"$/\1/p' $S/variants/$v/Cargo.toml | head -1)
+  K=$(grep -o -m1 '\bruzstd[a-z_]*::' $C/src/main.rs | head -1 | sed 's/::$//')
   cat > $C/Cargo.toml <<TOML
 [package]
 name = "decode_bench"
@@ -23,7 +27,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-ruzstd = { path = "../../variants/$v" }
+$K = { package = "$P", path = "../../variants/$v" }
 
 [profile.release]
 opt-level = 3
@@ -34,7 +38,7 @@ panic = "abort"
 [workspace]
 TOML
   cd $C
-  export CARGO_TARGET_DIR=~/codes/staging-area/zstd-rs-tuned-target/$v
+  export CARGO_TARGET_DIR=~/codes/staging-area/ruzstd-decompress-target/$v
   ~/.cargo/bin/cargo build -q --release
   cp $CARGO_TARGET_DIR/release/decode_bench $S/bin/$v-native
   RUSTFLAGS="-C target-feature=+simd128,+bulk-memory" ~/.cargo/bin/cargo build -q --release --target wasm32-wasip1

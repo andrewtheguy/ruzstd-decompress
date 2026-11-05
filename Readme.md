@@ -1,8 +1,4 @@
-# Ruzstd (a pure rust zstd format implementation)
-
-[![Released API docs](https://docs.rs/ruzstd/badge.svg)](https://docs.rs/ruzstd)
-[![CI](https://github.com/killingspark/zstd-rs/workflows/CI/badge.svg)](https://github.com/killingspark/zstd-rs/actions?query=workflow%3ACI)
-
+# ruzstd-decompress (a pure Rust zstd decoder)
 
 # What is this
 
@@ -10,8 +6,8 @@ A pure Rust implementation of the Zstandard compression format, as defined in [R
 
 This crate contains a fully operational implementation of the decompression portion of the standard.
 
-This fork is a decoder only: the compressor and the dictionary builder of upstream ruzstd
-(<https://github.com/KillingSpark/zstd-rs>) have been removed, as nothing that uses it compresses with it.
+This is a fork of ruzstd (<https://github.com/KillingSpark/zstd-rs>), a decoder only: upstream's
+compressor and dictionary builder have been removed, as nothing that uses it compresses with it.
 
 This crate is currently actively maintained.
 
@@ -21,7 +17,7 @@ This crate is currently actively maintained.
 The `decoding` module provides a complete
 implementation of a Zstandard decompressor.
 
-In terms of speed, `ruzstd` is behind the original C implementation
+In terms of speed, `ruzstd-decompress` is behind the original C implementation
 which has a rust binding located [here](https://github.com/gyscos/zstd-rs).
 
 Measuring with the 'time' utility the original zstd and my decoder both
@@ -41,8 +37,8 @@ Additionally to the descriptions and the docs you can have a look at the zstd / 
 The easiest is to wrap the io::Read into a StreamingDecoder which itself implements io::Read. It will decode blocks as necessary to fulfill the read requests
 
 ```rust, no_run
-use ruzstd::decoding::StreamingDecoder;
-use ruzstd::io::Read;
+use ruzstd_decompress::decoding::StreamingDecoder;
+use ruzstd_decompress::io::Read;
 
 let mut source: &[u8] = todo!("Get a reader from a File or any other source");
 let mut decoder = StreamingDecoder::new(&mut source).unwrap();

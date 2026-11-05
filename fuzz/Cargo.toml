@@ -1,6 +1,6 @@
 
 [package]
-name = "ruzstd-fuzz"
+name = "ruzstd-decompress-fuzz"
 version = "0.0.1"
 edition = "2024"
 authors = ["Automatically generated"]
@@ -12,7 +12,7 @@ cargo-fuzz = true
 [dependencies]
 zstd = "0.5.1"
 
-[dependencies.ruzstd]
+[dependencies.ruzstd-decompress]
 path = ".."
 [dependencies.libfuzzer-sys]
 git = "https://github.com/rust-fuzz/libfuzzer-sys.git"

@@ -55,7 +55,7 @@ fn load_tiles(path: &str, most: usize) -> (Vec<u8>, Vec<Tile>) {
 /// buffer of the most it can be, and the still stream's bodies fed in order to
 /// one streaming context, the bitmap what each body's blocks put out. One
 /// context for every planar tile and one for the still stream, reset for a new
-/// stream, as the ruzstd harness keeps its decoders.
+/// stream, as the ruzstd-decompress harness keeps its decoders.
 fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
     let mut planar = zstd::bulk::Decompressor::new().unwrap();
     let mut bitmap: Vec<u8> = Vec::new();

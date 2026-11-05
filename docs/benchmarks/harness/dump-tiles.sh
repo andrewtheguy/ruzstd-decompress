@@ -1,5 +1,5 @@
 #!/bin/bash
-# Lossless tile bodies of each sample, as the page receives them, for ruzstd's decode bench.
+# Lossless tile bodies of each sample, as the page receives them, for ruzstd-decompress's decode bench.
 MB=~/codes/staging-area/wlshare-tiledump-target/release/examples/motion-bench
 S=/mnt/dasdata/backup/wlshare-artifacts/frame-samples
 cd "$(dirname "$0")"

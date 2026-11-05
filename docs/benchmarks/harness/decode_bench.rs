@@ -1,4 +1,4 @@
-//! The decode benchmark: `build.sh` makes it a crate of its own per variant, depending on that variant's ruzstd.
+//! The decode benchmark: `build.sh` makes it a crate of its own per variant, depending on that variant's ruzstd-decompress.
 //!
 //! ```text
 //! decode_bench tiles FILE [MAX_CORPUS_BYTES]   wlshare's lossless tile bodies, replayed as zDesk's page decodes them
@@ -7,7 +7,7 @@
 //!
 //! Prints one JSON line: reps, median and min ms, bytes in and out, and a check
 //! (an FNV hash of every tile's bitmap, or the frame's checksum matching).
-use ruzstd::decoding::{BlockDecodingStrategy, FrameDecoder, StreamingDecoder};
+use ruzstd_decompress::decoding::{BlockDecodingStrategy, FrameDecoder, StreamingDecoder};
 use std::hint::black_box;
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
