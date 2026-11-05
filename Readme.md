@@ -86,7 +86,7 @@ Fuzzing has been done on
 
 ### You want to help fuzz?
 
-Use `cargo +nightly fuzz run decode` or some other fuzz target to run the fuzzer. It is seeded with files created with decodecorpus.
+Use `cargo fuzz run --sanitizer none decode` or some other fuzz target to run the fuzzer, on stable: only a sanitizer would need nightly, and the crate forbids unsafe code. It is seeded with files created with decodecorpus.
 
 If the fuzzer finds a crash it will be saved to the artifacts dir by the fuzzer. Run `cargo test artifacts` to run the artifacts tests.
 This will tell you where the decoder panics exactly. If you are able to fix the issue please feel free to do a pull request. If not please still submit the offending input and I will see how to fix it myself.
