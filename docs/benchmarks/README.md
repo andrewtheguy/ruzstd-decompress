@@ -867,6 +867,89 @@ hash. Every workload: [`results/run14-checksum.md`](results/run14-checksum.md).
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
 
+## 2026-11-05: the sequences executed inline, to the stream's end
+
+The question: decoding and executing the sequences were 44% of uncover
+1920x1080 natively, and uncover the one kind of tile libzstd still decoded
+faster (1.07–1.18 times). Where in the loop did the time go?
+
+What a native profile of `main` said:
+- **A call a sequence.** The loop handed each sequence to a closure, and LLVM
+  had not inlined it: 24% of uncover was in the closure's own code, which
+  saved six registers, loaded the executor's state from memory, and read and
+  wrote the offset history through a pointer. The loop around it kept the bit
+  reader's state on the stack, its address being taken by the refills of the
+  loop after it.
+- **The stream's last bytes.** The fast loop stops with fewer than 15 bytes of
+  the stream left, room for two refills, and the rest went a sequence at a
+  time through the reader's checked refills: uncover's blocks are small
+  (about 7 KB out each), so these were a good share of its sequences. With the
+  first change, their out-of-line execution alone was 3.9% of uncover.
+
+| | |
+|---|---|
+| **D0** | `main` at `7bae314` (hashing only frames with a checksum) |
+| **SQ** | D0 with the commit (`5531084`) |
+| **Z** | libzstd |
+
+The commit:
+- **The executor inline in the fast loop.** `decode_sequences` takes the
+  executor, not a closure, and the fast loop runs on a copy of the reader
+  whose address nothing takes. The sequences after it go through an
+  out-of-line `execute`.
+- **The fast loop to the stream's end.** Near the stream's start, the bytes
+  left are copied after 16 zero bytes (`BitReaderReversed::padded`), and the
+  same loop goes on there, to every sequence but the last, which reads no
+  states. On a bad stream it can read past the start; the bits remaining,
+  checked after it, then fail the block, which is undone as before. A test
+  reads a padded copy against the reader, past the start too, at every step
+  where one can be made.
+
+Tried and left out, in the quick checks on lab1:
+- **The executor's state in registers**: the offset history kept by value and
+  written back at the end, the repeat picked by selects, not an index into an
+  array, and the slow copy taking the buffer alone, so that nothing takes the
+  executor's address. No faster on the tiles, and silesia 2–3% slower
+  natively than the inline loop alone.
+- **One loop that switches to the padded copy** as it goes: terminal 6–9%
+  slower natively (V8 did well with it). Calling the loop as it was a second
+  time, on the copy, kept the native gains.
+
+Every variant decoded every workload to the same output. Geomean over the 17
+workloads, against D0:
+
+| | SQ | libzstd |
+|---|---:|---:|
+| native | **−3.0%** | +8.6% |
+| wasm | **−3.4%** | |
+
+| workload | native D0 | native SQ | wasm D0 | wasm SQ | libzstd |
+|---|---:|---:|---:|---:|---:|
+| uncover 1920x1080 | 1.76 | 1.71 (−2.7%) | 2.24 | 2.23 (−0.6%) | 1.45 |
+| uncover 2880x1800@2 | 2.97 | 2.90 (−2.5%) | 3.88 | 3.76 (−2.9%) | 2.84 |
+| terminal 2880x1800@2 | 1.21 | 1.16 (−3.6%) | 1.52 | 1.48 (−2.1%) | 1.94 |
+| still 1920x1080 | 0.29 | 0.28 (−5.2%) | 0.37 | 0.35 (−4.4%) | 0.49 |
+| drag 1920x1080 | 0.29 | 0.27 (−6.5%) | 0.36 | 0.35 (−3.6%) | 0.41 |
+| browser 2880x1800@2 | 8.44 | 8.19 (−3.0%) | 10.82 | 10.44 (−3.5%) | 12.98 |
+| video 1920x1080 | 259 | 263 (+1.3%) | 316 | 314 (−0.7%) | 189 |
+| video 2880x1800@2 | 841 | 822 (−2.3%) | 1060 | 1038 (−2.0%) | 609 |
+| mixed 2880x1800@2, 200 MB | 601 | 576 (−4.2%) | 755 | 730 (−3.2%) | 455 |
+| silesia `-3` | 333 | 320 (−3.9%) | 442 | 404 (**−8.6%**) | 216 |
+| silesia `-19` | 330 | 321 (−2.9%) | 464 | 400 (**−13.7%**) | 222 |
+
+ms a pass. Every small tile is 2.1–6.5% faster natively and 0.6–4.4% in wasm.
+Video 1920x1080 natively (+1.3%) is a little over its rounds' spread (0.7%).
+Silesia gained less natively than in the quick checks (6–8% there). Every
+workload: [`results/run15-sequences-inline.md`](results/run15-sequences-inline.md).
+
+- By geomean natively, libzstd now takes 1.12 times ruzstd's time. uncover
+  is 1.02–1.18 times slower than libzstd, video, mixed and silesia 1.3–1.5
+  times; the other tiles 1.4–2.1 times faster.
+- In wasm, silesia now takes 1.25–1.26 times its native time, from 1.33–1.40.
+- The wasm build grows by 0.3 KB, to 249 KB: the loop twice.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
