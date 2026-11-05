@@ -320,42 +320,21 @@ fn maybe_update_fse_tables(
 
 #[test]
 fn test_ll_default() {
-    let mut table = crate::fse::FSETable::new(MAX_LITERAL_LENGTH_CODE);
-    table
-        .build_from_probabilities(LL_DEFAULT_ACC_LOG, &LL_DEFAULT_DISTRIBUTION)
-        .unwrap();
+    // (symbol, bits, base) of each state
+    let mut table = alloc::vec![(0, 0, 0); 1 << LL_DEFAULT_ACC_LOG];
+    crate::fse::build_states(
+        LL_DEFAULT_ACC_LOG,
+        &LL_DEFAULT_DISTRIBUTION,
+        |state, symbol, num_bits, base_line| table[state] = (symbol, num_bits, base_line),
+    )
+    .unwrap();
 
-    #[cfg(feature = "std")]
-    for (idx, entry) in table.decode.iter().enumerate() {
-        std::println!(
-            "{:3}: {:3} {:3} {:3}",
-            idx,
-            entry.symbol,
-            entry.num_bits,
-            entry.base_line
-        );
-    }
-
-    assert!(table.decode.len() == 64);
+    assert!(table.len() == 64);
 
     //just test a few values. TODO test all values
-    assert!(table.decode[0].symbol == 0);
-    assert!(table.decode[0].num_bits == 4);
-    assert!(table.decode[0].base_line == 0);
-
-    assert!(table.decode[19].symbol == 27);
-    assert!(table.decode[19].num_bits == 6);
-    assert!(table.decode[19].base_line == 0);
-
-    assert!(table.decode[39].symbol == 25);
-    assert!(table.decode[39].num_bits == 4);
-    assert!(table.decode[39].base_line == 16);
-
-    assert!(table.decode[60].symbol == 35);
-    assert!(table.decode[60].num_bits == 6);
-    assert!(table.decode[60].base_line == 0);
-
-    assert!(table.decode[59].symbol == 24);
-    assert!(table.decode[59].num_bits == 5);
-    assert!(table.decode[59].base_line == 32);
+    assert_eq!(table[0], (0, 4, 0));
+    assert_eq!(table[19], (27, 6, 0));
+    assert_eq!(table[39], (25, 4, 16));
+    assert_eq!(table[60], (35, 6, 0));
+    assert_eq!(table[59], (24, 5, 32));
 }

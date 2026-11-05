@@ -375,21 +375,23 @@ mod tests {
     #[test]
     fn built_from_fse_states() {
         let mut fse = FSETable::new(crate::blocks::sequence_section::MAX_LITERAL_LENGTH_CODE);
-        fse.build_from_probabilities(LL_DEFAULT_ACC_LOG, &LL_DEFAULT_DISTRIBUTION)
-            .unwrap();
-        let expected: alloc::vec::Vec<SeqEntry> = fse
-            .decode
-            .iter()
-            .map(|entry| {
-                let (base_value, nb_add_bits) = SeqKind::LiteralLength.code_value(entry.symbol);
-                SeqEntry {
+        fse.accuracy_log = LL_DEFAULT_ACC_LOG;
+        fse.symbol_probabilities = LL_DEFAULT_DISTRIBUTION.to_vec();
+        let mut expected = alloc::vec![SeqEntry::default(); 1 << LL_DEFAULT_ACC_LOG];
+        build_states(
+            LL_DEFAULT_ACC_LOG,
+            &LL_DEFAULT_DISTRIBUTION,
+            |state, symbol, num_bits, base_line| {
+                let (base_value, nb_add_bits) = SeqKind::LiteralLength.code_value(symbol);
+                expected[state] = SeqEntry {
                     base_value,
-                    next_state: entry.base_line as u16,
+                    next_state: base_line as u16,
                     nb_add_bits,
-                    nb_bits: entry.num_bits,
-                }
-            })
-            .collect();
+                    nb_bits: num_bits,
+                };
+            },
+        )
+        .unwrap();
         let states = |table: &SeqTable| -> alloc::vec::Vec<SeqEntry> {
             (0..64)
                 .map(|state| at(table.states().unwrap().1, state))
