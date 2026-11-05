@@ -7,6 +7,8 @@ OUT=$1; shift
 WORK=()
 for f in $S/tiles/*.tiles; do WORK+=("tiles $f"); done
 for f in $S/corpus/*.zst; do WORK+=("frame $f"); done
+# Small frames back to back, with NAME.dict beside NAME.frames if they were made with one.
+for f in $S/corpus/*.frames; do d=${f%.frames}.dict; WORK+=("frames $f$([ -e $d ] && echo " $d")"); done
 for round in 1 2 3; do
   for w in "${WORK[@]}"; do
     for v in $(printf '%s\n' "$@" | shuf); do

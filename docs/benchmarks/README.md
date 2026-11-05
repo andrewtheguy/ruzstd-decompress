@@ -1,10 +1,13 @@
 # Decode benchmarks
 
-What the decoder costs on the data it is used for, and what each change to it
-bought. The crate's main user is zDesk's page, which decodes wlshare's lossless
-tiles in WebAssembly (`zdesk/frontend/wasm/egfx`); wlshare decodes the same
-tiles natively in its tests and examples. The general corpora are measured too,
-for use outside those.
+What the decoder costs, and what each change to it bought. The crate is a
+general zstd decoder, so the workloads are standard corpora first: Silesia,
+whole and by file, at several levels, and zstd's own small-frame and dictionary
+set. A workload of its own is added only for what none of them covers. wlshare's
+lossless tiles, which zDesk's page decodes in WebAssembly
+(`zdesk/frontend/wasm/egfx`), are kept as a check on a real user, two of them
+since 2026-11-05 (see "the workloads, for a generic decoder" below); the runs
+before that date measured 14.
 
 ## 2026-11-04: the safe ring buffer
 
@@ -950,6 +953,109 @@ workload: [`results/run15-sequences-inline.md`](results/run15-sequences-inline.m
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
 
+## 2026-11-05: the workloads, for a generic decoder
+
+The question: the crate is a general zstd decoder, but 14 of the 17 workloads
+were wlshare's tiles. Which of them does a standard corpus cover, and which are
+redundant? Two kinds of evidence, both from this machine, not lab1: what each
+workload puts the decoder through, read from its block, literals and sequences
+headers, and how the workloads moved together over the 42 variant pairs of runs
+1–15.
+
+What they exercise (share of the output from Huffman literals and from
+matches, and the bytes a sequence's match copies):
+
+| workload | from literals | from matches | match B/seq | |
+|---|---:|---:|---:|---|
+| video, mixed: planar frames | 88–99% | 1–12% | 7–9 | 70–175 KB frames, 4-stream Huffman |
+| video, mixed: still stream | 10–79% | 21–90% | 10–20 | |
+| browser, drag, still, terminal, uncover | 3–15% | 85–97% | 50–235 | the still stream: small flushed blocks, mostly predefined tables |
+| silesia `-3`, `-19` | 8–15% | 84–92% | 12–14 | 128 KB blocks, FSE tables; `-19` repeat tables too |
+| Silesia's `x-ray`, `-1` | 99.7% | 0.3% | 7 | like the planar frames |
+| Silesia's `nci`, `-3` | 2% | 98% | 30 | the longest matches in Silesia |
+| silesia `--fast=4` | 32% raw | 64% | 14 | raw literals, which nothing else has |
+| GitHub users sample set, `-3` | 28% | 72% | 17 | 9,114 frames of 0.8 KB: 1-stream Huffman, predefined tables |
+| the same with a dictionary | 1% | 99% | 34 | the dictionary's tables (repeat mode), treeless literals |
+
+How they moved: video and mixed at both sizes moved together (r 0.98–0.99,
+1.6–4.2 points apart on average), and so did the small still-stream tiles
+(r 0.8–0.93, 2–4 points), with terminal 2880x1800@2 closest to all of them.
+Silesia `-3` and `-19` agree less (r 0.93, but 8.6% against 13.7% in wasm in
+run 15). still 1920x1080 is a 0.3 ms pass, as noisy as it is redundant (14.8%
+spread in wasm in run 15).
+
+The workloads from now on, 10 for 17:
+
+- **Standard**: silesia `-3`, `-19` and `--fast=4`; Silesia's `x-ray` at `-1`
+  and `nci` at `-3`; the GitHub users sample set (zstd's own small-data and
+  dictionary set), each file a frame, without and with a dictionary trained on
+  it (`zstd --train`, 110 KB); the video clip in raw blocks.
+- **wlshare's tiles**, as a check on a real user: mixed 2880x1800@2 (200 MB),
+  for video and mixed, and terminal 2880x1800@2, for the small still-stream ones.
+  The others are kept on the backup drive.
+
+The small frames go through a mode of their own, `frames FILE [DICT]`, in both
+harnesses: each frame read whole into one reused buffer, by one decoder reset
+for each. ruzstd-decompress and libzstd gave the same hash over all 9,114 frames,
+with and without the dictionary. ### Checked on lab2 (run 16)
+
+lab2 replaces lab1 from here: the same `AMD EPYC-Rome Processor`, 4 vCPUs (2
+cores, 2 threads), 8 GB, Debian 13, kernel 6.12.115, swap off, rustc 1.99.1
+(stable), Node 26.13.0; each run pinned to vCPU 2 as before. Three pairs of
+earlier variants, all through the new harness, over the old and new workloads
+together: X→S (run 11, the sequence loop), A5→HW (run 13, the Huffman loop in
+wasm) and D0→SQ (run 15, the sequences inlined), and libzstd beside them.
+
+X and S predate A5's collecting every byte as it is decoded, so on the tiles the
+harness collects none of the still stream's bytes from them (their tile hashes
+differ from the rest, both alike); the pair still compares like with like.
+Every other workload decoded to the same output in every variant, libzstd
+included.
+
+Each pair's change, native / wasm:
+
+| workload | X→S | A5→HW | D0→SQ | libzstd's time |
+|---|---:|---:|---:|---:|
+| video 1920x1080 *(dropped)* | −0.5 / −1.2% | +0.9 / −7.7% | −0.3 / −5.5% | 0.73× |
+| video 2880x1800@2 *(dropped)* | −8.3 / −9.8% | −2.5 / +0.1% | −2.9 / −4.2% | 0.74× |
+| mixed 1920x1080 *(dropped)* | −3.7 / −8.0% | +1.6 / −2.9% | −3.5 / −2.0% | 0.76× |
+| mixed 2880x1800@2 | −12.2 / −11.2% | −1.4 / −1.2% | +1.0 / −2.4% | 0.74× |
+| `x-ray` `-1` | −0.3 / −1.0% | −0.2 / −5.1% | −1.2 / +2.3% | 0.83× |
+| the 9 small tiles *(dropped)* | −4.3…−18.2 / −8.2…−15.6% | −0.8…+0.8 / −3.5…+0.9% | −1.8…−6.8 / −2.2…−6.4% | 0.84–1.91× |
+| terminal 2880x1800@2 | −11.4 / −13.3% | +0.6 / +0.6% | −5.6 / −3.5% | 1.55× |
+| `nci` `-3` | −16.8 / −14.5% | −0.5 / −0.3% | −4.1 / −8.9% | 0.71× |
+| GitHub, small frames | −5.6 / −5.1% | +1.0 / +0.9% | −1.2 / −2.3% | 0.80× |
+| GitHub, with the dictionary | +1.5 / +7.2% | +2.5 / +0.1% | +0.1 / −3.8% | **0.13×** |
+| silesia `-3` | −20.5 / −22.6% | −1.3 / +0.4% | −5.7 / −11.3% | 0.69× |
+| silesia `-19` | −20.3 / −17.3% | −1.0 / +2.6% | −4.8 / −11.3% | 0.69× |
+| silesia `--fast=4` | −23.4 / −29.0% | +0.8 / +0.4% | −3.2 / −10.9% | 0.66× |
+| video clip, raw blocks | −2.5 / −3.3% | −1.3 / −8.2% | −0.4 / −10.0% | 1.31× |
+
+libzstd's time is against SQ, natively. Every workload:
+[`results/run16-workloads.md`](results/run16-workloads.md).
+
+- The small tiles are covered: in every pair and platform their changes lie
+  between the GitHub frames' and `nci`'s, or within a point or two of
+  terminal 2880x1800@2's, which stays.
+- Video and mixed do not move together as tightly as runs 1–15 suggested: the
+  sequence loop (X→S) took 0.5% off video 1920x1080 and 12% off mixed
+  2880x1800@2, as the first is nearly all literals and the second has 3 times
+  the sequences. `x-ray` and mixed 2880x1800@2 bracket them in X→S, and stay
+  within 2–3 points of them elsewhere; the Huffman change in wasm (A5→HW) was
+  largest on video 1920x1080 (−7.7%), and `x-ray` (−5.1%) is the workload
+  nearest it.
+- The new workloads find what the old ones did not: with a dictionary,
+  ruzstd-decompress takes 7.7 times libzstd's time (28 ms against 3.6 ms for
+  the 9,114 frames), where it takes 1.25 times without one. Not profiled
+  yet; the likely cost is `init_from_dict`, run for every frame, which sets the
+  dictionary's content and tables up again each time.
+- `--fast=4` gained the most from the sequence loop (−23 / −29%), and libzstd's
+  lead over ruzstd-decompress is largest there among the Silesia levels.
+- Noisy: `x-ray` in wasm (7–11% between rounds), silesia `-3` natively (8–10%)
+  and the video clip natively (8–11%); the medians of three rounds held.
+- A round of a two-variant run, with libzstd, times 102 s of passes on the 10
+  workloads against 171 s on the 17.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
@@ -972,6 +1078,18 @@ and results.
    stores it as it is, in raw blocks: it measures that path. At `-19` it is the
    same, so it is left out. `enwik9` at both levels was the third until
    2026-11-04. It is text, which Silesia has, and it was the slowest workload.
+   Since 2026-11-05 (zstd 1.5.7): `silesia.tar.fast4.zst` (`zstd -T0
+   --fast=4`), `silesia-x-ray.l1.zst` (`zstd -1` of `x-ray`) and
+   `silesia-nci.l3.zst` (`zstd -3` of `nci`), from `silesia.zip` (SHA-256
+   `0626e25f…63c77af`); and from zstd's
+   [`github_users_sample_set.tar.zst`](https://github.com/facebook/zstd/releases/download/v1.1.3/github_users_sample_set.tar.zst)
+   (SHA-256 `e35074ab…89fc0de1`), its files in name order, each `zstd -3`'s
+   frame back to back: `github.frames`, and with `zstd --train -r` of them,
+   `github-dict.dict`, `github-dict.frames` (`zstd -3 -D`). `run.sh` takes
+   `NAME.frames` in the `frames` mode, with `NAME.dict` if there is one. Of the
+   tiles, only `mixed-2880x1800@2-lossless-200M.tiles` and
+   `terminal-2880x1800@2-lossless.tiles` stay in `tiles/`; the rest are in
+   `tiles-retired/`.
 3. **The variants**: a tree each in `variants/A`… (a `git archive` of the
    commit, with the patches above), then [`build.sh`](harness/build.sh) `A B …`
    on the timing machine, with the harness of the variant's own tree where it has
