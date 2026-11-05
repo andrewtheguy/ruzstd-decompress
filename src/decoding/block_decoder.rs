@@ -207,11 +207,12 @@ impl BlockDecoder {
                 &mut workspace.offset_hist,
                 max_block_decoded_len,
             );
-            let result = decode_sequences(&seq_section, raw, &mut workspace.fse, |seq| {
-                executor
-                    .execute(seq)
-                    .map_err(DecompressBlockError::ExecuteSequencesError)
-            })
+            let result = decode_sequences::<DecompressBlockError>(
+                &seq_section,
+                raw,
+                &mut workspace.fse,
+                &mut executor,
+            )
             .and_then(|()| executor.finish().map_err(Into::into));
             if let Err(err) = result {
                 workspace.buffer.truncate(len_before);
