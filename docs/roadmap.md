@@ -10,8 +10,9 @@ zDesk decodes in WebAssembly. The crate stays free of unsafe code.
 Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.20 times
 libzstd's time: 1.33–1.40 times on Silesia but `x-ray` (1.19), 1.67 on the GitHub
 frames with their dictionary, 1.24 without. It is faster on the raw blocks of the
-video clip (0.86 times libzstd's time) and terminal's tiles (0.65). In wasm, each
-takes 1.2–1.4 times its native time, the dictionary frames 1.6.
+video clip (0.86 times libzstd's time) and terminal's tiles (0.65). In wasm, the
+workloads take 1.2–1.4 times their native time, the dictionary frames 1.6; the video
+clip's raw blocks take 0.92 times.
 
 ## 1. The sequences, again
 
