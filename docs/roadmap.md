@@ -17,7 +17,12 @@ slower, video, mixed and silesia 1.3–1.5 times. In wasm, video takes
 The sequence loop and its copies are still about 40% of uncover's time; the
 executor is now inline in the loop, which runs to the stream's end. Keeping
 the executor's state in registers (the offset history by value, the repeat
-picked by selects) was no faster. What is left of them:
+picked by selects) was no faster, and nor was slicing each chunked copy once
+so that its chunks need no bounds checks (mixed and silesia 4–5% slower in
+wasm). Against libzstd on uncover natively, the sequences take 0.66 ms a pass
+to its 0.51, the sequence tables' build 0.25 to 0.17, the descriptions 0.10
+to 0.07, and the Huffman tables and literals about 0.36 to 0.16. What is left
+of them:
 - The 2–11% of sequences the fast copy does not take: matches from less than
   16 bytes back (a repeated pattern was tried, and was no faster), and those
   near the end of the initialised buffer or reaching into the dictionary.
@@ -42,8 +47,11 @@ On uncover, which builds 847 sequence tables and 88 Huffman tables a pass:
   from one value to the next, as in libzstd.
 - The Huffman tables' build, about 4%, half of it sorting the symbols by
   length.
-- Keeping a table that is the same as the last: 69% of terminal's sequence
-  tables are, 1% of uncover's.
+- Not keeping a table that is the same as the last: no FSE-compressed
+  description in terminal's, uncover's or browser's tiles is the same as the
+  one before it of its kind (counted 2026-11-05, with each table keeping the
+  bytes it was built from); the repeats counted before were of the predefined
+  tables, which are kept already.
 
 ## 3. The Huffman loops in wasm
 
