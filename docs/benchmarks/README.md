@@ -103,7 +103,7 @@ The raw lines are the `.jsonl` beside them.
   on the video and mixed tiles, which are mostly planar frames of about 75 KB
   each: the gap is the decoder's throughput, not its start-up per tile.
 - libzstd's harness zero-fills the most a bitmap can be for every still body,
-  which ruzstd's does not: its figures for the small still-heavy samples at
+  which ruzstd-decompress's does not: its figures for the small still-heavy samples at
   2880x1800@2 (still, terminal, drag) are pessimistic.
 
 ## 2026-11-04: the `peek-perf` decoder commits
@@ -157,7 +157,7 @@ Every workload: [`results/run3-peek-perf.md`](results/run3-peek-perf.md)
 
 - The video and mixed tiles, where the time goes in zDesk, decode in 38–49% of
   M's time natively and 41–53% in wasm. The general corpora gain 6–25%.
-- libzstd's lead over ruzstd falls from 2.6 times to 1.8 times natively over
+- libzstd's lead over ruzstd-decompress falls from 2.6 times to 1.8 times natively over
   all, and on the video and mixed tiles from 4.5–6.7 times to 2.2–2.5 times.
 - `decode` and `interop` fuzzing, four minutes each, found nothing.
 
@@ -252,16 +252,16 @@ geomean over alpha.3 (N), so about 1.5 times, not the 2.6 the first run gave.
 | video clip, raw blocks | 16.2 | 16.4 | 20.3 | 0.8× |
 
 The small tiles are closer: libzstd leads by 1.1–1.2 times on browser and drag,
-1.2–1.5 on terminal and 1.6–1.9 on uncover. On still, ruzstd is ahead (0.95 and
+1.2–1.5 on terminal and 1.6–1.9 on uncover. On still, ruzstd-decompress is ahead (0.95 and
 0.83 times), but libzstd's harness zero-fills a whole bitmap for every still body
-and ruzstd's does not.
-On the video clip ruzstd is ahead: there is nothing to decode, only blocks to
+and ruzstd-decompress's does not.
+On the video clip ruzstd-decompress is ahead: there is nothing to decode, only blocks to
 copy, so that compares how the two harnesses take the output, not the
 decoders.
 
 ## 2026-11-04: the Huffman literals' loop
 
-The question: on video and mixed tiles, where ruzstd was furthest behind
+The question: on video and mixed tiles, where ruzstd-decompress was furthest behind
 libzstd, most of the time is Huffman literals. A `perf` profile put 62% of
 video and 34% of mixed in `decode_4_streams`. Can that loop be made faster
 without unsafe code?
@@ -344,7 +344,7 @@ Every workload: [`results/run7-huffman.md`](results/run7-huffman.md).
 ## 2026-11-04: table builds and the ring buffer
 
 The question: after the Huffman loop, the small tiles (uncover, terminal,
-drag, still, browser) were where ruzstd was furthest behind libzstd for
+drag, still, browser) were where ruzstd-decompress was furthest behind libzstd for
 their size. zDesk makes a decoder for every planar tile, and every tile is a
 frame of its own, with its own tables. Where does their time go?
 
@@ -415,7 +415,7 @@ wasm. Every workload: [`results/run9-tables.md`](results/run9-tables.md).
   and terminal within 1.2 times. Over all, by geomean, libzstd's lead falls
   from 1.36 to 1.19 times. On video, mixed and silesia it is still 1.7–2.0
   times: there libzstd decodes Huffman literals two symbols to a lookup (its
-  X2 tables), which ruzstd does not.
+  X2 tables), which ruzstd-decompress does not.
 - The wasm build is the same size, 237 KB.
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing.
@@ -425,7 +425,7 @@ wasm. Every workload: [`results/run9-tables.md`](results/run9-tables.md).
 The question: on video and mixed tiles, the four-stream Huffman loop was
 44–59% of the time, and libzstd still 1.7–1.9 times faster. libzstd decodes
 the literals of most such blocks two symbols to a lookup (its X2 tables).
-Would ruzstd gain by doing the same, natively and in wasm?
+Would ruzstd-decompress gain by doing the same, natively and in wasm?
 
 What the literals look like, counted over every compressed literals block:
 - Video and mixed: 98–99% of the literals' bytes come from blocks of codes up
@@ -582,7 +582,7 @@ slower natively and 3.0% in wasm, about the spread of its runs. Every
 workload: [`results/run11-sequences.md`](results/run11-sequences.md).
 
 - By geomean over all workloads, libzstd is now 1.05 times faster natively
-  (1.17 against X). ruzstd decodes still, drag, browser and the
+  (1.17 against X). ruzstd-decompress decodes still, drag, browser and the
   2880x1800@2 terminal tiles faster than libzstd, and the 1920x1080 terminal
   tiles about as fast; uncover is 1.2–1.4 times slower, and video, mixed and
   silesia 1.5–1.6 times (from 1.6–2.0).
@@ -618,7 +618,7 @@ The harness changed first. zDesk's page now keeps one decoder for its planar
 tiles and one for the still stream, reset for each tile or stream, and the
 harness had gone on making a new one for each. Both harnesses now keep theirs
 for a pass; libzstd's already kept one context for the planar tiles. Every
-tile decodes to the same bitmap as before. Against the old harness, ruzstd's
+tile decodes to the same bitmap as before. Against the old harness, ruzstd-decompress's
 times fell by the setup the page no longer does: terminal 14% natively and in
 wasm, video 5%, still 2%; libzstd's moved within the noise. So this run's
 times are lower than run 11's for the same code, and are not to be set beside
@@ -698,8 +698,8 @@ move by about the spread of their runs; mixed in wasm (−4.9%) by about its
 spread (4.1%). Every workload:
 [`results/run12-table-builds.md`](results/run12-table-builds.md).
 
-- By geomean over all workloads, libzstd and ruzstd are now even natively
-  (libzstd 0.995 times TB's time, 1.03 times S's with this harness). ruzstd
+- By geomean over all workloads, libzstd and ruzstd-decompress are now even natively
+  (libzstd 0.995 times TB's time, 1.03 times S's with this harness). ruzstd-decompress
   decodes still, drag, browser and terminal tiles faster than libzstd
   (libzstd's still figures are pessimistic, as before: its harness zero-fills
   a bitmap for each still body); uncover is 1.1–1.3 times slower, and video,
@@ -794,7 +794,7 @@ workload: [`results/run13-huffman-wasm.md`](results/run13-huffman-wasm.md).
 - In wasm, video now takes 1.23–1.26 times its native time, from 1.31.
 - A5 collects as it decodes (`v0.9.2-alpha.5`), so its planar frames are no
   longer hashed: its video is 5% faster natively than run 12's TB. By geomean
-  natively, libzstd now takes 1.03 times HW's time. ruzstd is still
+  natively, libzstd now takes 1.03 times HW's time. ruzstd-decompress is still
   1.37–1.43 times slower on video and mixed, 1.5 times on silesia, and
   1.1–1.3 times on uncover.
 - The wasm build grows by 0.7 KB, to 248 KB: the single stream's loop.
@@ -858,7 +858,7 @@ their +1.7–2.2% is a little over the spread of their rounds natively
 (0.7–4.3%), with nothing in the commit on their path but a test of whether to
 hash. Every workload: [`results/run14-checksum.md`](results/run14-checksum.md).
 
-- By geomean natively, libzstd now takes 1.07 times ruzstd's time. ruzstd is
+- By geomean natively, libzstd now takes 1.07 times ruzstd-decompress's time. ruzstd-decompress is
   1.46–1.54 times faster on browser tiles and 1.3–1.5 times on terminal; uncover is
   1.07–1.18 times slower, video and mixed 1.3–1.4 times, silesia 1.5–1.6.
 - The profile that found this also shows what the roadmap had wrong: the
@@ -942,7 +942,7 @@ Video 1920x1080 natively (+1.3%) is a little over its rounds' spread (0.7%).
 Silesia gained less natively than in the quick checks (6–8% there). Every
 workload: [`results/run15-sequences-inline.md`](results/run15-sequences-inline.md).
 
-- By geomean natively, libzstd now takes 1.12 times ruzstd's time. uncover
+- By geomean natively, libzstd now takes 1.12 times ruzstd-decompress's time. uncover
   is 1.02–1.18 times slower than libzstd, video, mixed and silesia 1.3–1.5
   times; the other tiles 1.4–2.1 times faster.
 - In wasm, silesia now takes 1.25–1.26 times its native time, from 1.33–1.40.
@@ -953,7 +953,7 @@ workload: [`results/run15-sequences-inline.md`](results/run15-sequences-inline.m
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
-`~/codes/staging-area`; `zstd-rs-tuned-scratch/` holds the corpora, variants
+`~/codes/staging-area`; `ruzstd-decompress-scratch/` holds the corpora, variants
 and results.
 
 1. **The tiles** (on any machine; the bytes do not hang on the processor): an

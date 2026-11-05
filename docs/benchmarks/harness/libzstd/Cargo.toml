@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-# libzstd (bundled, 1.5.7), the reference the ruzstd variants are compared with.
+# libzstd (bundled, 1.5.7), the reference the ruzstd-decompress variants are compared with.
 zstd = "0.14"
 
 [profile.release]

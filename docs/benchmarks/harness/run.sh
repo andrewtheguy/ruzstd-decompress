@@ -1,7 +1,7 @@
 #!/bin/bash
 # run.sh OUT.jsonl VARIANT...: every workload, 3 rounds, the variants shuffled each round, native and wasm, on one vCPU.
 # PLATFORMS="native" for native alone; a variant without a .wasm (Z, libzstd) runs native alone.
-S=~/codes/staging-area/zstd-rs-tuned-scratch
+S=~/codes/staging-area/ruzstd-decompress-scratch
 N=~/codes/staging-area/node/bin/node
 OUT=$1; shift
 WORK=()

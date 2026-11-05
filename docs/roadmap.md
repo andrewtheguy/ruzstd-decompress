@@ -6,8 +6,8 @@ The figures are from `perf` profiles on lab1, natively unless they say wasm;
 zDesk's workload is the tiles, decoded in WebAssembly. The crate stays free of
 unsafe code.
 
-By geomean natively, libzstd takes 1.12 times ruzstd's time, with the harness
-keeping its decoders across tiles as zDesk's page does. ruzstd is faster on
+By geomean natively, libzstd takes 1.12 times ruzstd-decompress's time, with the harness
+keeping its decoders across tiles as zDesk's page does. ruzstd-decompress is faster on
 the still, drag, browser and terminal tiles; uncover is 1.02–1.18 times
 slower, video, mixed and silesia 1.3–1.5 times. In wasm, video takes
 1.19–1.26 times its native time.
