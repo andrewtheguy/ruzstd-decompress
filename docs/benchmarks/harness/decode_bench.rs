@@ -3,11 +3,15 @@
 //! ```text
 //! decode_bench tiles FILE [MAX_CORPUS_BYTES]   wlshare's lossless tile bodies, replayed as zDesk's page decodes them
 //! decode_bench frame FILE                      one whole .zst frame, a block at a time to a sink
+//! decode_bench frames FILE [DICT]              small frames back to back, each decoded alone, with DICT if given
 //! ```
 //!
 //! Prints one JSON line: reps, median and min ms, bytes in and out, and a check
-//! (an FNV hash of every tile's bitmap, or the frame's checksum matching).
-use ruzstd_decompress::decoding::{BlockDecodingStrategy, FrameDecoder, StreamingDecoder};
+//! (an FNV hash of every tile's bitmap or every small frame's content, or the
+//! frame's checksum matching).
+use ruzstd_decompress::decoding::{
+    BlockDecodingStrategy, Dictionary, FrameDecoder, StreamingDecoder,
+};
 use std::hint::black_box;
 use std::io::{self, Read, Write};
 use std::time::{Duration, Instant};
@@ -138,6 +142,32 @@ fn frame(data: &[u8]) -> (u64, bool) {
     (sink.0, ok)
 }
 
+/// Independent frames back to back, as small records are kept, each compressed
+/// alone (with the dictionary, if the decoder has one): each read whole into one
+/// reused buffer through a `StreamingDecoder` over one `FrameDecoder`, reset for
+/// each. Returns the frames, the bytes out and, with `check`, a hash over every
+/// frame's content.
+fn frames(data: &[u8], dec: &mut FrameDecoder, check: bool) -> (u64, u64, u64) {
+    let mut record: Vec<u8> = Vec::new();
+    let mut source = data;
+    let (mut n, mut out, mut hash) = (0u64, 0u64, 0xcbf29ce484222325u64);
+    while !source.is_empty() {
+        record.clear();
+        let mut frame = StreamingDecoder::new_with_decoder(&mut source, &mut *dec).unwrap();
+        frame.read_to_end(&mut record).unwrap();
+        drop(frame);
+        n += 1;
+        out += record.len() as u64;
+        if check {
+            for &x in &record {
+                hash = (hash ^ u64::from(x)).wrapping_mul(0x100000001b3);
+            }
+        }
+        black_box(&record);
+    }
+    (n, out, hash)
+}
+
 fn time(mut f: impl FnMut()) -> Vec<f64> {
     let all = Instant::now();
     let mut times = Vec::new();
@@ -196,7 +226,20 @@ fn main() {
             });
             (times, data.len() as u64, out, "\"checksum ok\"".to_string())
         }
-        _ => panic!("tiles or frame"),
+        "frames" => {
+            let data = std::fs::read(path).unwrap();
+            let mut dec = FrameDecoder::new();
+            if let Some(dict) = args.get(3) {
+                let dict = Dictionary::decode_dict(&std::fs::read(dict).unwrap()).unwrap();
+                dec.add_dict(dict).unwrap();
+            }
+            let (n, out, hash) = frames(&data, &mut dec, true);
+            let times = time(|| {
+                black_box(frames(&data, &mut dec, false));
+            });
+            (times, data.len() as u64, out, format!("\"{n} frames {hash:016x}\""))
+        }
+        _ => panic!("tiles, frame or frames"),
     };
     let name = path.rsplit('/').next().unwrap();
     println!(
