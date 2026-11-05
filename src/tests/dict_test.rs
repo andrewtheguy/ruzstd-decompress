@@ -344,3 +344,45 @@ fn test_dict_kept_between_frames() {
         assert_eq!(decode(&mut dec, f), fs::read(f).unwrap(), "{f}");
     }
 }
+
+/// A dictionary replacing another under its id after a frame is set up, before its first block:
+/// that frame decodes with the one it was set up with, the next frame with the replacement.
+#[test]
+fn test_dict_replaced_during_frame() {
+    extern crate std;
+    use crate::decoding::dictionary::Dictionary;
+    use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
+    use std::fs;
+
+    let raw = fs::read("./dict_tests/dictionary").unwrap();
+    let first = Dictionary::decode_dict(&raw).unwrap();
+    // The tables of another dictionary under the first one's id, with the first one's content,
+    // which decode the first one's frames to something else or not at all.
+    let mut replacement =
+        Dictionary::decode_dict(&fs::read("./dict_tests/dictionary-small").unwrap()).unwrap();
+    replacement.id = first.id;
+    replacement.dict_content = first.dict_content.clone();
+    let path = "./dict_tests/files/auditd.service";
+    let data = fs::read(alloc::format!("{path}.zst")).unwrap();
+    let original = fs::read(path).unwrap();
+
+    let mut dec = FrameDecoder::new();
+    dec.add_dict(first).unwrap();
+    let mut source = &data[..];
+    dec.reset(&mut source).unwrap();
+    dec.add_dict(replacement).unwrap();
+    dec.decode_blocks(&mut source, BlockDecodingStrategy::All)
+        .unwrap();
+    assert_eq!(dec.collect().unwrap(), original);
+
+    let mut source = &data[..];
+    dec.reset(&mut source).unwrap();
+    let next = dec
+        .decode_blocks(&mut source, BlockDecodingStrategy::All)
+        .ok()
+        .and_then(|_| dec.collect());
+    assert!(
+        next != Some(original),
+        "the next frame decodes with the replacement"
+    );
+}
