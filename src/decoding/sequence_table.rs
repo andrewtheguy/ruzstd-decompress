@@ -77,6 +77,10 @@ pub struct SeqTable {
     /// The entries are the predefined distribution's states, which a later block asking for
     /// them, in this frame or a later one, can keep: a reset leaves them.
     holds_predefined: bool,
+    /// The dictionary whose table the entries are, as copied, kept through resets as
+    /// `holds_predefined` is, so that a frame using it again need not copy it in (see
+    /// [`Self::reinit_from_dict`]); `None` once anything else may have been built in them.
+    dict: Option<u32>,
 }
 
 impl SeqTable {
@@ -85,6 +89,7 @@ impl SeqTable {
             entries: Vec::new(),
             accuracy_log: None,
             holds_predefined: false,
+            dict: None,
         }
     }
 
@@ -92,11 +97,22 @@ impl SeqTable {
         self.accuracy_log = None;
     }
 
-    pub fn reinit_from(&mut self, other: &SeqTable) {
-        self.entries.clear();
-        self.entries.extend_from_slice(&other.entries);
+    /// Take `other`'s states, the table of dictionary `dict_id`: copied only if this table no
+    /// longer holds them from an earlier frame.
+    pub fn reinit_from_dict(&mut self, other: &SeqTable, dict_id: u32) {
+        if self.dict != Some(dict_id) {
+            self.entries.clear();
+            self.entries.extend_from_slice(&other.entries);
+            self.dict = Some(dict_id);
+        }
         self.accuracy_log = other.accuracy_log;
         self.holds_predefined = other.holds_predefined;
+    }
+
+    /// Forget which dictionary's table this one holds, so that the next frame using one copies
+    /// it in: for when a dictionary of the same id may have replaced it.
+    pub fn forget_dict(&mut self) {
+        self.dict = None;
     }
 
     /// Room for every state, made on the first build.
@@ -137,6 +153,7 @@ impl SeqTable {
     ) -> Result<(), FSETableError> {
         self.accuracy_log = None;
         self.holds_predefined = false;
+        self.dict = None;
         if probabilities.len() > kind.codes() {
             return Err(FSETableError::TooManySymbols {
                 got: probabilities.len(),
@@ -178,6 +195,7 @@ impl SeqTable {
         };
         self.accuracy_log = Some(0);
         self.holds_predefined = false;
+        self.dict = None;
     }
 
     /// How many bits the first state is read from, and the states, as an array: a state masked

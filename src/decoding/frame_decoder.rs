@@ -246,6 +246,10 @@ impl FrameDecoder {
 
     /// Add a dict to the FrameDecoder that can be used when needed. The FrameDecoder uses the appropriate one dynamically
     pub fn add_dict(&mut self, dict: Dictionary) -> Result<(), FrameDecoderError> {
+        if let Some(state) = &mut self.state {
+            // It may replace the dictionary whose content the buffer holds.
+            state.decoder_scratch.forget_dict();
+        }
         self.dicts.insert(dict.id, dict);
         Ok(())
     }

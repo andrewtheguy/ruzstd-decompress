@@ -17,7 +17,14 @@ pub struct DecodeBuffer {
     buffer: RingBuffer,
     /// How many of the buffer's first bytes have been collected: kept only for the window.
     collected: usize,
+    /// A dictionary's content, kept from frame to frame so that frames using the same
+    /// dictionary do not copy it in again (see [`DecoderScratch::init_from_dict`]); the frame
+    /// copies from it only if `dict_active`.
+    ///
+    /// [`DecoderScratch::init_from_dict`]: super::scratch::DecoderScratch::init_from_dict
     pub dict_content: Vec<u8>,
+    /// Whether the frame decoded uses `dict_content`: set by its dictionary, cleared by a reset.
+    pub dict_active: bool,
 
     pub window_size: usize,
     total_output_counter: u64,
@@ -49,6 +56,7 @@ impl DecodeBuffer {
             buffer: RingBuffer::new(),
             collected: 0,
             dict_content: Vec::new(),
+            dict_active: false,
             window_size,
             total_output_counter: 0,
             #[cfg(feature = "hash")]
@@ -63,7 +71,7 @@ impl DecodeBuffer {
         self.window_size = window_size;
         self.buffer.clear();
         self.collected = 0;
-        self.dict_content.clear();
+        self.dict_active = false;
         self.total_output_counter = 0;
         #[cfg(feature = "hash")]
         {
@@ -167,25 +175,27 @@ impl DecodeBuffer {
         if self.total_output_counter <= self.window_size as u64 {
             // at least part of that repeat is from the dictionary content
             let bytes_from_dict = offset - self.buffer.len();
+            let dict: &[u8] = if self.dict_active {
+                &self.dict_content
+            } else {
+                &[]
+            };
 
-            if bytes_from_dict > self.dict_content.len() {
+            if bytes_from_dict > dict.len() {
                 return Err(DecodeBufferError::NotEnoughBytesInDictionary {
-                    got: self.dict_content.len(),
+                    got: dict.len(),
                     need: bytes_from_dict,
                 });
             }
 
             if bytes_from_dict < match_length {
-                let dict_slice = &self.dict_content[self.dict_content.len() - bytes_from_dict..];
-                self.buffer.extend(dict_slice);
+                self.buffer.extend(&dict[dict.len() - bytes_from_dict..]);
 
                 self.total_output_counter += bytes_from_dict as u64;
                 return self.repeat(self.buffer.len(), match_length - bytes_from_dict);
             } else {
-                let low = self.dict_content.len() - bytes_from_dict;
-                let high = low + match_length;
-                let dict_slice = &self.dict_content[low..high];
-                self.buffer.extend(dict_slice);
+                let low = dict.len() - bytes_from_dict;
+                self.buffer.extend(&dict[low..low + match_length]);
             }
             Ok(())
         } else {
