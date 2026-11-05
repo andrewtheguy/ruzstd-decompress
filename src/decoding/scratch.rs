@@ -23,6 +23,12 @@ pub struct DecoderScratch {
 
     pub literals_buffer: Vec<u8>,
     pub block_content_buffer: Vec<u8>,
+
+    /// The id of the dictionary whose content `buffer.dict_content` holds, which a frame using
+    /// it again need not copy in; `None` once a dictionary may have been replaced. The tables
+    /// keep their own (see [`SeqTable::reinit_from_dict`] and
+    /// [`HuffmanTable::reinit_from_dict`]).
+    dict_loaded: Option<u32>,
 }
 
 impl DecoderScratch {
@@ -37,6 +43,7 @@ impl DecoderScratch {
 
             block_content_buffer: Vec::new(),
             literals_buffer: Vec::new(),
+            dict_loaded: None,
         }
     }
 
@@ -52,14 +59,29 @@ impl DecoderScratch {
         self.huf.table.reset();
     }
 
+    /// Sets the frame up to decode with `dict`: its tables, offsets and content. The content is
+    /// copied in only if the buffer does not hold it from an earlier frame already: a dictionary's
+    /// content is often a hundred times the size of the small frames it is made for.
     pub fn init_from_dict(&mut self, dict: &Dictionary) {
-        self.fse.reinit_from(&dict.fse);
-        self.huf.table.reinit_from(&dict.huf.table);
+        self.fse.reinit_from_dict(&dict.fse, dict.id);
+        self.huf.table.reinit_from_dict(&dict.huf.table, dict.id);
         self.offset_hist = dict.offset_hist;
-        self.buffer.dict_content.clear();
-        self.buffer
-            .dict_content
-            .extend_from_slice(&dict.dict_content);
+        if self.dict_loaded != Some(dict.id) {
+            self.buffer.dict_content.clear();
+            self.buffer
+                .dict_content
+                .extend_from_slice(&dict.dict_content);
+            self.dict_loaded = Some(dict.id);
+        }
+        self.buffer.dict_active = true;
+    }
+
+    /// Forgets which dictionary's content the buffer holds, so that the next frame using one
+    /// copies it in again: for when a dictionary of the same id may have replaced it.
+    pub fn forget_dict(&mut self) {
+        self.dict_loaded = None;
+        self.fse.forget_dict();
+        self.huf.table.forget_dict();
     }
 }
 
@@ -112,11 +134,19 @@ impl FSEScratch {
         self.ml.reset();
     }
 
-    /// Take `other`'s tables, which are all a later block can repeat.
-    pub fn reinit_from(&mut self, other: &Self) {
-        self.of.reinit_from(&other.of);
-        self.ll.reinit_from(&other.ll);
-        self.ml.reinit_from(&other.ml);
+    /// Take `other`'s tables, dictionary `dict_id`'s, which are all a later block can repeat:
+    /// copied only where these no longer hold them from an earlier frame.
+    pub fn reinit_from_dict(&mut self, other: &Self, dict_id: u32) {
+        self.of.reinit_from_dict(&other.of, dict_id);
+        self.ll.reinit_from_dict(&other.ll, dict_id);
+        self.ml.reinit_from_dict(&other.ml, dict_id);
+    }
+
+    /// Forget which dictionary's tables these hold (see [`SeqTable::forget_dict`]).
+    pub fn forget_dict(&mut self) {
+        self.of.forget_dict();
+        self.ll.forget_dict();
+        self.ml.forget_dict();
     }
 }
 

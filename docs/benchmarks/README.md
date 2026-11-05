@@ -1056,6 +1056,69 @@ libzstd's time is against SQ, natively. Every workload:
 - A round of a two-variant run, with libzstd, times 102 s of passes on the 10
   workloads against 171 s on the 17.
 
+## 2026-11-05: the dictionary kept between frames
+
+The question: why does ruzstd-decompress take 7.7 times libzstd's time on small
+frames with a dictionary (run 16), and only 1.25 times without one?
+
+A profile on lab2 (perf, `github-dict.frames`, `main` at `b46cfc9`): 72% of the
+time in `DecoderScratch::init_from_dict`, which every frame using the dictionary
+runs on reset. 65.5% copying the dictionary's content into the decode buffer
+(110 KB, for frames of 0.8 KB), and most of the rest copying its tables: the
+sequence tables (17% once the content was kept) and the Huffman table (9.5%).
+Most of these frames never change them: their blocks repeat the dictionary's
+tables (repeat mode, treeless literals).
+
+| | |
+|---|---|
+| **M** | `main` at `b46cfc9` |
+| **DC** | M with the dictionary kept between frames |
+
+What DC keeps:
+
+- **The content**: the decode buffer keeps its copy of the dictionary's content
+  through a reset, a flag saying whether the frame may use it. The scratch
+  records which dictionary's content it holds, and copies only for another one.
+- **The tables**: each sequence table and the Huffman table records which
+  dictionary's table it holds, as `SeqTable` already recorded holding the
+  predefined one. A reset leaves the entries; any build in them clears the
+  record. The Huffman table keeps its table of pairs with it, which was made
+  again on every frame.
+- **`add_dict`** forgets all of them, since a dictionary may replace another
+  under its id.
+
+A test (`test_dict_kept_between_frames`) decodes frames with and without the
+dictionary in turn, then replaces it under its id, first with other content,
+then with another dictionary's tables (`dict_tests/dictionary-small`, with two
+frames made with it in `dict_tests/files-small`). It fails if any one of the
+content, the sequence tables, the Huffman table or `add_dict` is not
+invalidated.
+
+The workloads of "the workloads, for a generic decoder", on lab2. Every variant
+decoded every workload to the same output.
+
+| workload | native M | native DC | wasm M | wasm DC | libzstd |
+|---|---:|---:|---:|---:|---:|
+| GitHub, with the dictionary | 27.88 | **6.50 (−76.7%)** | 31.86 | **9.73 (−69.4%)** | 3.63 |
+| GitHub, small frames | 24.40 | 24.30 (−0.4%) | 31.95 | 31.90 (−0.2%) | 19.25 |
+| silesia `-3` | 285.75 | 288.02 (+0.8%) | 364.30 | 363.72 (−0.2%) | 196.25 |
+| silesia `-19` | 288.62 | 291.35 (+0.9%) | 392.18 | 369.44 (−5.8%) | 201.54 |
+| video clip, raw blocks | 14.98 | 15.61 (+4.2%) | 15.71 | 16.60 (+5.7%) | 19.68 |
+
+ms a pass. The others are within 2% either way, inside their rounds' spread.
+The video clip's raw blocks do not reach the code changed. Run again alone, M
+and DC in turn six times each, natively it was 15.15 and 15.04 ms: noise, as
+its wasm spread (13.3%) says too. Every workload:
+[`results/run17-dict.md`](results/run17-dict.md).
+
+- With the dictionary, libzstd now takes 0.56 times ruzstd-decompress's time,
+  where it took 0.13 times: 1.8 times as fast, against 1.25 times without a
+  dictionary. Of what is left, most is the sequences' decoding and execution,
+  the copies from the dictionary's content among them.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
+  nothing, both on nightly with AddressSanitizer and on stable without a
+  sanitizer, which is how `AGENTS.md` asks for it from here.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

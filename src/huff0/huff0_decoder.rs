@@ -24,6 +24,12 @@ pub struct HuffmanTable {
     /// empty until then, and `pairs_built` says whether it is `decode`'s.
     pairs: Vec<PairEntry>,
     pairs_built: bool,
+    /// The dictionary whose table `decode` holds as copied, kept through resets, so that a frame
+    /// using it again need not copy it in (see [`Self::reinit_from_dict`]); `None` once anything
+    /// else may have been built in it.
+    dict: Option<u32>,
+    /// Whether `pairs` is made from that dictionary's table, kept through resets as `dict` is.
+    dict_pairs: bool,
     /// The weight of a symbol is the number of occurences in a table.
     /// This value is used in constructing a binary tree referred to as
     /// a Huffman tree. Once this tree is constructed, it can be used to build the
@@ -48,6 +54,8 @@ impl HuffmanTable {
             decode: Vec::new(),
             pairs: Vec::new(),
             pairs_built: false,
+            dict: None,
+            dict_pairs: false,
 
             weights: Vec::with_capacity(256),
             max_num_bits: 0,
@@ -58,13 +66,18 @@ impl HuffmanTable {
         }
     }
 
-    /// Completely empty the table then repopulate as a replica
-    /// of `other`.
-    pub fn reinit_from(&mut self, other: &Self) {
+    /// Empty the table, then make it a replica of `other`, the table of dictionary `dict_id`.
+    /// Its lookup table, and the table of pairs made from it, are copied only if this table no
+    /// longer holds them from an earlier frame.
+    pub fn reinit_from_dict(&mut self, other: &Self, dict_id: u32) {
         self.reset();
-        self.decode.clear();
-        self.decode.extend_from_slice(&other.decode);
-        self.pairs_built = false;
+        if self.dict != Some(dict_id) {
+            self.decode.clear();
+            self.decode.extend_from_slice(&other.decode);
+            self.dict = Some(dict_id);
+            self.dict_pairs = false;
+        }
+        self.pairs_built = self.dict_pairs;
         self.weights.extend_from_slice(&other.weights);
         self.max_num_bits = other.max_num_bits;
         self.bits.extend_from_slice(&other.bits);
@@ -293,6 +306,14 @@ impl HuffmanTable {
             };
         }
         self.pairs_built = true;
+        self.dict_pairs = self.dict.is_some();
+    }
+
+    /// Forget which dictionary's table this one holds, so that the next frame using one copies
+    /// it in: for when a dictionary of the same id may have replaced it.
+    pub fn forget_dict(&mut self) {
+        self.dict = None;
+        self.dict_pairs = false;
     }
 
     /// The table of pairs, as an array; only once [`Self::build_pairs`] has built it.
@@ -416,6 +437,8 @@ impl HuffmanTable {
         // build is refused as having none, not decoded from half of one.
         self.max_num_bits = 0;
         self.pairs_built = false;
+        self.dict = None;
+        self.dict_pairs = false;
         let bytes_used = self.read_weights(source)?;
         self.build_table_from_weights()?;
         Ok(bytes_used)

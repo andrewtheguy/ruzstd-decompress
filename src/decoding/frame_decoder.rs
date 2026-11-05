@@ -245,7 +245,16 @@ impl FrameDecoder {
     }
 
     /// Add a dict to the FrameDecoder that can be used when needed. The FrameDecoder uses the appropriate one dynamically
+    ///
+    /// A dictionary is taken when a frame is set up ([`FrameDecoder::reset`],
+    /// [`FrameDecoder::force_dict`]). One replacing another under its id is used from the next
+    /// frame set up: a frame already set up keeps decoding with the one it was set up with.
     pub fn add_dict(&mut self, dict: Dictionary) -> Result<(), FrameDecoderError> {
+        if let Some(state) = &mut self.state {
+            // It may replace the dictionary whose content and tables the scratch holds: the next
+            // frame using that id copies them in again. The frame set up already keeps them.
+            state.decoder_scratch.forget_dict();
+        }
         self.dicts.insert(dict.id, dict);
         Ok(())
     }

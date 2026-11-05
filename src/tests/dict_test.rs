@@ -260,3 +260,129 @@ fn test_dict_decoding() {
 
     assert!(failed.is_empty());
 }
+
+/// One decoder over frames with and without the dictionary in turn, and with the dictionary
+/// replaced under its id: each frame decodes with the content it should, not what an earlier
+/// frame left in the buffer.
+#[test]
+fn test_dict_kept_between_frames() {
+    extern crate std;
+    use crate::decoding::dictionary::Dictionary;
+    use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
+    use alloc::format;
+    use alloc::vec::Vec;
+    use std::fs;
+
+    let raw = fs::read("./dict_tests/dictionary").unwrap();
+    let decode = |dec: &mut FrameDecoder, path: &str| -> Vec<u8> {
+        let data = fs::read(format!("{path}.zst")).unwrap();
+        let mut source = &data[..];
+        dec.reset(&mut source).unwrap();
+        dec.decode_blocks(&mut source, BlockDecodingStrategy::All)
+            .unwrap();
+        dec.collect().unwrap()
+    };
+    let with_dict = [
+        "./dict_tests/files/auditd.service",
+        "./dict_tests/files/avahi-daemon.service",
+    ];
+    let plain = "./decodecorpus_files/abc.txt";
+
+    let mut dec = FrameDecoder::new();
+    dec.add_dict(Dictionary::decode_dict(&raw).unwrap())
+        .unwrap();
+    for _ in 0..2 {
+        for f in with_dict {
+            assert_eq!(decode(&mut dec, f), fs::read(f).unwrap(), "{f}");
+            assert_eq!(decode(&mut dec, plain), fs::read(plain).unwrap(), "{plain}");
+        }
+    }
+
+    // The same id, other content: the frame must see the new content.
+    let mut other = Dictionary::decode_dict(&raw).unwrap();
+    for b in &mut other.dict_content {
+        *b = !*b;
+    }
+    dec.add_dict(other).unwrap();
+    assert_ne!(
+        decode(&mut dec, with_dict[0]),
+        fs::read(with_dict[0]).unwrap()
+    );
+
+    dec.add_dict(Dictionary::decode_dict(&raw).unwrap())
+        .unwrap();
+    assert_eq!(
+        decode(&mut dec, with_dict[0]),
+        fs::read(with_dict[0]).unwrap()
+    );
+
+    // Another dictionary replacing one under its id: `dictionary-small` (id 1234, trained on
+    // the same files), whose frames in `files-small` take every table from it. The decoder
+    // first holds the first dictionary's tables and content under that id, from setting up
+    // one of those frames with it; the frames must then decode with the replacement's.
+    let small =
+        Dictionary::decode_dict(&fs::read("./dict_tests/dictionary-small").unwrap()).unwrap();
+    let mut first_as_small = Dictionary::decode_dict(&raw).unwrap();
+    first_as_small.id = small.id;
+    dec.add_dict(first_as_small).unwrap();
+    let data = fs::read("./dict_tests/files-small/auditd.service.zst").unwrap();
+    dec.reset(&mut &data[..]).unwrap();
+    dec.add_dict(small).unwrap();
+    for f in ["auditd.service", "avahi-daemon.service"] {
+        let data = fs::read(format!("./dict_tests/files-small/{f}.zst")).unwrap();
+        let mut source = &data[..];
+        dec.reset(&mut source).unwrap();
+        dec.decode_blocks(&mut source, BlockDecodingStrategy::All)
+            .unwrap();
+        let original = fs::read(format!("./dict_tests/files/{f}")).unwrap();
+        assert_eq!(dec.collect().unwrap(), original, "{f}");
+    }
+
+    dec.add_dict(Dictionary::decode_dict(&raw).unwrap())
+        .unwrap();
+    for f in with_dict {
+        assert_eq!(decode(&mut dec, f), fs::read(f).unwrap(), "{f}");
+    }
+}
+
+/// A dictionary replacing another under its id after a frame is set up, before its first block:
+/// that frame decodes with the one it was set up with, the next frame with the replacement.
+#[test]
+fn test_dict_replaced_during_frame() {
+    extern crate std;
+    use crate::decoding::dictionary::Dictionary;
+    use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
+    use std::fs;
+
+    let raw = fs::read("./dict_tests/dictionary").unwrap();
+    let first = Dictionary::decode_dict(&raw).unwrap();
+    // The tables of another dictionary under the first one's id, with the first one's content,
+    // which decode the first one's frames to something else or not at all.
+    let mut replacement =
+        Dictionary::decode_dict(&fs::read("./dict_tests/dictionary-small").unwrap()).unwrap();
+    replacement.id = first.id;
+    replacement.dict_content = first.dict_content.clone();
+    let path = "./dict_tests/files/auditd.service";
+    let data = fs::read(alloc::format!("{path}.zst")).unwrap();
+    let original = fs::read(path).unwrap();
+
+    let mut dec = FrameDecoder::new();
+    dec.add_dict(first).unwrap();
+    let mut source = &data[..];
+    dec.reset(&mut source).unwrap();
+    dec.add_dict(replacement).unwrap();
+    dec.decode_blocks(&mut source, BlockDecodingStrategy::All)
+        .unwrap();
+    assert_eq!(dec.collect().unwrap(), original);
+
+    let mut source = &data[..];
+    dec.reset(&mut source).unwrap();
+    let next = dec
+        .decode_blocks(&mut source, BlockDecodingStrategy::All)
+        .ok()
+        .and_then(|_| dec.collect());
+    assert!(
+        next != Some(original),
+        "the next frame decodes with the replacement"
+    );
+}
