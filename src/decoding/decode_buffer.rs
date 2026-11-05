@@ -246,6 +246,7 @@ impl DecodeBuffer {
             } else {
                 let low = dict.len() - bytes_from_dict;
                 self.buffer.extend(&dict[low..low + match_length]);
+                self.total_output_counter += match_length as u64;
             }
             Ok(())
         } else {
@@ -533,5 +534,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every byte a match takes from the dictionary counts towards the window, so that once the
+    /// frame is past it, no match reaches into the dictionary: through the slow path's repeat,
+    /// and natively through the sequence writer's copy too, in turn.
+    #[test]
+    fn dict_matches_count_towards_the_window() {
+        use super::super::errors::DecodeBufferError;
+
+        let dict: Vec<u8> = (0..100u8).collect();
+        let window = 40;
+        let mut buf = DecodeBuffer::new(window, false);
+        buf.dict_content = dict.clone();
+        buf.dict_active = true;
+        buf.reserve(4096);
+        buf.push(b"ab");
+        let mut expected = b"ab".to_vec();
+        // Each match: 8 bytes, 50 back into the dictionary, past the data.
+        let mut matches = 0;
+        loop {
+            let offset = buf.len() + 50;
+            let fits = buf.total_output_counter <= window as u64;
+            #[cfg(not(target_family = "wasm"))]
+            if matches % 2 == 1 {
+                let mut writer = buf.sequence_writer();
+                let done = writer.push_sequence(&[0; super::LITERALS_PADDING], 0, offset, 8);
+                writer.finish();
+                if !fits {
+                    assert!(!done, "past the window, the writer took a dictionary match");
+                    break;
+                }
+                assert!(done);
+                expected.extend_from_slice(&dict[50..58]);
+                matches += 1;
+                assert_eq!(buf.total_output_counter, expected.len() as u64);
+                continue;
+            }
+            let result = buf.repeat(offset, 8);
+            if !fits {
+                assert!(matches!(
+                    result,
+                    Err(DecodeBufferError::OffsetTooBig { .. })
+                ));
+                break;
+            }
+            result.unwrap();
+            expected.extend_from_slice(&dict[50..58]);
+            matches += 1;
+            assert_eq!(buf.total_output_counter, expected.len() as u64);
+        }
+        assert!(matches >= 5, "{matches} matches");
+        let (a, b) = buf.buffer.as_slices();
+        assert_eq!([a, b].concat(), expected);
     }
 }
