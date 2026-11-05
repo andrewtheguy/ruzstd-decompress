@@ -797,7 +797,7 @@ workload: [`results/run13-huffman-wasm.md`](results/run13-huffman-wasm.md).
 - In wasm, video now takes 1.23–1.26 times its native time, from 1.31.
 - A5 collects as it decodes (`v0.9.2-alpha.5`), so its planar frames are no
   longer hashed: its video is 5% faster natively than run 12's TB. By geomean
-  natively, libzstd now takes 1.03 times HW's time. ruzstd-decompress is still
+  natively, HW takes 0.97 times libzstd's time. ruzstd-decompress is still
   1.37–1.43 times slower on video and mixed, 1.5 times on silesia, and
   1.1–1.3 times on uncover.
 - The wasm build grows by 0.7 KB, to 248 KB: the single stream's loop.
@@ -861,7 +861,7 @@ their +1.7–2.2% is a little over the spread of their rounds natively
 (0.7–4.3%), with nothing in the commit on their path but a test of whether to
 hash. Every workload: [`results/run14-checksum.md`](results/run14-checksum.md).
 
-- By geomean natively, libzstd now takes 1.07 times ruzstd-decompress's time. ruzstd-decompress is
+- By geomean natively, ruzstd-decompress now takes 0.93 times libzstd's time. It is
   1.46–1.54 times faster on browser tiles and 1.3–1.5 times on terminal; uncover is
   1.07–1.18 times slower, video and mixed 1.3–1.4 times, silesia 1.5–1.6.
 - The profile that found this also shows what the roadmap had wrong: the
@@ -945,7 +945,7 @@ Video 1920x1080 natively (+1.3%) is a little over its rounds' spread (0.7%).
 Silesia gained less natively than in the quick checks (6–8% there). Every
 workload: [`results/run15-sequences-inline.md`](results/run15-sequences-inline.md).
 
-- By geomean natively, libzstd now takes 1.12 times ruzstd-decompress's time. uncover
+- By geomean natively, ruzstd-decompress now takes 0.89 times libzstd's time. uncover
   is 1.02–1.18 times slower than libzstd, video, mixed and silesia 1.3–1.5
   times; the other tiles 1.4–2.1 times faster.
 - In wasm, silesia now takes 1.25–1.26 times its native time, from 1.33–1.40.
@@ -1014,24 +1014,24 @@ included.
 
 Each pair's change, native / wasm:
 
-| workload | X→S | A5→HW | D0→SQ | libzstd's time |
+| workload | X→S | A5→HW | D0→SQ | SQ ÷ libzstd |
 |---|---:|---:|---:|---:|
-| video 1920x1080 *(dropped)* | −0.5 / −1.2% | +0.9 / −7.7% | −0.3 / −5.5% | 0.73× |
-| video 2880x1800@2 *(dropped)* | −8.3 / −9.8% | −2.5 / +0.1% | −2.9 / −4.2% | 0.74× |
-| mixed 1920x1080 *(dropped)* | −3.7 / −8.0% | +1.6 / −2.9% | −3.5 / −2.0% | 0.76× |
-| mixed 2880x1800@2 | −12.2 / −11.2% | −1.4 / −1.2% | +1.0 / −2.4% | 0.74× |
-| `x-ray` `-1` | −0.3 / −1.0% | −0.2 / −5.1% | −1.2 / +2.3% | 0.83× |
-| the 9 small tiles *(dropped)* | −4.3…−18.2 / −8.2…−15.6% | −0.8…+0.8 / −3.5…+0.9% | −1.8…−6.8 / −2.2…−6.4% | 0.84–1.91× |
-| terminal 2880x1800@2 | −11.4 / −13.3% | +0.6 / +0.6% | −5.6 / −3.5% | 1.55× |
-| `nci` `-3` | −16.8 / −14.5% | −0.5 / −0.3% | −4.1 / −8.9% | 0.71× |
-| GitHub, small frames | −5.6 / −5.1% | +1.0 / +0.9% | −1.2 / −2.3% | 0.80× |
-| GitHub, with the dictionary | +1.5 / +7.2% | +2.5 / +0.1% | +0.1 / −3.8% | **0.13×** |
-| silesia `-3` | −20.5 / −22.6% | −1.3 / +0.4% | −5.7 / −11.3% | 0.69× |
-| silesia `-19` | −20.3 / −17.3% | −1.0 / +2.6% | −4.8 / −11.3% | 0.69× |
-| silesia `--fast=4` | −23.4 / −29.0% | +0.8 / +0.4% | −3.2 / −10.9% | 0.66× |
-| video clip, raw blocks | −2.5 / −3.3% | −1.3 / −8.2% | −0.4 / −10.0% | 1.31× |
+| video 1920x1080 *(dropped)* | −0.5 / −1.2% | +0.9 / −7.7% | −0.3 / −5.5% | 1.37× |
+| video 2880x1800@2 *(dropped)* | −8.3 / −9.8% | −2.5 / +0.1% | −2.9 / −4.2% | 1.35× |
+| mixed 1920x1080 *(dropped)* | −3.7 / −8.0% | +1.6 / −2.9% | −3.5 / −2.0% | 1.32× |
+| mixed 2880x1800@2 | −12.2 / −11.2% | −1.4 / −1.2% | +1.0 / −2.4% | 1.35× |
+| `x-ray` `-1` | −0.3 / −1.0% | −0.2 / −5.1% | −1.2 / +2.3% | 1.20× |
+| the 9 small tiles *(dropped)* | −4.3…−18.2 / −8.2…−15.6% | −0.8…+0.8 / −3.5…+0.9% | −1.8…−6.8 / −2.2…−6.4% | 0.52–1.19× |
+| terminal 2880x1800@2 | −11.4 / −13.3% | +0.6 / +0.6% | −5.6 / −3.5% | 0.64× |
+| `nci` `-3` | −16.8 / −14.5% | −0.5 / −0.3% | −4.1 / −8.9% | 1.41× |
+| GitHub, small frames | −5.6 / −5.1% | +1.0 / +0.9% | −1.2 / −2.3% | 1.26× |
+| GitHub, with the dictionary | +1.5 / +7.2% | +2.5 / +0.1% | +0.1 / −3.8% | **7.84×** |
+| silesia `-3` | −20.5 / −22.6% | −1.3 / +0.4% | −5.7 / −11.3% | 1.45× |
+| silesia `-19` | −20.3 / −17.3% | −1.0 / +2.6% | −4.8 / −11.3% | 1.46× |
+| silesia `--fast=4` | −23.4 / −29.0% | +0.8 / +0.4% | −3.2 / −10.9% | 1.52× |
+| video clip, raw blocks | −2.5 / −3.3% | −1.3 / −8.2% | −0.4 / −10.0% | 0.76× |
 
-libzstd's time is against SQ, natively. Every workload:
+SQ ÷ libzstd is SQ's time over libzstd's, natively: over 1, ruzstd-decompress is slower. Every workload:
 [`results/run16-workloads.md`](results/run16-workloads.md).
 
 - The small tiles are covered: in every pair and platform their changes lie
@@ -1111,13 +1111,97 @@ and DC in turn six times each, natively it was 15.15 and 15.04 ms: noise, as
 its wasm spread (13.3%) says too. Every workload:
 [`results/run17-dict.md`](results/run17-dict.md).
 
-- With the dictionary, libzstd now takes 0.56 times ruzstd-decompress's time,
-  where it took 0.13 times: 1.8 times as fast, against 1.25 times without a
-  dictionary. Of what is left, most is the sequences' decoding and execution,
+- With the dictionary, ruzstd-decompress now takes 1.8 times libzstd's time,
+  where it took 7.7 times, against 1.25 times without a dictionary. Of what is left, most is the sequences' decoding and execution,
   the copies from the dictionary's content among them.
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found
   nothing, both on nightly with AddressSanitizer and on stable without a
   sanitizer, which is how `AGENTS.md` asks for it from here.
+
+## 2026-11-05: the sequences with the buffer's state in locals, natively
+
+The question: natively, ruzstd-decompress takes 1.45–1.52 times libzstd's time on silesia
+(run 16). Where does the difference go?
+
+Profiles on lab2 (perf, silesia `-3`, `main` at `20f34d1`, against libzstd 1.5.7):
+
+| | ruzstd-decompress | libzstd |
+|---|---:|---:|
+| ms a pass | 294 | 206 |
+| instructions a pass | 4.0 G | 2.4 G |
+| of them, the sequences' (`decode_sequences`, `ZSTD_decompressSequences`) | 3.1 G | 1.7 G |
+| instructions a cycle | 3.79 | 3.28 |
+
+The gap is the instructions, not stalls, and most of it is the sequences'. In the fast loop's
+code, about 30 loads and stores a sequence go to the stack and to the decoder's state: the
+ring buffer's pointer, length, head and tail are loaded again for each sequence, and its tail,
+the output counter and the executor's counters stored, since any store of the sequences' bytes
+could, for LLVM, be to them.
+
+What was tried, in quick checks (three rounds, a few workloads):
+
+| | | native silesia `-3` / `--fast=4` / `nci` | wasm, the same |
+|---|---|---:|---:|
+| R1 | the ring's and the executor's state in locals for the fast loop, written back at its end and before a sequence goes the slow way | −4…−6 / −8 / −6…−9% | +7 / +12 / +8…+12% |
+| R2 | R1, the executor's counters through references | −6…−8 / −8 / −7% | +6…+12 / +7…+10 / +6…+10% |
+| R3, R4 | R2 with only the tail in a local, or only the slice | −1 / −5 / −4% | +9…+12 / +7 / +7…+8% |
+| R5 | R2, the slow sequence executed outside the inner loop | −5 / −6 / −3% | +6 / +13 / +12% |
+| R6 | only a local slice of the ring, within its copy | 0% | +4 / 0 / +3% |
+| R7 | R2, the fast loop not inlined | −9 / −10 / −7% | +16 / +10 / +14% |
+
+Natively, holding the state in locals is what helps. In V8, every form of it was slower: its code
+spills either way, and the values the loop loaded from memory when it needed them, which is
+cheap there, took registers for the whole loop. So the two targets now differ:
+
+| | | |
+|---|---|---|
+| **M** | `main` at `20f34d1` |
+| **SR** | M with the commit |
+
+- **Natively**, the fast loop executes its sequences through a run (`SequenceRun`): the ring's
+  buffer as a slice and its tail in locals (`SeqWriter`), with the executor's counters, written
+  back at the loop's end, and before a sequence the fast copy does not take goes the slow way.
+  A writer dropped on an error leaves the buffer as it was.
+- **In WebAssembly**, the run is the executor itself, and the buffer's state is read from it as
+  before.
+- The two share the sequence's checks and the copy. The checks first took the writer's copy
+  as a closure, which LLVM left out of line: 36% of silesia's instructions. A trait's method,
+  which can be marked to be inlined, replaced it.
+- **The dictionary**: the native writer also copies a match that reaches into the
+  dictionary's content, which would otherwise leave the run for each such sequence: the
+  GitHub frames with the dictionary went from 7% slower to 4% faster. A test checks it against
+  a byte at a time.
+- **The WebAssembly path is tested**: `cargo test --target wasm32-wasip1` runs the tests under
+  Node, without libzstd and criterion, which do not build there, and the three tests that
+  compress with libzstd. Fuzzing never reaches that path.
+
+The full run, on lab2 after a restart (run 18). Every variant decoded every workload to the
+same output.
+
+| workload | native M | native SR | wasm M | wasm SR | libzstd |
+|---|---:|---:|---:|---:|---:|
+| silesia `-3` | 288.30 | **276.12 (−4.2%)** | 374.18 | 364.61 (−2.6%) | 201.86 |
+| silesia `-19` | 293.99 | **279.35 (−5.0%)** | 370.21 | 394.78 (+6.6%) | 205.20 |
+| silesia `--fast=4` | 185.10 | **174.81 (−5.6%)** | 227.01 | 226.33 (−0.3%) | 125.20 |
+| `nci` `-3` | 25.92 | **24.42 (−5.8%)** | 32.21 | 32.87 (+2.0%) | 18.28 |
+| mixed 2880x1800@2 | 541.47 | **524.56 (−3.1%)** | 675.03 | 678.82 (+0.6%) | 413.20 |
+| GitHub, with the dictionary | 6.42 | **6.18 (−3.7%)** | 9.70 | 9.94 (+2.5%) | 3.71 |
+| GitHub, small frames | 24.37 | 24.79 (+1.7%) | 31.89 | 32.00 (+0.4%) | 20.01 |
+| video clip, raw blocks | 14.99 | 16.48 (+10.0%) | 15.57 | 15.23 (−2.2%) | 19.07 |
+
+ms a pass. `x-ray` and terminal are within 1% natively, and within 2.1% in wasm. Geomean
+against M: natively −1.8%, in wasm +0.9%. Every workload:
+[`results/run18-sequences-run.md`](results/run18-sequences-run.md).
+
+- The video clip's raw blocks do not reach the code changed; its rounds' spread natively is
+  9.3%.
+- Run again in wasm alone, M and SR in turn (six times on silesia `-19`, four on `-3`),
+  SR was +0.6% and +3.1%, each pass ranging over 7–8%: the wasm build is unchanged within
+  its noise, as its code is.
+- Natively, ruzstd-decompress now takes 1.36–1.40 times libzstd's time on silesia, from
+  1.43–1.48.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on stable) found
+  nothing.
 
 ## Running it again
 

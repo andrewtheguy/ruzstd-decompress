@@ -20,7 +20,10 @@ twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
 
-[dev-dependencies]
+# Neither builds for WebAssembly: libzstd's C, which some tests compress with, needs a C
+# toolchain for it, and criterion, for the benches, rayon's threads. The tests run there
+# without them (see AGENTS.md); the ones using libzstd are left out.
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 criterion = "0.8"
 zstd = "0.14"
 

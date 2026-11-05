@@ -4,9 +4,11 @@ use alloc::vec::Vec;
 use core::hash::Hasher;
 
 use super::ringbuffer::RingBuffer;
+#[cfg(not(target_family = "wasm"))]
+use super::ringbuffer::SeqWriter;
 use crate::decoding::errors::DecodeBufferError;
 
-/// The bytes a block's literals are followed by for [`DecodeBuffer::push_sequence`], whose copy
+/// The bytes a block's literals are followed by for the buffer's fast copy of a sequence, which
 /// reads whole chunks of them.
 pub const LITERALS_PADDING: usize = 16;
 const _: () = assert!(LITERALS_PADDING >= super::ringbuffer::CHUNK - 1);
@@ -34,6 +36,33 @@ pub struct DecodeBuffer {
     /// so that collecting them early costs nothing more.
     #[cfg(feature = "hash")]
     hash: Option<twox_hash::XxHash64>,
+}
+
+/// Sequences written to a [`DecodeBuffer`] in its simple case, the ring's state kept in
+/// locals over the run (see [`SeqWriter`]). [`SequenceWriter::finish`] writes it back; a
+/// writer dropped without it leaves the buffer as it was.
+#[cfg(not(target_family = "wasm"))]
+pub struct SequenceWriter<'a> {
+    ring: SeqWriter<'a>,
+    total_output_counter: &'a mut u64,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl SequenceWriter<'_> {
+    /// A sequence's `ll` literals, from the start of `literals`, then its match, if the buffer
+    /// can take them in its simple case (see [`SeqWriter::push_sequence`]): `literals` must
+    /// have [`LITERALS_PADDING`] bytes after the `ll`. Returns `false`, having changed nothing,
+    /// otherwise.
+    #[inline(always)]
+    pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
+        self.ring.push_sequence(literals, ll, offset, ml)
+    }
+
+    /// Write the run's sequences to the buffer.
+    #[inline(always)]
+    pub fn finish(self) {
+        *self.total_output_counter += self.ring.finish() as u64;
+    }
 }
 
 /// Reads the bytes not yet collected, as many as fit.
@@ -111,10 +140,31 @@ impl DecodeBuffer {
         self.buffer.extend_from_reader(read, fill_length)
     }
 
+    /// A writer of sequences to the buffer, for a run of them (see [`SequenceWriter`]).
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn sequence_writer(&mut self) -> SequenceWriter<'_> {
+        // Matches may reach into the dictionary while the frame is within its window (see
+        // `repeat_from_dict`): for as many bytes more as are left of it.
+        let window_left = (self.window_size as u64).checked_sub(self.total_output_counter);
+        let (dict, dict_room): (&[u8], usize) = match window_left {
+            Some(left) if self.dict_active => (
+                &self.dict_content,
+                usize::try_from(left).unwrap_or(usize::MAX),
+            ),
+            _ => (&[], 0),
+        };
+        SequenceWriter {
+            ring: self.buffer.seq_writer(dict, dict_room),
+            total_output_counter: &mut self.total_output_counter,
+        }
+    }
+
     /// A sequence's `ll` literals, from the start of `literals`, then its match, if the buffer
     /// can take them in its simple case (see [`RingBuffer::push_sequence`]): `literals` must
     /// have [`LITERALS_PADDING`] bytes after the `ll`. Returns `false`, having changed nothing,
     /// otherwise.
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
         let done = self.buffer.push_sequence(literals, ll, offset, ml);

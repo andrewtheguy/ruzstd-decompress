@@ -850,6 +850,7 @@ fn verbose_disabled() {
 /// Collecting gives every byte as soon as its block is decoded, long before the frame
 /// ends, and the blocks after still copy from the window: a frame read a block at a time,
 /// collected or read after each, comes out whole.
+#[cfg(not(target_family = "wasm"))]
 #[test]
 fn collect_gives_each_block_as_decoded() {
     use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
@@ -897,6 +898,7 @@ fn collect_gives_each_block_as_decoded() {
 /// checksum has none calculated, and decodes the same; one decoder takes the frames in turn,
 /// with and without, so that a reset starts the hash anew or leaves it off.
 #[cfg(feature = "hash")]
+#[cfg(not(target_family = "wasm"))]
 #[test]
 fn checksum_whatever_was_collected() {
     use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
@@ -941,6 +943,7 @@ fn checksum_whatever_was_collected() {
 /// A block that fails to decode adds nothing to the output: after the error there is
 /// nothing to collect, everything before it having been collected. Sequences are executed
 /// as they are decoded, so a block whose bitstream turns out bad at its end has to be undone.
+#[cfg(not(target_family = "wasm"))]
 #[test]
 fn failed_block_adds_no_output() {
     use crate::decoding::{BlockDecodingStrategy, FrameDecoder};
