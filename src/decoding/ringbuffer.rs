@@ -20,7 +20,7 @@ pub struct RingBuffer {
 /// The size a short copy is rounded up to, when there is room for it.
 pub(crate) const CHUNK: usize = 16;
 
-/// The longest piece of a sequence [`RingBuffer::push_sequence`] copies in whole chunks.
+/// The longest piece of a sequence [`copy_sequence`] copies in whole chunks.
 const SHORT_COPY: usize = 2 * CHUNK;
 
 /// How far past what a write needs the ring is initialised, so that it is done in a few
@@ -285,61 +285,63 @@ impl RingBuffer {
         self.advance_tail(len);
     }
 
-    /// A sequence's literals and then its match, in one go, where it is simple: the free space
-    /// from the tail has room for both rounded up to whole chunks, initialised, and the match's
-    /// source is at least [`CHUNK`] back, in the data that runs on to where it is written
-    /// without wrapping. Returns `false`, having changed nothing, otherwise.
+    /// Where the free space from the tail ends, within what is initialised (all of the ring
+    /// once the data wraps), and where the data before the tail starts: the bounds of
+    /// [`copy_sequence`].
+    #[inline(always)]
+    fn sequence_bounds(&self) -> (usize, usize) {
+        if self.tail >= self.head {
+            (self.buf.len(), self.head)
+        } else {
+            (self.head, 0)
+        }
+    }
+
+    /// A writer of sequences to the tail, for a run of them (see [`SeqWriter`]), whose matches
+    /// may reach into `dict`, the dictionary's content, for `dict_room` bytes more of the ring.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn seq_writer<'a>(&'a mut self, dict: &'a [u8], dict_room: usize) -> SeqWriter<'a> {
+        let (limit, data_start) = self.sequence_bounds();
+        // A match reaches into the dictionary only past all of the data; the writer takes
+        // that only where the data does not wrap, so that it is all before the tail.
+        let tail = self.tail;
+        let dict = if tail >= self.head { dict } else { &[] };
+        SeqWriter {
+            buf: &mut self.buf[..limit],
+            tail,
+            tail_slot: &mut self.tail,
+            data_start,
+            dict,
+            dict_until: tail.saturating_add(dict_room),
+        }
+    }
+
+    /// A sequence's literals and then its match, by [`copy_sequence`], the ring's state read
+    /// from it as it is needed (see [`SequenceExecutor`]). Returns `false`, having changed
+    /// nothing, where that does not take it.
     ///
-    /// That is the data from the head when it does not wrap, else the part from the start of
-    /// the ring, which the tail is in: the free space then runs from the tail to the head.
-    ///
-    /// `literals` must hold the `ll` literals and then at least `CHUNK - 1` bytes more, which
-    /// the rounded copy reads. The rounded copies write past each piece, into free space,
-    /// which the match then overwrites from where the literals end. With the source at least
-    /// a chunk back, each chunk of the match reads only what is before it, the earlier
-    /// chunks' bytes included, as a copy of a byte at a time would.
+    /// [`SequenceExecutor`]: super::sequence_execution::SequenceExecutor
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
-        let (head, tail) = (self.head, self.tail);
-        // Where the free space from the tail ends, within what is initialised (all of the ring
-        // once the data wraps), and where the data before the tail starts.
-        let (limit, data_start) = if tail >= head {
-            (self.buf.len(), head)
-        } else {
-            (head, 0)
-        };
-        // Rounded up, each piece takes less than one chunk more. The room left keeps the tail
-        // short of `cap`, or of the head, so it needs no wrapping and the sentinel stays free.
-        if tail + ll + ml + 2 * CHUNK > limit {
-            return false;
-        }
-        if offset > tail - data_start + ll || offset < CHUNK {
-            return false;
-        }
-        // Short pieces in whole chunks; long ones in one copy each, which is faster than chunks
-        // once there are a few, where the match does not overlap itself.
-        if ll <= SHORT_COPY {
-            let mut at = 0;
-            while at < ll {
-                self.buf[tail + at..tail + at + CHUNK].copy_from_slice(&literals[at..at + CHUNK]);
-                at += CHUNK;
+        let (limit, data_start) = self.sequence_bounds();
+        match copy_sequence(
+            &mut self.buf,
+            limit,
+            data_start,
+            self.tail,
+            literals,
+            ll,
+            offset,
+            ml,
+        ) {
+            Some(tail) => {
+                self.tail = tail;
+                true
             }
-        } else {
-            self.buf[tail..tail + ll].copy_from_slice(&literals[..ll]);
+            None => false,
         }
-        let dst = tail + ll;
-        let src = dst - offset;
-        if ml <= SHORT_COPY || offset < ml {
-            let mut at = 0;
-            while at < ml {
-                self.buf.copy_within(src + at..src + at + CHUNK, dst + at);
-                at += CHUNK;
-            }
-        } else {
-            self.buf.copy_within(src..src + ml, dst);
-        }
-        self.tail = dst + ml;
-        true
     }
 
     /// `len` bytes from `src` to the tail, either side wrapping at the end of
@@ -403,6 +405,186 @@ impl RingBuffer {
         self.advance_tail(fill_length);
         Ok(())
     }
+}
+
+/// Sequences written to a ring's tail, its buffer borrowed as a slice and the tail kept in
+/// a local, so that neither goes through memory for each sequence. [`SeqWriter::finish`]
+/// writes the tail back; a writer dropped without it leaves the ring as it was, what it wrote
+/// being in the free space.
+///
+/// `buf` is the ring up to where the free space from the tail ends, and `data_start` where
+/// the data before the tail starts (see [`copy_sequence`]). `dict` is the dictionary's content,
+/// which matches may reach into while their literals end by `dict_until` (see
+/// [`copy_from_dict`]): empty if none, or where the data wraps.
+#[cfg(not(target_family = "wasm"))]
+pub struct SeqWriter<'a> {
+    buf: &'a mut [u8],
+    tail_slot: &'a mut usize,
+    tail: usize,
+    data_start: usize,
+    dict: &'a [u8],
+    dict_until: usize,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl SeqWriter<'_> {
+    /// A sequence's literals and then its match, by [`copy_sequence`], or by
+    /// [`copy_from_dict`] where the match reaches into the dictionary. Returns `false`, having
+    /// changed nothing, where neither takes it.
+    #[inline(always)]
+    pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
+        let limit = self.buf.len();
+        let mut tail = copy_sequence(
+            self.buf,
+            limit,
+            self.data_start,
+            self.tail,
+            literals,
+            ll,
+            offset,
+            ml,
+        );
+        if tail.is_none() && !self.dict.is_empty() && self.tail + ll <= self.dict_until {
+            tail = copy_from_dict(
+                self.buf,
+                self.data_start,
+                self.tail,
+                literals,
+                ll,
+                offset,
+                ml,
+                self.dict,
+            );
+        }
+        match tail {
+            Some(tail) => {
+                self.tail = tail;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The bytes written, the ring's tail moved on past them.
+    #[inline(always)]
+    pub fn finish(self) -> usize {
+        let written = self.tail - *self.tail_slot;
+        *self.tail_slot = self.tail;
+        written
+    }
+}
+
+/// A sequence's literals and then its match, in one go, from `tail` in `buf`, the ring's
+/// buffer, where it is simple: the free space from the tail, up to `limit`, has room for both
+/// rounded up to whole chunks, and the match's source is at least [`CHUNK`] back, in the data
+/// that runs on from `data_start` to where it is written without wrapping. Returns the tail
+/// after them, or `None`, having changed nothing.
+///
+/// `limit` is where the free space from the tail ends, within what is initialised: all of the
+/// ring that is initialised when the data does not wrap, else the head, the tail being in the
+/// part from the start of the ring. `data_start` is then the head, else the start of the
+/// ring. `buf` is a slice or the ring's `Vec`, taken as a slice at each use: for the `Vec`,
+/// its pointer and length are read from it each time (see [`SequenceExecutor`]).
+///
+/// `literals` must hold the `ll` literals and then at least `CHUNK - 1` bytes more, which
+/// the rounded copy reads. The rounded copies write past each piece, into free space,
+/// which the match then overwrites from where the literals end. With the source at least
+/// a chunk back, each chunk of the match reads only what is before it, the earlier
+/// chunks' bytes included, as a copy of a byte at a time would.
+///
+/// [`SequenceExecutor`]: super::sequence_execution::SequenceExecutor
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn copy_sequence<B: AsMut<[u8]> + ?Sized>(
+    buf: &mut B,
+    limit: usize,
+    data_start: usize,
+    tail: usize,
+    literals: &[u8],
+    ll: usize,
+    offset: usize,
+    ml: usize,
+) -> Option<usize> {
+    // Rounded up, each piece takes less than one chunk more. The room left keeps the tail
+    // short of `cap`, or of the head, so it needs no wrapping and the sentinel stays free.
+    if tail + ll + ml + 2 * CHUNK > limit {
+        return None;
+    }
+    if offset > tail - data_start + ll || offset < CHUNK {
+        return None;
+    }
+    // Short pieces in whole chunks; long ones in one copy each, which is faster than chunks
+    // once there are a few, where the match does not overlap itself.
+    if ll <= SHORT_COPY {
+        let mut at = 0;
+        while at < ll {
+            buf.as_mut()[tail + at..tail + at + CHUNK].copy_from_slice(&literals[at..at + CHUNK]);
+            at += CHUNK;
+        }
+    } else {
+        buf.as_mut()[tail..tail + ll].copy_from_slice(&literals[..ll]);
+    }
+    let dst = tail + ll;
+    let src = dst - offset;
+    if ml <= SHORT_COPY || offset < ml {
+        let mut at = 0;
+        while at < ml {
+            buf.as_mut()
+                .copy_within(src + at..src + at + CHUNK, dst + at);
+            at += CHUNK;
+        }
+    } else {
+        buf.as_mut().copy_within(src..src + ml, dst);
+    }
+    Some(dst + ml)
+}
+
+/// [`copy_sequence`] for a match that reaches into `dict`, the dictionary's content: past the
+/// data, which runs from `head` to the tail without wrapping. The match takes what it reaches
+/// of the end of the dictionary, then goes on from the data's start, as
+/// `DecodeBuffer::repeat_from_dict` does. Returns the tail after the sequence, or `None`,
+/// having changed nothing, where the match does not reach into the dictionary, or past its
+/// start, which the slow path reports, where the buffer has no room for the sequence's
+/// rounded copies, or where what the match takes from the data overlaps itself.
+///
+/// Out of line, its arguments by value: a writer whose address is taken would be kept in
+/// memory instead of registers.
+#[cfg(not(target_family = "wasm"))]
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn copy_from_dict(
+    buf: &mut [u8],
+    head: usize,
+    tail: usize,
+    literals: &[u8],
+    ll: usize,
+    offset: usize,
+    ml: usize,
+    dict: &[u8],
+) -> Option<usize> {
+    // The data before the match, its literals included.
+    let data = tail + ll - head;
+    if offset <= data || offset - data > dict.len() || tail + ll + ml + 2 * CHUNK > buf.len() {
+        return None;
+    }
+    let from_dict = offset - data;
+    let in_dict = from_dict.min(ml);
+    // The rest from the data's start, `offset` back: in one copy, which must not overlap.
+    let rest = ml - in_dict;
+    if rest > offset {
+        return None;
+    }
+    // The literals rounded up, as `copy_sequence` copies them.
+    let mut at = 0;
+    while at < ll {
+        buf[tail + at..tail + at + CHUNK].copy_from_slice(&literals[at..at + CHUNK]);
+        at += CHUNK;
+    }
+    let dst = tail + ll;
+    let low = dict.len() - from_dict;
+    buf[dst..dst + in_dict].copy_from_slice(&dict[low..low + in_dict]);
+    buf.copy_within(head..head + rest, dst + in_dict);
+    Some(dst + ml)
 }
 
 #[cfg(test)]
@@ -586,22 +768,40 @@ mod tests {
         let mut sequences = 0;
         for step in 0..200_000 {
             match next(6) {
-                // A sequence: when the fast copy takes it, the literals then the match, byte by
-                // byte; when it does not, nothing.
+                // A few sequences in a run: when the fast copy takes one, the literals then the
+                // match, byte by byte; when it does not, nothing. Natively, they go through one
+                // writer, which is now and then dropped unfinished, leaving the ring as it was.
                 3 if !model.is_empty() => {
-                    let ll = next(40);
-                    let padded: alloc::vec::Vec<u8> = (0..ll + super::CHUNK - 1)
-                        .map(|_| next(256) as u8)
-                        .collect();
-                    let offset = 1 + next(model.len() + ll + 8);
-                    let ml = 3 + next(60);
-                    if rb.push_sequence(&padded, ll, offset, ml) {
-                        sequences += 1;
-                        model.extend_from_slice(&padded[..ll]);
-                        for _ in 0..ml {
-                            model.push(model[model.len() - offset]);
+                    let len_before = model.len();
+                    #[cfg(not(target_family = "wasm"))]
+                    let mut writer = rb.seq_writer(&[], 0);
+                    for _ in 0..1 + next(4) {
+                        let ll = next(40);
+                        let padded: alloc::vec::Vec<u8> = (0..ll + super::CHUNK - 1)
+                            .map(|_| next(256) as u8)
+                            .collect();
+                        let offset = 1 + next(model.len() + ll + 8);
+                        let ml = 3 + next(60);
+                        #[cfg(not(target_family = "wasm"))]
+                        let done = writer.push_sequence(&padded, ll, offset, ml);
+                        #[cfg(target_family = "wasm")]
+                        let done = rb.push_sequence(&padded, ll, offset, ml);
+                        if done {
+                            sequences += 1;
+                            model.extend_from_slice(&padded[..ll]);
+                            for _ in 0..ml {
+                                model.push(model[model.len() - offset]);
+                            }
                         }
                     }
+                    #[cfg(not(target_family = "wasm"))]
+                    if next(8) == 0 {
+                        model.truncate(len_before);
+                    } else {
+                        assert_eq!(writer.finish(), model.len() - len_before);
+                    }
+                    #[cfg(target_family = "wasm")]
+                    let _ = len_before;
                 }
                 0 => {
                     let data: alloc::vec::Vec<u8> =
@@ -639,6 +839,72 @@ mod tests {
         assert!(
             sequences > 5_000,
             "only {sequences} sequences took the fast copy"
+        );
+    }
+
+    /// Sequences whose matches reach into a dictionary, through the native writer, checked
+    /// against a byte at a time from the dictionary's content then the data: from rings whose
+    /// head has moved on, with the window's room for the dictionary now and then short.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn dict_matches_a_vec() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        let dict: alloc::vec::Vec<u8> = (0..300).map(|_| next(256) as u8).collect();
+        let (mut from_dict, mut refused) = (0, 0);
+        for round in 0..3000 {
+            // Room reserved first, so that the extend initialises the ring ahead of the data.
+            let mut rb = RingBuffer::new();
+            rb.reserve(4096);
+            let mut model: alloc::vec::Vec<u8> = (0..next(50)).map(|_| next(256) as u8).collect();
+            rb.extend(&model);
+            if next(2) == 0 {
+                let n = next(model.len() + 1);
+                rb.drop_first_n(n);
+                model.drain(..n);
+            }
+            let room = if next(4) == 0 { next(100) } else { usize::MAX };
+            let start = model.len();
+            let mut writer = rb.seq_writer(&dict, room);
+            for _ in 0..1 + next(4) {
+                let ll = next(40);
+                let padded: alloc::vec::Vec<u8> = (0..ll + super::CHUNK - 1)
+                    .map(|_| next(256) as u8)
+                    .collect();
+                let offset = 1 + next(model.len() + ll + dict.len() + 10);
+                let ml = 3 + next(60);
+                if !writer.push_sequence(&padded, ll, offset, ml) {
+                    refused += 1;
+                    continue;
+                }
+                model.extend_from_slice(&padded[..ll]);
+                if offset > model.len() {
+                    from_dict += 1;
+                    // Within the window's room, the literals included.
+                    assert!(model.len() - start <= room, "round {round}: past the room");
+                }
+                for _ in 0..ml {
+                    let at = dict.len() + model.len() - offset;
+                    let byte = if at < dict.len() {
+                        dict[at]
+                    } else {
+                        model[at - dict.len()]
+                    };
+                    model.push(byte);
+                }
+            }
+            assert_eq!(writer.finish(), model.len() - start);
+            let (a, b) = rb.as_slices();
+            assert_eq!([a, b].concat(), model, "round {round}");
+        }
+        assert!(
+            from_dict > 1_000 && refused > 1_000,
+            "{from_dict} from the dictionary, {refused} refused"
         );
     }
 }

@@ -3,10 +3,18 @@ use crate::blocks::sequence_section::Sequence;
 use crate::decoding::errors::ExecuteSequencesError;
 
 /// Executes sequences one at a time, as they are decoded, so they never have to be stored.
+///
+/// The fast loop executes them through a [`SequenceRun`], which takes the executor's state as
+/// each target compiles it best. Natively, the run holds the buffer's state in locals (the
+/// decode buffer's `SequenceWriter`), so that LLVM keeps it in registers, where the stores of
+/// the sequences' bytes would otherwise make it reload and store it again for each sequence:
+/// silesia 6–9% faster. In WebAssembly, the same run made V8's code 6–12% slower, whose
+/// registers it took for values the loop otherwise loads from memory when it needs them,
+/// which is cheap there: the run is then the executor itself, as before.
 pub struct SequenceExecutor<'a> {
     buffer: &'a mut DecodeBuffer,
     /// The block's literals, then [`LITERALS_PADDING`] bytes, which the buffer's fast copy
-    /// reads (see [`DecodeBuffer::push_sequence`]).
+    /// reads (the ring buffer's `copy_sequence`).
     padded_literals: &'a [u8],
     literals_len: usize,
     offset_hist: &'a mut [u32; 3],
@@ -38,56 +46,52 @@ impl<'a> SequenceExecutor<'a> {
         }
     }
 
-    /// Copy the literals of `seq` and then its match to the end of the buffer.
+    /// A run of sequences (see [`SequenceRun`]).
+    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
-    pub fn execute(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError> {
-        let (ll, ml) = (seq.ll as usize, seq.ml as usize);
-        let start = self.literals_copy_counter;
-        let high = start + ll;
-        if high > self.literals_len {
-            return Err(ExecuteSequencesError::NotEnoughBytesForSequence {
-                wanted: high,
-                have: self.literals_len,
-            });
+    pub fn run(&mut self) -> SequenceRun<'_, 'a> {
+        SequenceRun {
+            out: self.buffer.sequence_writer(),
+            padded_literals: self.padded_literals,
+            literals_len: self.literals_len,
+            literals_copy_counter: &mut self.literals_copy_counter,
+            offset_hist: &mut *self.offset_hist,
+            seq_sum: &mut self.seq_sum,
+            max_block_decoded_len: self.max_block_decoded_len,
         }
-        let actual_offset = do_offset_history(seq.of, seq.ll, self.offset_hist);
-        if actual_offset == 0 {
-            return Err(ExecuteSequencesError::ZeroOffset);
-        }
-        let literals = &self.padded_literals[start..];
-        if !self
-            .buffer
-            .push_sequence(literals, ll, actual_offset as usize, ml)
-        {
-            self.execute_slow(&literals[..ll], actual_offset as usize, ml)?;
-        }
-        self.literals_copy_counter = high;
-
-        self.seq_sum += seq.ml;
-        self.seq_sum += seq.ll;
-        self.check_decoded_len(self.seq_sum)
     }
 
-    /// [`Self::execute`], not inlined: for the few sequences decoded outside the fast loop.
+    /// A run of sequences (see [`SequenceRun`]).
+    #[cfg(target_family = "wasm")]
+    #[inline(always)]
+    pub fn run(&mut self) -> SequenceRun<'_, 'a> {
+        SequenceRun { executor: self }
+    }
+
+    /// One sequence, in a run of its own: for the few decoded outside the fast loop.
     #[inline(never)]
     pub fn execute_out_of_line(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError> {
-        self.execute(seq)
+        let mut run = self.run();
+        let slow = run.execute(seq)?;
+        run.finish();
+        match slow {
+            Some(slow) => self.execute_slow(slow),
+            None => Ok(()),
+        }
     }
 
-    /// [`Self::execute`] where the buffer's fast copy does not apply: the data wraps, the match
-    /// reaches into the dictionary or overlaps itself closely, or the buffer needs room.
+    /// A sequence the buffer's fast copy does not take, once its run has accounted for it and
+    /// been finished: the data wraps, the match reaches into the dictionary or overlaps itself
+    /// closely, or the buffer needs room.
     #[inline(never)]
-    fn execute_slow(
-        &mut self,
-        literals: &[u8],
-        offset: usize,
-        ml: usize,
-    ) -> Result<(), ExecuteSequencesError> {
+    pub fn execute_slow(&mut self, seq: SlowSequence) -> Result<(), ExecuteSequencesError> {
+        let literals: &[u8] = self.padded_literals;
+        let literals = &literals[seq.literals_start..seq.literals_start + seq.ll];
         if !literals.is_empty() {
             self.buffer.push(literals);
         }
-        if ml > 0 {
-            self.buffer.repeat(offset, ml)?;
+        if seq.ml > 0 {
+            self.buffer.repeat(seq.offset, seq.ml)?;
         }
         Ok(())
     }
@@ -100,7 +104,7 @@ impl<'a> SequenceExecutor<'a> {
                 &self.padded_literals[self.literals_copy_counter..self.literals_len];
             self.buffer.push(rest_literals);
             seq_sum += rest_literals.len() as u32;
-            self.check_decoded_len(seq_sum)?;
+            check_decoded_len(seq_sum, self.max_block_decoded_len)?;
         }
 
         let diff = self.buffer.len() - self.old_buffer_size;
@@ -112,19 +116,178 @@ impl<'a> SequenceExecutor<'a> {
         );
         Ok(())
     }
+}
 
-    /// Block_Maximum_Size bounds every block; checking after each sequence also keeps
-    /// `seq_sum` far from overflowing.
+/// A sequence for [`SequenceExecutor::execute_slow`]: where its literals start, their count,
+/// its offset resolved, and its match length.
+pub struct SlowSequence {
+    literals_start: usize,
+    ll: usize,
+    offset: usize,
+    ml: usize,
+}
+
+/// Sequences executed in a run: natively, with the buffer's state in a [`SequenceWriter`],
+/// which [`SequenceRun::finish`] writes back to the buffer. Dropped without it, on an error,
+/// the buffer is left as it was when the run began, the block's undoing then setting it back
+/// further. A sequence the buffer's fast copy does not take is accounted for and returned, for
+/// [`SequenceExecutor::execute_slow`] once the run is finished.
+///
+/// [`SequenceWriter`]: super::decode_buffer::SequenceWriter
+#[cfg(not(target_family = "wasm"))]
+pub struct SequenceRun<'x, 'a> {
+    out: super::decode_buffer::SequenceWriter<'x>,
+    padded_literals: &'a [u8],
+    literals_len: usize,
+    literals_copy_counter: &'x mut usize,
+    offset_hist: &'x mut [u32; 3],
+    seq_sum: &'x mut u32,
+    max_block_decoded_len: usize,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl SequenceRun<'_, '_> {
+    /// Copy the literals of `seq` and then its match to the end of the buffer, or return what
+    /// [`SequenceExecutor::execute_slow`] is to copy.
     #[inline(always)]
-    fn check_decoded_len(&self, decoded: u32) -> Result<(), ExecuteSequencesError> {
-        if decoded as usize > self.max_block_decoded_len {
-            return Err(ExecuteSequencesError::TooManyBytesGenerated {
-                max: self.max_block_decoded_len,
-                decoded: decoded as usize,
-            });
-        }
-        Ok(())
+    pub fn execute(
+        &mut self,
+        seq: Sequence,
+    ) -> Result<Option<SlowSequence>, ExecuteSequencesError> {
+        execute_with(
+            seq,
+            self.padded_literals,
+            self.literals_len,
+            self.literals_copy_counter,
+            self.offset_hist,
+            self.seq_sum,
+            self.max_block_decoded_len,
+            &mut self.out,
+        )
     }
+
+    /// Write the buffer's state back.
+    #[inline(always)]
+    pub fn finish(self) {
+        self.out.finish();
+    }
+}
+
+/// Sequences executed in a run: in WebAssembly, by the executor itself (see
+/// [`SequenceExecutor`]), a sequence the buffer's fast copy does not take included.
+#[cfg(target_family = "wasm")]
+pub struct SequenceRun<'x, 'a> {
+    executor: &'x mut SequenceExecutor<'a>,
+}
+
+#[cfg(target_family = "wasm")]
+impl SequenceRun<'_, '_> {
+    /// Copy the literals of `seq` and then its match to the end of the buffer.
+    #[inline(always)]
+    pub fn execute(
+        &mut self,
+        seq: Sequence,
+    ) -> Result<Option<SlowSequence>, ExecuteSequencesError> {
+        let e = &mut *self.executor;
+        let slow = execute_with(
+            seq,
+            e.padded_literals,
+            e.literals_len,
+            &mut e.literals_copy_counter,
+            e.offset_hist,
+            &mut e.seq_sum,
+            e.max_block_decoded_len,
+            &mut *e.buffer,
+        )?;
+        if let Some(slow) = slow {
+            self.executor.execute_slow(slow)?;
+        }
+        Ok(None)
+    }
+
+    /// Nothing to write back.
+    #[inline(always)]
+    pub fn finish(self) {}
+}
+
+/// The buffer's fast copy of a sequence, by [`SequenceRun`]'s writer: `false`, having changed
+/// nothing, where it does not take it. A trait, not a closure, since a closure cannot be
+/// marked to be inlined, and LLVM left one out of line, 36% of silesia's instructions.
+trait PushSequence {
+    fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool;
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl PushSequence for super::decode_buffer::SequenceWriter<'_> {
+    #[inline(always)]
+    fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
+        self.push_sequence(literals, ll, offset, ml)
+    }
+}
+
+#[cfg(target_family = "wasm")]
+impl PushSequence for DecodeBuffer {
+    #[inline(always)]
+    fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
+        self.push_sequence(literals, ll, offset, ml)
+    }
+}
+
+/// A sequence's checks and accounting, its literals' bound, its offset resolved and the
+/// block's decoded length, with its copy by `out`, the buffer's fast copy: what is left to
+/// [`SequenceExecutor::execute_slow`] where that does not take it.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn execute_with(
+    seq: Sequence,
+    padded_literals: &[u8],
+    literals_len: usize,
+    literals_copy_counter: &mut usize,
+    offset_hist: &mut [u32; 3],
+    seq_sum: &mut u32,
+    max_block_decoded_len: usize,
+    out: &mut impl PushSequence,
+) -> Result<Option<SlowSequence>, ExecuteSequencesError> {
+    let (ll, ml) = (seq.ll as usize, seq.ml as usize);
+    let start = *literals_copy_counter;
+    let high = start + ll;
+    if high > literals_len {
+        return Err(ExecuteSequencesError::NotEnoughBytesForSequence {
+            wanted: high,
+            have: literals_len,
+        });
+    }
+    let offset = do_offset_history(seq.of, seq.ll, offset_hist) as usize;
+    if offset == 0 {
+        return Err(ExecuteSequencesError::ZeroOffset);
+    }
+    *literals_copy_counter = high;
+    *seq_sum += seq.ml;
+    *seq_sum += seq.ll;
+    check_decoded_len(*seq_sum, max_block_decoded_len)?;
+    if out.push_sequence(&padded_literals[start..], ll, offset, ml) {
+        Ok(None)
+    } else {
+        Ok(Some(SlowSequence {
+            literals_start: start,
+            ll,
+            offset,
+            ml,
+        }))
+    }
+}
+
+/// Block_Maximum_Size bounds every block; checking after each sequence also keeps the sum of
+/// their lengths far from overflowing.
+#[inline(always)]
+fn check_decoded_len(decoded: u32, max: usize) -> Result<(), ExecuteSequencesError> {
+    if decoded as usize > max {
+        return Err(ExecuteSequencesError::TooManyBytesGenerated {
+            max,
+            decoded: decoded as usize,
+        });
+    }
+    Ok(())
 }
 
 /// Update the most recently used offsets to reflect the provided offset value, and return the

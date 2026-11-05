@@ -151,6 +151,7 @@ fn fast_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
     let mut b = br.clone();
     b.ensure_bits_fast(57);
     let mut window = b.sentinel_window();
+    let mut run = executor.run();
     while *seq_idx + 1 < num_sequences && b.can_refill_fast_twice() {
         window = b.refill_window_fast(window);
         let ll = at(ll_table, ll_state);
@@ -165,13 +166,19 @@ fn fast_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
         ll_state = usize::from(ll.next_state) + take_bits(&mut window, ll.nb_bits) as usize;
         ml_state = usize::from(ml.next_state) + take_bits(&mut window, ml.nb_bits) as usize;
         of_state = usize::from(of.next_state) + take_bits(&mut window, of.nb_bits) as usize;
-        executor.execute(Sequence {
+        let slow = run.execute(Sequence {
             ll: ll.base_value + ll_add as u32,
             ml: ml.base_value + ml_add as u32,
             of: of.base_value + of_add as u32,
         })?;
+        if let Some(slow) = slow {
+            run.finish();
+            executor.execute_slow(slow)?;
+            run = executor.run();
+        }
         *seq_idx += 1;
     }
+    run.finish();
     b.consume_to_sentinel(window);
     *br = b;
     *states = [ll_state, ml_state, of_state];
