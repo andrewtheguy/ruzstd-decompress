@@ -2,7 +2,7 @@
 
 use crate::bit_io::BitReaderReversed;
 use crate::decoding::errors::HuffmanTableError;
-use crate::fse::{FSEDecoder, FSETable};
+use crate::fse::{FSETable, build_states};
 use alloc::vec::Vec;
 
 /// The Zstandard specification limits the maximum length of a code to 11 bits.
@@ -30,20 +30,13 @@ pub struct HuffmanTable {
     dict: Option<u32>,
     /// Whether `pairs` is made from that dictionary's table, kept through resets as `dict` is.
     dict_pairs: bool,
-    /// The weight of a symbol is the number of occurences in a table.
-    /// This value is used in constructing a binary tree referred to as
-    /// a Huffman tree. Once this tree is constructed, it can be used to build the
-    /// lookup table
-    weights: Vec<u8>,
     /// The maximum size in bits a prefix code in the encoded data can be.
     /// This value is used so that the decoder knows how many bits
     /// to read from the bitstream before checking the table. This
     /// value must be 11 or lower.
     pub max_num_bits: u8,
-    bits: Vec<u8>,
-    bit_ranks: Vec<u32>,
-    rank_indexes: Vec<usize>,
-    /// In some cases, the list of weights is compressed using FSE compression.
+    /// The description of the FSE table the weights are compressed with, when they are; kept
+    /// only so that its allocation is reused from one build to the next.
     fse_table: FSETable,
 }
 
@@ -56,12 +49,7 @@ impl HuffmanTable {
             pairs_built: false,
             dict: None,
             dict_pairs: false,
-
-            weights: Vec::with_capacity(256),
             max_num_bits: 0,
-            bits: Vec::with_capacity(256),
-            bit_ranks: Vec::with_capacity(11),
-            rank_indexes: Vec::with_capacity(11),
             fse_table: FSETable::new(255),
         }
     }
@@ -78,22 +66,13 @@ impl HuffmanTable {
             self.dict_pairs = false;
         }
         self.pairs_built = self.dict_pairs;
-        self.weights.extend_from_slice(&other.weights);
         self.max_num_bits = other.max_num_bits;
-        self.bits.extend_from_slice(&other.bits);
-        self.rank_indexes.extend_from_slice(&other.rank_indexes);
-        self.fse_table.reinit_from(&other.fse_table);
     }
 
-    /// Completely empty the table of all data.
+    /// Leave no table to decode with, as a new one has none.
     pub fn reset(&mut self) {
-        self.weights.clear();
         self.max_num_bits = 0;
         self.pairs_built = false;
-        self.bits.clear();
-        self.bit_ranks.clear();
-        self.rank_indexes.clear();
-        self.fse_table.reset();
     }
 
     /// The table, as an array, so that its lookups need no bounds check. Only once one is built,
@@ -114,8 +93,9 @@ impl HuffmanTable {
     #[inline(always)]
     fn decode_symbol(table: &[Entry; TABLE_SIZE], br: &mut BitReaderReversed<'_>) -> u8 {
         let entry = table[br.peek_bits(MAX_MAX_NUM_BITS) as usize & (TABLE_SIZE - 1)];
-        br.consume(entry.num_bits);
-        entry.symbol
+        let [symbol, num_bits] = entry;
+        br.consume(num_bits);
+        symbol
     }
 
     /// Decode exactly `out.len()` symbols from `br` into `out`.
@@ -138,8 +118,9 @@ impl HuffmanTable {
     #[inline(always)]
     fn decode_aligned(table: &[Entry; TABLE_SIZE], window: &mut u64) -> u8 {
         let entry = table[(*window >> (64 - MAX_MAX_NUM_BITS)) as usize];
-        *window <<= entry.num_bits;
-        entry.symbol
+        let [symbol, num_bits] = entry;
+        *window <<= num_bits;
+        symbol
     }
 
     /// [`Self::decode_stream`], `N` symbols a refill: `N * max_num_bits` must be at most 56.
@@ -296,13 +277,13 @@ impl HuffmanTable {
         let pairs: &mut [PairEntry; TABLE_SIZE] =
             self.pairs.as_mut_slice().try_into().expect("sized above");
         for (index, pair) in pairs.iter_mut().enumerate() {
-            let first = single[index];
-            let second = single[(index << first.num_bits) & (TABLE_SIZE - 1)];
-            let both = first.num_bits + second.num_bits;
+            let [first, first_bits] = single[index];
+            let [second, second_bits] = single[(index << first_bits) & (TABLE_SIZE - 1)];
+            let both = first_bits + second_bits;
             *pair = if both <= MAX_MAX_NUM_BITS {
-                PairEntry::new(first.symbol, second.symbol, both, 2)
+                PairEntry::new(first, second, both, 2)
             } else {
-                PairEntry::new(first.symbol, 0, first.num_bits, 1)
+                PairEntry::new(first, 0, first_bits, 1)
             };
         }
         self.pairs_built = true;
@@ -439,273 +420,165 @@ impl HuffmanTable {
         self.pairs_built = false;
         self.dict = None;
         self.dict_pairs = false;
-        let bytes_used = self.read_weights(source)?;
-        self.build_table_from_weights()?;
+        let mut weights = [0; WEIGHTS_MOST];
+        let (bytes_used, count) = self.read_weights(source, &mut weights)?;
+        self.build_table_from_weights(&weights[..count])?;
         Ok(bytes_used)
     }
 
-    /// Read weights from the provided source.
+    /// Read the weights described at the start of `source` into `weights`: a symbol's weight
+    /// gives the length of its code, and the last symbol's is left implied.
     ///
-    /// The huffman table is represented in the input data as a list of weights.
-    /// After the header, weights are read, then a Huffman decoding table
-    /// can be constructed using that list of weights.
-    ///
-    /// Returns the number of bytes read.
-    fn read_weights(&mut self, source: &[u8]) -> Result<u32, HuffmanTableError> {
+    /// Returns the number of bytes read and the number of weights.
+    fn read_weights(
+        &mut self,
+        source: &[u8],
+        weights: &mut [u8; WEIGHTS_MOST],
+    ) -> Result<(u32, usize), HuffmanTableError> {
         use HuffmanTableError as err;
 
-        if source.is_empty() {
+        let Some(&header) = source.first() else {
             return Err(err::SourceIsEmpty);
-        }
-        let header = source[0];
-        let mut bits_read = 8;
-
-        match header {
-            // If the header byte is less than 128, the series of weights
-            // is compressed using two interleaved FSE streams that share
-            // a distribution table.
-            0..=127 => {
-                let fse_stream = &source[1..];
-                if header as usize > fse_stream.len() {
-                    return Err(err::NotEnoughBytesForWeights {
-                        got_bytes: fse_stream.len(),
-                        expected_bytes: header,
-                    });
-                }
-                //fse decompress weights
-                let bytes_used_by_fse_header = self.fse_table.build_decoder(fse_stream, 6)?;
-
-                if bytes_used_by_fse_header > header as usize {
-                    return Err(err::FSETableUsedTooManyBytes {
-                        used: bytes_used_by_fse_header,
-                        available_bytes: header,
-                    });
-                }
-
-                vprintln!(
-                    "Building fse table for huffman weights used: {}",
-                    bytes_used_by_fse_header
-                );
-                // Huffman headers are compressed using two interleaved
-                // FSE bitstreams, where the first state (decoder) handles
-                // even symbols, and the second handles odd symbols.
-                let mut dec1 = FSEDecoder::new(&self.fse_table);
-                let mut dec2 = FSEDecoder::new(&self.fse_table);
-
-                let compressed_start = bytes_used_by_fse_header;
-                let compressed_length = header as usize - bytes_used_by_fse_header;
-
-                let compressed_weights = &fse_stream[compressed_start..];
-                if compressed_weights.len() < compressed_length {
-                    return Err(err::NotEnoughBytesToDecompressWeights {
-                        have: compressed_weights.len(),
-                        need: compressed_length,
-                    });
-                }
-                let compressed_weights = &compressed_weights[..compressed_length];
-                let mut br = BitReaderReversed::new(compressed_weights);
-
-                bits_read += (bytes_used_by_fse_header + compressed_length) * 8;
-
-                //skip the 0 padding at the end of the last byte of the bit stream and throw away the first 1 found
-                let mut skipped_bits = 0;
-                loop {
-                    let val = br.get_bits(1);
-                    skipped_bits += 1;
-                    if val == 1 || skipped_bits > 8 {
-                        break;
-                    }
-                }
-                if skipped_bits > 8 {
-                    //if more than 7 bits are 0, this is not the correct end of the bitstream. Either a bug or corrupted data
-                    return Err(err::ExtraPadding { skipped_bits });
-                }
-
-                dec1.init_state(&mut br)?;
-                dec2.init_state(&mut br)?;
-
-                self.weights.clear();
-
-                // The two decoders take turns decoding a single symbol and updating their state.
-                loop {
-                    let w = dec1.decode_symbol();
-                    self.weights.push(w);
-                    dec1.update_state(&mut br);
-
-                    if br.bits_remaining() <= -1 {
-                        //collect final states
-                        self.weights.push(dec2.decode_symbol());
-                        break;
-                    }
-
-                    let w = dec2.decode_symbol();
-                    self.weights.push(w);
-                    dec2.update_state(&mut br);
-
-                    if br.bits_remaining() <= -1 {
-                        //collect final states
-                        self.weights.push(dec1.decode_symbol());
-                        break;
-                    }
-                    //maximum number of weights is 255 because we use u8 symbols and the last weight is inferred from the sum of all others
-                    if self.weights.len() > 255 {
-                        return Err(err::TooManyWeights {
-                            got: self.weights.len(),
-                        });
-                    }
-                }
-            }
-            // If the header byte is greater than or equal to 128,
-            // weights are directly represented, where each weight is
-            // encoded directly as a 4 bit field. The weights will
-            // always be encoded with full bytes, meaning if there's
-            // an odd number of weights, the last weight will still
-            // occupy a full byte.
-            _ => {
-                // weights are directly encoded
-                let weights_raw = &source[1..];
-                let num_weights = header - 127;
-                self.weights.resize(num_weights as usize, 0);
-
-                let bytes_needed = if num_weights.is_multiple_of(2) {
-                    num_weights as usize / 2
-                } else {
-                    (num_weights as usize / 2) + 1
-                };
-
-                if weights_raw.len() < bytes_needed {
-                    return Err(err::NotEnoughBytesInSource {
-                        got: weights_raw.len(),
-                        need: bytes_needed,
-                    });
-                }
-
-                for idx in 0..num_weights {
-                    if idx % 2 == 0 {
-                        self.weights[idx as usize] = weights_raw[idx as usize / 2] >> 4;
-                    } else {
-                        self.weights[idx as usize] = weights_raw[idx as usize / 2] & 0xF;
-                    }
-                    bits_read += 4;
-                }
-            }
-        }
-
-        let bytes_read = if bits_read % 8 == 0 {
-            bits_read / 8
-        } else {
-            (bits_read / 8) + 1
         };
-        Ok(bytes_read as u32)
+        if header < 128 {
+            // `header` bytes of two interleaved FSE streams sharing one table, after the
+            // table's description: the first state decodes the even weights, the second the
+            // odd ones.
+            let fse_stream = &source[1..];
+            if header as usize > fse_stream.len() {
+                return Err(err::NotEnoughBytesForWeights {
+                    got_bytes: fse_stream.len(),
+                    expected_bytes: header,
+                });
+            }
+            let description = self.fse_table.read_distribution(fse_stream, 6)?;
+            if description > header as usize {
+                return Err(err::FSETableUsedTooManyBytes {
+                    used: description,
+                    available_bytes: header,
+                });
+            }
+            let mut states = [WeightState::default(); WEIGHT_STATES];
+            build_states(
+                self.fse_table.accuracy_log,
+                &self.fse_table.symbol_probabilities,
+                |state, symbol, num_bits, base| {
+                    states[state & (WEIGHT_STATES - 1)] = WeightState {
+                        base: base as u8,
+                        num_bits,
+                        symbol,
+                    };
+                },
+            )?;
+            let count = decode_weights(
+                &fse_stream[description..header as usize],
+                &states,
+                self.fse_table.accuracy_log,
+                weights,
+            )?;
+            Ok((1 + u32::from(header), count))
+        } else {
+            // `header - 127` weights of 4 bits each, two to a byte, the first in the high bits.
+            let count = usize::from(header - 127);
+            let bytes = count.div_ceil(2);
+            let Some(packed) = source.get(1..1 + bytes) else {
+                return Err(err::NotEnoughBytesInSource {
+                    got: source.len() - 1,
+                    need: bytes,
+                });
+            };
+            for (two, &byte) in weights.as_chunks_mut::<2>().0.iter_mut().zip(packed) {
+                *two = [byte >> 4, byte & 0xF];
+            }
+            Ok((1 + bytes as u32, count))
+        }
     }
 
-    /// Once the weights have been read from the data, you can decode the weights
-    /// into a table, and use that table to decode the actual compressed data.
-    ///
-    /// This function populates the rest of the table from the series of weights.
-    fn build_table_from_weights(&mut self) -> Result<(), HuffmanTableError> {
+    /// Build the table from the weights read, the last symbol's left implied.
+    fn build_table_from_weights(&mut self, weights: &[u8]) -> Result<(), HuffmanTableError> {
         use HuffmanTableError as err;
 
         // At most 255 weights, the last symbol's implied: a symbol is a byte. The weights'
         // reader stops past 255, but its last states can still give one or two more.
-        if self.weights.len() > 255 {
-            return Err(err::TooManyWeights {
-                got: self.weights.len(),
-            });
-        }
-        self.bits.clear();
-        self.bits.resize(self.weights.len() + 1, 0);
-
-        let mut weight_sum: u32 = 0;
-        for w in &self.weights {
-            if *w > MAX_MAX_NUM_BITS {
-                return Err(err::WeightBiggerThanMaxNumBits { got: *w });
-            }
-            weight_sum += if *w > 0 { 1_u32 << (*w - 1) } else { 0 };
+        if weights.len() > 255 {
+            return Err(err::TooManyWeights { got: weights.len() });
         }
 
+        // The symbols with a code, in order: most weights are 0, and counting or sorting them
+        // all would make a chain of increments of one count through memory, each waiting on the
+        // one before. The list's end is a register, moved on past a symbol with a weight.
+        let mut coded = [0u8; 256];
+        let mut coded_len = 0;
+        let mut highest = 0;
+        for (symbol, &w) in weights.iter().enumerate() {
+            coded[coded_len & 255] = symbol as u8;
+            coded_len += usize::from(w != 0);
+            highest = highest.max(w);
+        }
+        if highest > MAX_MAX_NUM_BITS {
+            return Err(err::WeightBiggerThanMaxNumBits { got: highest });
+        }
+        let coded = &coded[..coded_len];
+
+        // How many symbols have each weight: the codes' lengths, their counts and the sum all
+        // follow from these.
+        let mut counts = [0u32; MAX_MAX_NUM_BITS as usize + 1];
+        for &symbol in coded {
+            counts[usize::from(weights[usize::from(symbol)])] += 1;
+        }
+        let weight_sum: u32 = (1..=MAX_MAX_NUM_BITS)
+            .map(|w| counts[usize::from(w)] << (w - 1))
+            .sum();
         if weight_sum == 0 {
             return Err(err::MissingWeights);
         }
 
+        // The weights sum, with the last symbol's, to the next power of two, which gives the
+        // longest code: a weight `w` is a code of `max_bits + 1 - w` bits.
         let max_bits = highest_bit_set(weight_sum) as u8;
         let left_over = (1 << max_bits) - weight_sum;
-
-        //left_over must be power of two
         if !left_over.is_power_of_two() {
             return Err(err::LeftoverIsNotAPowerOf2 { got: left_over });
         }
-
-        let last_weight = highest_bit_set(left_over) as u8;
-
-        for symbol in 0..self.weights.len() {
-            let bits = if self.weights[symbol] > 0 {
-                max_bits + 1 - self.weights[symbol]
-            } else {
-                0
-            };
-            self.bits[symbol] = bits;
-        }
-
-        self.bits[self.weights.len()] = max_bits + 1 - last_weight;
-
         if max_bits > MAX_MAX_NUM_BITS {
             return Err(err::MaxBitsTooHigh { got: max_bits });
         }
+        let last_weight = highest_bit_set(left_over) as u8;
+        counts[usize::from(last_weight)] += 1;
 
-        self.bit_ranks.clear();
-        self.bit_ranks.resize((max_bits + 1) as usize, 0);
-        for num_bits in &self.bits {
-            self.bit_ranks[(*num_bits) as usize] += 1;
-        }
-
-        //starting codes for each rank
-        self.rank_indexes.clear();
-        self.rank_indexes.resize((max_bits + 1) as usize, 0);
-
-        // The table is laid out at MAX_MAX_NUM_BITS bits whatever max_bits is (see TABLE_SIZE):
-        // a code of `bits` bits spans the entries of every value of the bits after it.
-        self.rank_indexes[max_bits as usize] = 0;
-        for bits in (1..self.rank_indexes.len() as u8).rev() {
-            self.rank_indexes[bits as usize - 1] = self.rank_indexes[bits as usize]
-                + self.bit_ranks[bits as usize] as usize * (1 << (MAX_MAX_NUM_BITS - bits));
-        }
-
-        assert!(
-            self.rank_indexes[0] == TABLE_SIZE,
-            "rank_idx[0]: {} should be: {}",
-            self.rank_indexes[0],
-            TABLE_SIZE
-        );
-
-        // Sized once; every later build overwrites all of it.
-        if self.decode.len() != TABLE_SIZE {
-            self.decode.resize(TABLE_SIZE, Entry::default());
-        }
-        // The symbols by their codes' lengths, in order within each, so that a length's are
-        // filled in a loop of their own, every code the same number of entries: no branch on
-        // a symbol's length, and stores as wide as its entries (see `fill_rank`).
+        // The symbols by weight, in order within each, so that a code length's are filled in a
+        // loop of their own, every code the same number of entries: no branch on a symbol's
+        // length, and stores as wide as its entries (see `fill_rank`).
         let mut sorted = [0u8; 256];
         let mut next = [0usize; MAX_MAX_NUM_BITS as usize + 1];
         let mut start = 0;
-        for (next, &count) in next.iter_mut().zip(&self.bit_ranks).skip(1) {
+        for (next, &count) in next.iter_mut().zip(&counts).skip(1) {
             *next = start;
             start += count as usize;
         }
-        for (symbol, &bits) in self.bits.iter().enumerate() {
-            if bits != 0 {
-                let next = &mut next[bits as usize];
-                sorted[*next] = symbol as u8;
-                *next += 1;
-            }
+        for &symbol in coded {
+            let next = &mut next[usize::from(weights[usize::from(symbol)])];
+            sorted[*next & 255] = symbol;
+            *next += 1;
+        }
+        sorted[next[usize::from(last_weight)] & 255] = weights.len() as u8;
+
+        // The table is laid out at MAX_MAX_NUM_BITS bits whatever max_bits is (see TABLE_SIZE):
+        // a code of `bits` bits spans the entries of every value of the bits after it. The
+        // longest codes, of weight 1, come first.
+        if self.decode.len() != TABLE_SIZE {
+            self.decode.resize(TABLE_SIZE, [0; 2]);
         }
         let mut from = 0;
-        for num_bits in 1..=max_bits {
-            let count = self.bit_ranks[num_bits as usize] as usize;
+        let mut at = 0;
+        for w in 1..=max_bits {
+            let count = counts[usize::from(w)] as usize;
             let symbols = &sorted[from..from + count];
             from += count;
-            let at = self.rank_indexes[num_bits as usize];
-            let entries = &mut self.decode[at..at + (count << (MAX_MAX_NUM_BITS - num_bits))];
+            let num_bits = max_bits + 1 - w;
+            let len = count << (MAX_MAX_NUM_BITS - num_bits);
+            let entries = &mut self.decode[at..at + len];
+            at += len;
             match num_bits {
                 11 => fill_rank::<1>(entries, symbols, num_bits),
                 10 => fill_rank::<2>(entries, symbols, num_bits),
@@ -720,17 +593,127 @@ impl HuffmanTable {
                 _ => fill_rank::<1024>(entries, symbols, num_bits),
             }
         }
+        debug_assert_eq!(at, TABLE_SIZE);
 
         self.max_num_bits = max_bits;
         Ok(())
     }
 }
 
+/// Room for the weights read: at most 255 and the two final states', which
+/// [`HuffmanTable::build_table_from_weights`] then refuses.
+const WEIGHTS_MOST: usize = 258;
+
+/// The FSE table the weights are compressed with has an accuracy log of at most 6.
+const WEIGHT_STATES: usize = 1 << 6;
+
+/// A state of the weights' FSE table: its weight, and the bits read for the next state and the
+/// base they are added to. The base is below the table's size, so a byte.
+#[derive(Copy, Clone, Default)]
+struct WeightState {
+    base: u8,
+    num_bits: u8,
+    symbol: u8,
+}
+
+/// Decode the weights' two interleaved FSE streams, `stream`, with `states`, the table of
+/// accuracy log `acc_log`, into `weights`, and return how many.
+///
+/// The stream is read back to front from a copy after 8 zero bytes, which read as the zeros
+/// past its start. The bits are taken off the top of a window, the next one highest, loaded
+/// from the 8 bytes up to the position and reloaded when fewer than the two decoders' next
+/// reads are left in it: the position, the window and the states stay in registers. The
+/// decoders stop at the first read that takes a bit past the stream's start; until then a
+/// state reads at most 6 bits, and the first two `acc_log` each, so no read reaches past the
+/// zeros.
+fn decode_weights(
+    stream: &[u8],
+    states: &[WeightState; WEIGHT_STATES],
+    acc_log: u8,
+    weights: &mut [u8; WEIGHTS_MOST],
+) -> Result<usize, HuffmanTableError> {
+    const ZEROS: usize = 8;
+    /// The bits two reads take at most.
+    const TWO_READS: u32 = 12;
+    // At most 127 bytes are the weights' and their table's.
+    let mut buf = [0u8; ZEROS + 128];
+    buf[ZEROS..ZEROS + stream.len()].copy_from_slice(stream);
+    // The stream ends with a 1 bit after its last bit, in its last byte.
+    let last = stream.last().copied().unwrap_or(0);
+    if last == 0 {
+        return Err(HuffmanTableError::ExtraPadding { skipped_bits: 9 });
+    }
+    // The bits left, from the copy's start: past the stream's start once below `8 * ZEROS`.
+    let mut pos = (ZEROS + stream.len()) * 8 - (last.leading_zeros() as usize + 1);
+    // The 8 bytes whose highest holds the next bit, shifted so that it is the window's top
+    // one; at least 57 of the window's bits are then the stream's. Only while `pos` is at
+    // least `8 * ZEROS`, so that those bytes are in the copy.
+    let load = |pos: usize| {
+        let at = (pos - 1) / 8 - 7;
+        let word = u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
+        let left = (pos - 8 * at) as u32;
+        (word << (64 - left), left)
+    };
+    let (mut window, mut left) = load(pos);
+    let read = |window: &mut u64, left: &mut u32, pos: &mut usize, n: u8| {
+        // Two shifts, so that a read of 0 bits shifts by at most 63.
+        let value = (*window >> 1) >> (63 - n);
+        *window <<= n;
+        *left -= u32::from(n);
+        *pos -= usize::from(n);
+        value as usize
+    };
+    let past_start = |pos: usize| pos < ZEROS * 8;
+
+    let mut state1 = states[read(&mut window, &mut left, &mut pos, acc_log) & (WEIGHT_STATES - 1)];
+    let mut state2 = states[read(&mut window, &mut left, &mut pos, acc_log) & (WEIGHT_STATES - 1)];
+    let mut count = 0;
+    loop {
+        if left < TWO_READS {
+            (window, left) = load(pos);
+        }
+        weights[count] = state1.symbol;
+        count += 1;
+        let bits = read(&mut window, &mut left, &mut pos, state1.num_bits);
+        state1 = states[(usize::from(state1.base) + bits) & (WEIGHT_STATES - 1)];
+        if past_start(pos) {
+            weights[count] = state2.symbol;
+            count += 1;
+            break;
+        }
+
+        weights[count] = state2.symbol;
+        count += 1;
+        let bits = read(&mut window, &mut left, &mut pos, state2.num_bits);
+        state2 = states[(usize::from(state2.base) + bits) & (WEIGHT_STATES - 1)];
+        if past_start(pos) {
+            weights[count] = state1.symbol;
+            count += 1;
+            break;
+        }
+        // At most 255 weights, as a symbol is a byte and the last is implied.
+        if count > 255 {
+            return Err(HuffmanTableError::TooManyWeights { got: count });
+        }
+    }
+    Ok(count)
+}
+
 /// Fill `entries` with the codes of `symbols`, each `num_bits` long and so `L` entries.
+///
+/// Four entries at a time, as a `u64`, where a code has that many: LLVM stores an array of
+/// entries, or of `u16`s, two bytes at a time where it unrolls the copies.
 #[inline(always)]
 fn fill_rank<const L: usize>(entries: &mut [Entry], symbols: &[u8], num_bits: u8) {
     for (code, &symbol) in entries.as_chunks_mut::<L>().0.iter_mut().zip(symbols) {
-        *code = [Entry { symbol, num_bits }; L];
+        if L >= 4 {
+            let four = u64::from(u16::from_le_bytes([symbol, num_bits])) * 0x0001_0001_0001_0001;
+            for part in code.as_flattened_mut().as_chunks_mut::<8>().0 {
+                *part = four.to_le_bytes();
+            }
+        } else {
+            *code = [[symbol, num_bits]; L];
+        }
     }
 }
 
@@ -740,15 +723,11 @@ impl Default for HuffmanTable {
     }
 }
 
-/// A single entry in the table contains the decoded symbol/literal and the
-/// size of the prefix code.
-#[derive(Copy, Clone, Debug, Default)]
-pub struct Entry {
-    /// The byte that the prefix code replaces during encoding.
-    symbol: u8,
-    /// The number of bits the prefix code occupies.
-    num_bits: u8,
-}
+/// An entry of the table: `[symbol, num_bits]`, the byte a code stands for and the number of
+/// bits of the code. Bytes, not a struct's fields, so that the table's build can take the
+/// entries as bytes (`as_flattened_mut`) and fill a code's with 8-byte stores (see
+/// [`fill_rank`]); LLVM stores two bytes' fields, or a `u16`, two bytes at a time.
+type Entry = [u8; 2];
 
 /// An entry of the table of pairs: the one or two symbols an index starts with, and their codes'
 /// bits together, in one `u32`, so that the table's build writes it in one store and a lookup
@@ -867,14 +846,103 @@ mod tests {
     #[test]
     fn too_many_weights() {
         let mut table = HuffmanTable::new();
-        table.weights = alloc::vec![1; 256];
         assert!(matches!(
-            table.build_table_from_weights(),
+            table.build_table_from_weights(&[1; 256]),
             Err(HuffmanTableError::TooManyWeights { got: 256 })
         ));
-        table.weights = alloc::vec![1; 255];
-        table.weights[0] = 2;
-        assert!(table.build_table_from_weights().is_ok());
+        let mut weights = [1; 255];
+        weights[0] = 2;
+        assert!(table.build_table_from_weights(&weights).is_ok());
+    }
+
+    /// The FSE-coded weights decode as the two decoders did on a [`BitReaderReversed`], a bit
+    /// at a time for the padding, for random tables and streams: the same weights, or both
+    /// refused.
+    #[test]
+    fn weights_decode_as_a_bit_reader() {
+        /// The weights as read before, or `None` where they were refused.
+        fn model(stream: &[u8], states: &[WeightState], acc_log: u8) -> Option<Vec<u8>> {
+            let mut br = BitReaderReversed::new(stream);
+            let mut skipped_bits = 0;
+            loop {
+                skipped_bits += 1;
+                if br.get_bits(1) == 1 || skipped_bits > 8 {
+                    break;
+                }
+            }
+            if skipped_bits > 8 {
+                return None;
+            }
+            let state = |at: u64| states[at as usize];
+            let mut dec1 = state(br.get_bits(acc_log));
+            let mut dec2 = state(br.get_bits(acc_log));
+            let mut weights = Vec::new();
+            loop {
+                weights.push(dec1.symbol);
+                dec1 = state(u64::from(dec1.base) + br.get_bits(dec1.num_bits));
+                if br.bits_remaining() <= -1 {
+                    weights.push(dec2.symbol);
+                    break;
+                }
+                weights.push(dec2.symbol);
+                dec2 = state(u64::from(dec2.base) + br.get_bits(dec2.num_bits));
+                if br.bits_remaining() <= -1 {
+                    weights.push(dec1.symbol);
+                    break;
+                }
+                if weights.len() > 255 {
+                    return None;
+                }
+            }
+            Some(weights)
+        }
+
+        let mut seed = 0x853c_49e6_748f_ea9bu64;
+        let mut next = |n: u32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % u64::from(n)) as u32
+        };
+        let mut long = 0;
+        for _ in 0..20000 {
+            // Probabilities of up to 13 weights summing to the table's size, a "less than
+            // one" counting one.
+            let acc_log = 5 + next(2) as u8;
+            let mut left = 1i32 << acc_log;
+            let mut probs = Vec::new();
+            while left > 0 && probs.len() < 12 {
+                let prob = match next(5) {
+                    0 => 0,
+                    1 => -1,
+                    _ => 1 + next(left as u32) as i32,
+                };
+                left -= prob.max(0) + i32::from(prob == -1);
+                probs.push(prob);
+            }
+            if left > 0 {
+                probs.push(left);
+            }
+            let mut states = [WeightState::default(); WEIGHT_STATES];
+            build_states(acc_log, &probs, |state, symbol, num_bits, base| {
+                states[state] = WeightState {
+                    base: base as u8,
+                    num_bits,
+                    symbol,
+                };
+            })
+            .unwrap();
+            let stream: Vec<u8> = (0..next(127)).map(|_| next(256) as u8).collect();
+
+            let mut weights = [0; WEIGHTS_MOST];
+            let got = decode_weights(&stream, &states, acc_log, &mut weights)
+                .ok()
+                .map(|count| weights[..count].to_vec());
+            let expected = model(&stream, &states[..1 << acc_log], acc_log);
+            assert_eq!(got, expected, "{acc_log} {probs:?} {stream:?}");
+            long += usize::from(expected.is_some_and(|w| w.len() > 100));
+        }
+        assert!(long > 100, "{long}");
     }
 
     /// The table of pairs decodes what the single symbols' table does, bit for bit, whatever
@@ -919,7 +987,11 @@ mod tests {
             // The entries as the table was filled before, a symbol at a time.
             let mut expected = Vec::new();
             for bits in (1..=MAX_MAX_NUM_BITS).rev() {
-                for (symbol, _) in table.bits.iter().enumerate().filter(|(_, b)| **b == bits) {
+                for (symbol, _) in weights[..=last]
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &w)| w > 0 && max_bits + 1 - w == bits)
+                {
                     let len = 1 << (MAX_MAX_NUM_BITS - bits);
                     expected.extend(core::iter::repeat_n((symbol as u8, bits), len));
                 }
@@ -927,7 +999,7 @@ mod tests {
             let got: Vec<_> = table
                 .decode
                 .iter()
-                .map(|e| (e.symbol, e.num_bits))
+                .map(|&[symbol, num_bits]| (symbol, num_bits))
                 .collect();
             assert_eq!(got, expected);
             table.build_pairs();

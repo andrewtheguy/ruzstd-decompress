@@ -1203,6 +1203,85 @@ against M: natively −1.8%, in wasm +0.9%. Every workload:
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on stable) found
   nothing.
 
+## 2026-11-05: the Huffman tables' build
+
+The question: natively, ruzstd-decompress took 1.24 times libzstd's time on the GitHub
+sample set's small frames (run 18), where nearly every frame builds a Huffman table: 8,857
+tables a pass for 9,114 frames, every one with FSE-coded weights (125 of them, 38 not 0) and
+codes of up to 8 bits.
+
+Profiles on lab2 (perf, `github.frames`, `main` at `6f431ba`, against libzstd 1.5.7), ms a
+pass:
+
+| | ruzstd-decompress | libzstd |
+|---|---:|---:|
+| the Huffman tables' build, their weights read | 11.5 | 8.3 |
+| the literals' decoding | 4.8 | 5.6 |
+| the sequences, their tables and descriptions | 5.8 | 3.9 |
+| the pass | 24.5 | 19.6 |
+
+In the build:
+- **The fill**, 11% of the pass: LLVM stored the entries, a struct of two bytes, a byte at a
+  time, 128 single-byte stores for each code of 5 bits. Aligned to 2 bytes, or as a `u16`,
+  they were stored two bytes at a time wherever LLVM unrolled a code's copies (codes of 5 to 9
+  bits).
+- **The FSE-coded weights**, 15%: two decoders and a general reader, their state reloaded
+  from and stored to the stack for each weight, and the weights pushed to a `Vec`.
+- **Counting and sorting the weights**, 6% and more: each over every symbol, a chain of
+  increments through memory of the count of weight 0, most symbols', each waiting on the one
+  before; and three more passes over them, for their sum, their codes' lengths and those
+  lengths' counts.
+
+The variants, natively (quick checks, three rounds, a few workloads):
+
+| | | `github.frames` |
+|---|---|---:|
+| N | `main` at `6f431ba` | 24.5 |
+| H1 | N, the entries `[u8; 2]`, filled four at a time as a `u64` (16-byte stores where LLVM merges them) | 22.5 |
+| H2 | H1, the weights read from a local copy of their stream by bit position, one load a read; the weights, lengths and ranks locals of the build, in one pass for their counts | 21.7 |
+| H3 | H2, the counts and the sort in four lanes of the symbols, four chains through memory | 22.3 |
+| H4 | H2, the symbols with a code listed first, the list's end in a register, then counted and sorted | 20.4 |
+| H5 | H4, the weights read from a window in a register, reloaded once fewer than two reads' bits are left | 18.7 |
+
+H3's lanes made the chains four times shorter, but their loop took about twice the
+instructions a symbol, and was no faster. H5 is the commit, **HT**:
+
+- The table's entries are `[u8; 2]`, whose bytes (`as_flattened_mut`) take a code's entries
+  as `u64`s.
+- The weights are decoded into an array on the stack, from a window that the two states read
+  from in turn, over a copy of their stream after 8 zero bytes, which read as the zeros past
+  its start. A test checks them against the two decoders on a `BitReaderReversed`, for random
+  tables and streams.
+- The weights, their counts and the sorted symbols are locals of the build. Before, the table
+  kept them, and a frame using a dictionary copied them in with its table.
+- `FSEDecoder` and the FSE table's own table of states served only the weights, and are gone;
+  the FSE table is now the description its users build their tables from.
+
+The full run, on lab2 after a restart (run 19). Every variant decoded every workload to the
+same output.
+
+| workload | native N | native HT | wasm N | wasm HT | libzstd |
+|---|---:|---:|---:|---:|---:|
+| GitHub, small frames | 24.63 | **18.76 (−23.8%)** | 32.09 | **25.50 (−20.6%)** | 19.57 |
+| GitHub, with the dictionary | 6.17 | **5.74 (−6.9%)** | 9.94 | **9.44 (−5.0%)** | 3.65 |
+| terminal 2880x1800@2 | 1.09 | **1.01 (−6.6%)** | 1.40 | **1.32 (−5.4%)** | 1.67 |
+| `x-ray` `-1` | 10.46 | 10.72 (+2.5%) | 13.34 | 12.55 (−5.9%) | 8.85 |
+| silesia `-3` | 273.82 | 274.61 (+0.3%) | 372.07 | 365.61 (−1.7%) | 197.47 |
+| silesia `-19` | 291.14 | 294.38 (+1.1%) | 378.03 | 391.07 (+3.5%) | 204.61 |
+| video clip, raw blocks | 15.10 | 15.23 (+0.9%) | 15.06 | 16.45 (+9.2%) | 19.03 |
+
+ms a pass. Mixed, `nci` and `--fast=4` are within 1.5% both ways. Geomean against N: natively
+−3.5%, in wasm −2.8%. Every workload:
+[`results/run19-huffman-build.md`](results/run19-huffman-build.md).
+
+- silesia `-19` in wasm, run again alone, N and HT in turn five times: HT 375.9 ms to N's
+  388.9 (medians), each ranging over 6–12%. It builds at most one table a 128 KB block. The video clip's raw blocks reach no Huffman table, and its spread in wasm is 8.6%.
+- Natively, ruzstd-decompress now takes 0.96 times libzstd's time on the small frames, from
+  1.24, and 1.57 times with the dictionary, from 1.67. What is left of the latter is mostly
+  the sequences (roadmap item 1).
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on stable) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

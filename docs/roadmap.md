@@ -1,18 +1,18 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-05 (after the
-sequences with the buffer's state in locals, run 18 of
+Huffman tables' build, run 19 of
 [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so.
 zDesk decodes in WebAssembly. The crate stays free of unsafe code.
 
-Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.20 times
-libzstd's time: 1.33–1.40 times on Silesia but `x-ray` (1.19), 1.67 on the GitHub
-frames with their dictionary, 1.24 without. It is faster on the raw blocks of the
-video clip (0.86 times libzstd's time) and terminal's tiles (0.65). In wasm, the
-workloads take 1.2–1.4 times their native time, the dictionary frames 1.6; the video
-clip's raw blocks take 0.92 times.
+Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.15 times
+libzstd's time: 1.34–1.44 times on Silesia but `x-ray` (1.21), 1.57 on the GitHub
+frames with their dictionary. It is faster on the GitHub frames without it (0.96 times
+libzstd's time), the raw blocks of the video clip (0.80) and terminal's tiles (0.60). In
+wasm, the workloads take 1.2–1.4 times their native time, the dictionary frames 1.6;
+the video clip's raw blocks take 1.08 times.
 
 ## 1. The sequences, again
 
@@ -46,8 +46,10 @@ On uncover (lab1), which builds 847 sequence tables and 88 Huffman tables a pass
   Each build also zeroes about 1.5 KB of arrays on the stack.
 - Reading the tables' descriptions (`read_distribution`), 6%: still a chain
   from one value to the next, as in libzstd.
-- The Huffman tables' build, about 4%, half of it sorting the symbols by
-  length.
+- The Huffman tables' build was rewritten in run 19 (the GitHub frames 24%
+  faster natively); on those frames it is now a third of the pass, over a third of that
+  reading the FSE-coded weights, a chain from one state to the next as in
+  libzstd.
 - Not keeping a table that is the same as the last: no FSE-compressed
   description in terminal's, uncover's or browser's tiles is the same as the
   one before it of its kind (counted 2026-11-05, with each table keeping the

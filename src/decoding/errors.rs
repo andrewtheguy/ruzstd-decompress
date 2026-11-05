@@ -907,7 +907,6 @@ impl core::fmt::Display for SequencesHeaderParseError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum FSETableError {
-    AccLogIsZero,
     AccLogTooBig { got: u8, max: u8 },
     GetBitsError(GetBitsError),
     TooManySymbols { got: usize },
@@ -926,7 +925,6 @@ impl std::error::Error for FSETableError {
 impl core::fmt::Display for FSETableError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            FSETableError::AccLogIsZero => write!(f, "Acclog must be at least 1"),
             FSETableError::AccLogTooBig { got, max } => {
                 write!(
                     f,
@@ -987,8 +985,6 @@ impl From<GetBitsError> for FSEDecoderError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum HuffmanTableError {
-    GetBitsError(GetBitsError),
-    FSEDecoderError(FSEDecoderError),
     FSETableError(FSETableError),
     SourceIsEmpty,
     NotEnoughBytesForWeights {
@@ -1004,10 +1000,6 @@ pub enum HuffmanTableError {
     MissingWeights,
     LeftoverIsNotAPowerOf2 {
         got: u32,
-    },
-    NotEnoughBytesToDecompressWeights {
-        have: usize,
-        need: usize,
     },
     FSETableUsedTooManyBytes {
         used: usize,
@@ -1029,8 +1021,6 @@ pub enum HuffmanTableError {
 impl StdError for HuffmanTableError {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match self {
-            HuffmanTableError::GetBitsError(source) => Some(source),
-            HuffmanTableError::FSEDecoderError(source) => Some(source),
             HuffmanTableError::FSETableError(source) => Some(source),
             _ => None,
         }
@@ -1040,8 +1030,6 @@ impl StdError for HuffmanTableError {
 impl core::fmt::Display for HuffmanTableError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         match self {
-            HuffmanTableError::GetBitsError(e) => write!(f, "{e:?}"),
-            HuffmanTableError::FSEDecoderError(e) => write!(f, "{e:?}"),
             HuffmanTableError::FSETableError(e) => write!(f, "{e:?}"),
             HuffmanTableError::SourceIsEmpty => write!(f, "Source needs to have at least one byte"),
             HuffmanTableError::NotEnoughBytesForWeights {
@@ -1070,12 +1058,6 @@ impl core::fmt::Display for HuffmanTableError {
             }
             HuffmanTableError::LeftoverIsNotAPowerOf2 { got } => {
                 write!(f, "Leftover must be power of two but is: {got}")
-            }
-            HuffmanTableError::NotEnoughBytesToDecompressWeights { have, need } => {
-                write!(
-                    f,
-                    "Not enough bytes in stream to decompress weights. Is: {have}, Should be: {need}",
-                )
             }
             HuffmanTableError::FSETableUsedTooManyBytes {
                 used,
@@ -1106,18 +1088,6 @@ impl core::fmt::Display for HuffmanTableError {
                 )
             }
         }
-    }
-}
-
-impl From<GetBitsError> for HuffmanTableError {
-    fn from(val: GetBitsError) -> Self {
-        Self::GetBitsError(val)
-    }
-}
-
-impl From<FSEDecoderError> for HuffmanTableError {
-    fn from(val: FSEDecoderError) -> Self {
-        Self::FSEDecoderError(val)
     }
 }
 
