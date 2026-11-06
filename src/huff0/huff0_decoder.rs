@@ -311,10 +311,10 @@ impl HuffmanTable {
     /// bits out. Both bytes of the entry are written; the second is only kept, `*at` moved past
     /// it, when the entry holds two symbols, else the next entry overwrites it.
     #[inline(always)]
-    fn decode_pair_aligned(
+    fn decode_pair_aligned<const N: usize>(
         pairs: &[PairEntry; TABLE_SIZE],
         window: &mut u64,
-        out: &mut [u8; PAIRS_OUT],
+        out: &mut [u8; N],
         at: &mut usize,
     ) {
         let entry = pairs[(*window >> (64 - MAX_MAX_NUM_BITS)) as usize];
@@ -323,15 +323,17 @@ impl HuffmanTable {
         *at += entry.len();
     }
 
-    /// [`Self::decode_4_streams`] from the table of pairs, [`PAIRS_A_REFILL`] lookups a stream a
-    /// refill, while every stream has [`PAIRS_OUT`] bytes of output left to take them and can
-    /// refill fast; then each stream on its own (see [`Self::decode_stream_pairs`]).
+    /// [`Self::decode_4_streams`] from the table of pairs, in rounds of [`PAIRS_ROUND`] refills
+    /// and [`PAIRS_A_REFILL`] lookups a stream after each, while every stream has the output a
+    /// round's lookups may write to and can refill fast that many times; then each stream on its
+    /// own (see [`Self::decode_stream_pairs`]).
     fn decode_4_streams_pairs(&self, brs: &mut [BitReaderReversed<'_>; 4], outs: [&mut [u8]; 4]) {
         let pairs = self.pairs();
         let [out0, out1, out2, out3] = outs;
         let [mut b0, mut b1, mut b2, mut b3] = brs.clone();
         let (mut at0, mut at1, mut at2, mut at3) = (0, 0, 0, 0);
-        let can_refill = |b: [&BitReaderReversed<'_>; 4]| b.iter().all(|b| b.can_refill_fast());
+        let can_refill =
+            |b: [&BitReaderReversed<'_>; 4]| b.iter().all(|b| b.can_refill_fast_times(PAIRS_ROUND));
         if can_refill([&b0, &b1, &b2, &b3]) {
             b0.ensure_bits_fast(57);
             b1.ensure_bits_fast(57);
@@ -343,19 +345,28 @@ impl HuffmanTable {
                 b2.sentinel_window(),
                 b3.sentinel_window(),
             );
-            // While every stream has the output a refill's lookups may write to.
+            // While every stream has the output a round's lookups may write to.
             while let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
-                room(out0, at0),
-                room(out1, at1),
-                room(out2, at2),
-                room(out3, at3),
+                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out0, at0),
+                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out1, at1),
+                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out2, at2),
+                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out3, at3),
             ) {
                 let (mut d0, mut d1, mut d2, mut d3) = (0, 0, 0, 0);
-                for _ in 0..PAIRS_A_REFILL {
-                    Self::decode_pair_aligned(pairs, &mut w0, c0, &mut d0);
-                    Self::decode_pair_aligned(pairs, &mut w1, c1, &mut d1);
-                    Self::decode_pair_aligned(pairs, &mut w2, c2, &mut d2);
-                    Self::decode_pair_aligned(pairs, &mut w3, c3, &mut d3);
+                for refill in 0..PAIRS_ROUND {
+                    // The check before the round's first refill was for all of its refills.
+                    if refill > 0 {
+                        w0 = b0.refill_window_fast(w0);
+                        w1 = b1.refill_window_fast(w1);
+                        w2 = b2.refill_window_fast(w2);
+                        w3 = b3.refill_window_fast(w3);
+                    }
+                    for _ in 0..PAIRS_A_REFILL {
+                        Self::decode_pair_aligned(pairs, &mut w0, c0, &mut d0);
+                        Self::decode_pair_aligned(pairs, &mut w1, c1, &mut d1);
+                        Self::decode_pair_aligned(pairs, &mut w2, c2, &mut d2);
+                        Self::decode_pair_aligned(pairs, &mut w3, c3, &mut d3);
+                    }
                 }
                 at0 += d0;
                 at1 += d1;
@@ -393,7 +404,7 @@ impl HuffmanTable {
         if b.can_refill_fast() {
             b.ensure_bits_fast(57);
             let mut w = b.sentinel_window();
-            while let Some(c) = room(out, at) {
+            while let Some(c) = room::<PAIRS_OUT>(out, at) {
                 let mut d = 0;
                 for _ in 0..PAIRS_A_REFILL {
                     Self::decode_pair_aligned(pairs, &mut w, c, &mut d);
@@ -777,6 +788,12 @@ impl PairEntry {
 /// `MAX_MAX_NUM_BITS` bits, of the 56 a refill leaves.
 const PAIRS_A_REFILL: usize = 56 / MAX_MAX_NUM_BITS as usize;
 
+/// The refills of a round of the four streams' loop from the table of pairs, which checks the
+/// output's room and the sources' bytes left once a round: natively 4, with which x-ray and
+/// mixed's tiles decoded 7% and 3–5% faster than with 1 (lab2, 2026-11-05); in wasm 1, V8's
+/// code for 2 or more being 10–17% slower.
+const PAIRS_ROUND: usize = if cfg!(target_family = "wasm") { 1 } else { 4 };
+
 /// The output a stream needs left for a refill's lookups from the table of pairs: two bytes
 /// each, and every one written at most two past the last.
 const PAIRS_OUT: usize = 2 * PAIRS_A_REFILL;
@@ -823,9 +840,9 @@ fn choose_pairs(regenerated: usize, compressed: usize) -> bool {
     pairs + (pairs >> 5) < single
 }
 
-/// The [`PAIRS_OUT`] bytes of `out` from `at`, if it has them.
+/// The `N` bytes of `out` from `at`, if it has them.
 #[inline(always)]
-fn room(out: &mut [u8], at: usize) -> Option<&mut [u8; PAIRS_OUT]> {
+fn room<const N: usize>(out: &mut [u8], at: usize) -> Option<&mut [u8; N]> {
     out.get_mut(at..)?.first_chunk_mut()
 }
 
