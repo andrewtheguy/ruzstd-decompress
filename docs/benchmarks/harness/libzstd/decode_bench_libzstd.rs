@@ -53,16 +53,29 @@ fn load_tiles(path: &str, most: usize) -> (Vec<u8>, Vec<Tile>) {
     (data, tiles)
 }
 
+/// The decoders and the bitmap's buffer, made once for all the passes, as the
+/// ruzstd-decompress harness's `Session` is.
+struct Session {
+    planar: zstd::bulk::Decompressor<'static>,
+    bitmap: Vec<u8>,
+    still: Decoder<'static>,
+}
+
+impl Session {
+    fn new() -> Session {
+        let mut still = Decoder::new().unwrap();
+        still.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(STILL_WINDOW_LOG_MOST)).unwrap();
+        Session { planar: zstd::bulk::Decompressor::new().unwrap(), bitmap: Vec::new(), still }
+    }
+}
+
 /// The tiles decoded by libzstd: a planar tile's frame in one call into a
 /// buffer of the most it can be, and the still stream's bodies fed in order to
 /// one streaming context, the bitmap what each body's blocks put out. One
 /// context for every planar tile and one for the still stream, reset for a new
 /// stream, as the ruzstd-decompress harness keeps its decoders.
-fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
-    let mut planar = zstd::bulk::Decompressor::new().unwrap();
-    let mut bitmap: Vec<u8> = Vec::new();
-    let mut still = Decoder::new().unwrap();
-    still.set_parameter(zstd::zstd_safe::DParameter::WindowLogMax(STILL_WINDOW_LOG_MOST)).unwrap();
+fn replay(data: &[u8], tiles: &[Tile], session: &mut Session, check: bool) -> (u64, u64) {
+    let Session { planar, bitmap, still } = session;
     let mut in_still = false;
     let (mut out, mut hash) = (0u64, 0xcbf29ce484222325u64);
     for t in tiles {
@@ -71,7 +84,7 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
         bitmap.clear();
         bitmap.reserve(most);
         if t.kind == 0 {
-            planar.decompress_to_buffer(body, &mut bitmap).unwrap();
+            planar.decompress_to_buffer(body, bitmap).unwrap();
         } else {
             if body.starts_with(&ZSTD_MAGIC) {
                 // A session reset: the window's most stays set.
@@ -79,7 +92,7 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
                 in_still = true;
             }
             assert!(in_still, "a body that continues no stream");
-            let d = &mut still;
+            let d = &mut *still;
             bitmap.resize(most, 0);
             let mut input = InBuffer::around(body);
             let mut output = OutBuffer::around(&mut bitmap[..]);
@@ -100,7 +113,7 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
         }
         out += bitmap.len() as u64;
         if check {
-            for &x in &bitmap {
+            for &x in bitmap.iter() {
                 hash = (hash ^ u64::from(x)).wrapping_mul(0x100000001b3);
             }
         }
@@ -198,9 +211,10 @@ fn main() {
             let most = args.get(3).map_or(usize::MAX, |s| s.parse().unwrap());
             let (data, tiles) = load_tiles(path, most);
             let bytes_in: usize = tiles.iter().map(|t| t.len).sum();
-            let (out, hash) = replay(&data, &tiles, true);
+            let mut session = Session::new();
+            let (out, hash) = replay(&data, &tiles, &mut session, true);
             let times = time(|| {
-                black_box(replay(&data, &tiles, false));
+                black_box(replay(&data, &tiles, &mut session, false));
             });
             (times, bytes_in as u64, out, format!("\"{hash:016x}\""))
         }
