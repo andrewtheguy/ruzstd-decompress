@@ -1486,6 +1486,117 @@ natively −3.1%, in wasm +0.1%. Every workload:
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
   AddressSanitizer) found nothing.
 
+## 2026-11-05: the table of pairs' rounds
+
+The question: after run 21, where is the rest of the gap to libzstd, and is any of it in
+the longer sequences' copies or the table builds, the roadmap's next items?
+
+Sampled on lab2 (`perf record`, `main` at `4b694db`, against libzstd 1.5.7), a pass:
+
+- **silesia `-3`**: 236 M cycles more than libzstd, 225 M of them the sequences' decoding
+  and execution (726 M to 501 M). That is their instructions (3,625 M to 2,408 M for the
+  whole pass, `perf stat`), at more of them a cycle (3.9 to 3.2); the cache misses, the
+  loads stalled on a store and the TLB misses are much the same as libzstd's. The longer
+  sequences' copies are about 10 of the 245 instructions a sequence (callgrind).
+- **mixed's tiles**: 2,408 M cycles to 2,037 M. The sequences 767 M to 615 M; the Huffman
+  decoding 754 M to 643 M, nearly all of it the four streams' loop from the table of pairs
+  (about 650 M, libzstd's assembly loop for its pairs about 540 M); the Huffman tables
+  108 M to 64 M; the sequence tables 68 M to 59 M.
+- **the GitHub frames**: 70 M to 73 M; the Huffman tables 25 M to 31 M, the sequence tables
+  4 M to 5 M. With their dictionary, 18 M to 14 M, the gap the sequences'.
+
+So the table of pairs' loop. On `x-ray`, which it decodes nearly all of, one pass is
+7.84 M lookups, and the loop (`decode_4_streams_sized`, callgrind) 145.0 M instructions,
+18.5 a lookup: about 11 the lookup's own, a third of those loads and stores of the stack,
+since the four windows, the four output chunks, their offsets and the table are more than
+the registers hold; and a round of 5 lookups a stream cost about 45 more checking each
+stream's output room, 11 checking its source's bytes, and 16 a refill, with its bounds
+checks. libzstd's assembly loop takes about 9 a lookup.
+
+The variants (lab2, `perf stat`, a pass on `x-ray`, natively; mixed's counts move by up to
+4% from one run to the next, more than most of these differ):
+
+| | | instructions | cycles |
+|---|---|---:|---:|
+| K0 | `main` at `4b694db` | 159.3 M | 38.3 M |
+| K1 | the entry's bits at its lowest, for the shift's count as loaded | 156.1 M | 38.6 M |
+| K2 | K1, each round's lookups into an array on the stack, then copied out | 155.4 M | 41.3 M |
+| K3 | K1, a round two refills, its checks once | 153.6 M | 37.2 M |
+| K4 | K3, the entry in bytes of their own, each loaded on its own | 153.8 M | 42.7 M |
+| K5 | K3 without K1 | | |
+
+- **K1** made a window live on the stack, its shifts read and written in memory.
+- **K2** freed the output chunks' registers and stalled on its copies' loads, each over
+  several of the round's stores.
+- **K4** took 1 instruction a lookup fewer than K3 (11.5, callgrind) and its tables' build
+  7 M more; it ran 14% more cycles on `x-ray`.
+- **K5** was as fast as K3 (`quick.sh`, four rounds), so K1 is not kept.
+
+Then the round's refills as a constant (`quick.sh`, ms a pass, median of four rounds,
+natively; two runs):
+
+| refills a round | `x-ray` | mixed | `x-ray` | mixed |
+|---|---:|---:|---:|---:|
+| 1 (K0) | 10.37 | 502 | 10.42 | 516 |
+| 2 | 9.91 | 494 | | |
+| 3 | 9.73 | 498 | | |
+| 4 | 9.60 | 487 | 9.68 | 488 |
+| 6 | | | 9.75 | 508 |
+| 8 | | | 9.66 | 494 |
+
+In wasm 2 or more were 10–17% slower in V8 (with 2, mixed 728 ms to 664, `x-ray` 16.0 to
+13.7), though K3's two refills written out were not.
+
+The commit (HR): natively, the four streams' loop from the table of pairs takes 4 refills a
+round, 5 lookups a stream after each, checking each stream's output room and its source's
+bytes (`can_refill_fast_times`) once a round; in wasm 1, as before. The lookup and the
+room take the chunk's size as a parameter. Its wasm ran the same instructions as K0's
+under Node (194 M a pass on `x-ray`, 43.26 G over the whole run on mixed), in the same
+cycles to within a run's spread.
+
+On lab2 (`perf stat`, one run of each, a pass, natively):
+
+| workload | K0 instructions | HR instructions | K0 cycles | HR cycles | libzstd cycles |
+|---|---:|---:|---:|---:|---:|
+| `x-ray` | 159.3 M | 137.9 M (−13.4%) | 38.1 M | 35.0 M (−8.0%) | 31.8 M |
+| mixed 2880x1800@2 | 7,068 M | 6,576 M (−7.0%) | 2,223 M | 2,105 M (−5.3%) | 1,838 M |
+| silesia `-3` | 3,625 M | 3,604 M (−0.6%) | 987 M | 946 M (within its spread) | 727 M |
+| `nci` | 293.6 M | 293.3 M | 88.2 M | 88.8 M | 70.6 M |
+| GitHub, small frames | 198.0 M | 198.0 M | 69.0 M | 70.2 M | 71.5 M |
+| terminal 2880x1800@2 | 11.19 M | 11.19 M | 3.73 M | 3.76 M | 6.25 M |
+
+On `x-ray` (callgrind) the loop went from 145.0 M instructions to 123.5 M, 15.8 a lookup,
+and the pass from 187.6 M to 166.2 M. The GitHub frames and terminal's tiles, whose
+literals are small, run the same instructions.
+
+The full run, on lab2 after a restart (run 22). Every variant decoded every workload to the
+same output.
+
+| workload | native K0 | native HR | wasm K0 | wasm HR | libzstd |
+|---|---:|---:|---:|---:|---:|
+| `x-ray` | 10.99 | **9.68 (−11.9%)** | 13.32 | 13.19 (−1.0%) | 8.91 |
+| mixed 2880x1800@2 | 501.79 | 494.55 (−1.4%) | 672.25 | 703.03 (+4.6%) | 414.92 |
+| silesia `-3` | 261.04 | 254.91 (−2.3%) | 368.71 | 368.05 (−0.2%) | 197.12 |
+| `nci` | 25.14 | 23.83 (−5.2%) | 34.28 | 32.53 (−5.1%) | 19.05 |
+| GitHub, with the dictionary | 4.71 | 4.70 (−0.4%) | 8.63 | 8.56 (−0.8%) | 3.75 |
+| GitHub, small frames | 18.48 | 18.87 (+2.1%) | 25.38 | 26.12 (+2.9%) | 19.58 |
+| terminal 2880x1800@2 | 1.03 | 1.02 (−0.8%) | 1.30 | 1.33 (+2.3%) | 1.65 |
+
+ms a pass. Silesia `-19` and `--fast=4` and the video clip are within 2.5% natively; in wasm
+`-19` −5.6% and the video clip −7.3%, over spreads of 7–13%. Geomean against K0: natively
+−1.6%, in wasm −1.1%. Every workload: [`results/run22-huf.md`](results/run22-huf.md).
+K0's spread on `x-ray` was 16%.
+
+- The wasm build's code is as it was, so its differences are the runs' spread: on mixed,
+  K0 and HR in turn three times each under `perf stat` took 667–686 ms and 669–710, in
+  12.57–12.93 G cycles and 12.63–13.17 G, at the same instructions. Natively on mixed,
+  HR took 489–492 ms to K0's 504–513.
+- `nci`'s −5% (natively and in wasm) is not the change: it runs the same instructions.
+- Natively, ruzstd-decompress now takes 1.09 times libzstd's time on `x-ray`, from 1.21 in
+  run 21, and 1.19 on mixed's tiles, from 1.22; 1.07 by geomean over the workloads.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
+  AddressSanitizer) found nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
