@@ -261,11 +261,15 @@ fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
                         usize::from(ml.next_state) + take_bits(&mut window, ml.nb_bits) as usize;
                     of_state =
                         usize::from(of.next_state) + take_bits(&mut window, of.nb_bits) as usize;
-                    let slow = run.execute(
-                        ll.base_value + ll_add as u32,
-                        ml.base_value + ml_add as u32,
-                        of.base_value + of_add as u32,
-                    );
+                    // SAFETY: the executor is used only through `run` until `finish_raw`,
+                    // and a new run is made after each use of it.
+                    let slow = unsafe {
+                        run.execute(
+                            ll.base_value + ll_add as u32,
+                            ml.base_value + ml_add as u32,
+                            of.base_value + of_add as u32,
+                        )
+                    };
                     match slow {
                         Ok(None) => {}
                         Ok(Some(slow)) => {
@@ -291,11 +295,14 @@ fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
                     window = unsafe { refill_raw(&mut ip, window) };
                 }
                 let ll_add = take_bits(&mut window, ll.nb_add_bits);
-                let slow = run.execute(
-                    ll.base_value + ll_add as u32,
-                    ml.base_value + ml_add as u32,
-                    of.base_value + of_add as u32,
-                );
+                // SAFETY: as in the loop above.
+                let slow = unsafe {
+                    run.execute(
+                        ll.base_value + ll_add as u32,
+                        ml.base_value + ml_add as u32,
+                        of.base_value + of_add as u32,
+                    )
+                };
                 match slow {
                     Ok(None) => {}
                     Ok(Some(slow)) => {

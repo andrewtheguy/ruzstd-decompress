@@ -203,8 +203,14 @@ pub struct RawRun {
 impl RawRun {
     /// Copy the literals of a sequence and then its match to the end of the buffer, or return
     /// what [`SequenceExecutor::execute_slow`] is to copy, once the run is finished.
+    ///
+    /// # Safety
+    ///
+    /// The executor this run came from, its decode buffer, the ring's buffer and the
+    /// dictionary's content must not have been used, moved, grown or freed since
+    /// [`SequenceExecutor::raw_run`] made the run: the run writes through pointers into them.
     #[inline(always)]
-    pub fn execute(
+    pub unsafe fn execute(
         &mut self,
         ll: u32,
         ml: u32,
@@ -222,7 +228,8 @@ impl RawRun {
         }
         let lit = self.lit;
         // SAFETY: `ll_len` literals are left, and `LITERALS_PADDING` bytes after them, which
-        // is `WILD`; the literals are not in the ring. The offset is at least 1.
+        // is `WILD`; the literals are not in the ring. The offset is at least 1. The ring and
+        // the dictionary are as `raw_run` found them, as this function's caller ensures.
         let done = unsafe {
             self.lit = lit.add(ll_len);
             self.out.push_sequence(lit, ll_len, offset, ml_len)

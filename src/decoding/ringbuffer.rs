@@ -733,7 +733,9 @@ impl RawWriter {
     /// # Safety
     ///
     /// `lit` must be valid for reads of `ll + WILD` bytes, outside the ring, and `offset` at
-    /// least 1.
+    /// least 1. The ring this writer came from ([`RingBuffer::raw_writer`]) and the dictionary
+    /// given to it must not have been used, moved, grown or freed since, but through this
+    /// writer: it writes and reads through pointers into them.
     #[inline(always)]
     pub unsafe fn push_sequence(
         &mut self,
@@ -1214,7 +1216,8 @@ mod tests {
                             (0..ll + WILD).map(|_| next(256) as u8).collect();
                         let offset = 1 + next(model.len() + ll + d.len() + 8);
                         let ml = 3 + next(60);
-                        // SAFETY: `padded` holds `ll + WILD` bytes; the offset is at least 1.
+                        // SAFETY: `padded` holds `ll + WILD` bytes; the offset is at least 1;
+                        // nothing touches `rb` or `dict` until the writer is finished.
                         let done = unsafe { writer.push_sequence(padded.as_ptr(), ll, offset, ml) };
                         if done {
                             taken += 1;
