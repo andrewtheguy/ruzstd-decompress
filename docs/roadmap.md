@@ -1,8 +1,7 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-06 (after the
-tiles' decoders kept across the passes, run 24 of
-[`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
+table of pairs' checks, run 25 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so.
 zDesk decodes in WebAssembly. The crate stays free of unsafe code.
@@ -99,11 +98,6 @@ On uncover (lab1), which builds 847 sequence tables and 88 Huffman tables a pass
   weight. Listing the symbols in the weights' loop, which has room for it, was no clear
   gain (harness medians, five rounds): the GitHub frames 1.8% faster natively and 1.0% in
   wasm, terminal's tiles 1.1% slower both ways, all within the spread.
-- Not keeping a table that is the same as the last: no FSE-compressed
-  description in terminal's, uncover's or browser's tiles is the same as the
-  one before it of its kind (counted 2026-11-05, with each table keeping the
-  bytes it was built from); the repeats counted before were of the predefined
-  tables, which are kept already.
 
 ## 3. The Huffman loops
 
@@ -140,20 +134,3 @@ to the next (the window's shift, the index, the entry's load, its multiplier, th
 multiplication): fewer instructions off that chain save little. The four output positions
 in a vector (LLVM's SLP vectorizer) are faster in V8 than without (run 25). Refilling the
 sequences' fast loop the same way put the tail's length on its chain, and was slower.
-
-## 4. Smaller
-
-- The frame checksum (XXH64, the `twox-hash` crate) is made only for frames
-  with a checksum now; of the workloads, only the general corpora's have one
-  (the `zstd` command's default), none of the tiles'.
-- The harness's own function (`decode_bench`'s `replay`) is mostly decoder
-  code inlined into it. In V8 it was 35% of terminal's tiles before run 24,
-  nearly all the sequences' fast loop (lab2, 2026-11-06), which counts with
-  item 1. Until run 24 it made the tiles' decoders anew each pass, growing
-  their rings from empty: 18% of terminal's instructions natively, which
-  zDesk, keeping its decoders for the session, does not pay. What is left of
-  libc there natively (13%) is copying: the still stream's bodies to the
-  bitmap, the long matches, and `read_to_end` zeroing its buffer (under 1%).
-- The ring buffer's lazy initialisation cost silesia 2–4% in wasm in the
-  quick checks before (not in a full run), with nothing in V8's profile to
-  show where.
