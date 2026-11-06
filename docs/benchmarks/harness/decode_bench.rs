@@ -228,6 +228,9 @@ fn main() {
             let bytes_in: usize = tiles.iter().map(|t| t.len).sum();
             let mut session = Session::new();
             let (out, hash) = replay(&data, &tiles, &mut session, true);
+            // Again by the same, reused, decoders, as the timed passes are: the same bitmaps.
+            let again = replay(&data, &tiles, &mut session, true);
+            assert_eq!(again, (out, hash), "a reused session decoded differently");
             let times = time(|| {
                 black_box(replay(&data, &tiles, &mut session, false));
             });
