@@ -2,9 +2,9 @@ use super::super::blocks::sequence_section::ModeType;
 use super::super::blocks::sequence_section::Sequence;
 use super::super::blocks::sequence_section::SequencesHeader;
 use super::scratch::FSEScratch;
+use super::sequence_table::{ALL, SeqEntry, SeqKind, at};
 #[cfg(test)]
 use super::sequence_table::{LL_DEFAULT_ACC_LOG, LL_DEFAULT_DISTRIBUTION};
-use super::sequence_table::{SIZE, SeqEntry, SeqKind, at};
 use crate::bit_io::BitReaderReversed;
 use crate::bit_io::refill_raw;
 use crate::bit_io::{PADDED_LEFT, PADDING};
@@ -45,12 +45,14 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
     }
 
     // An RLE table is a table of one state that reads no bits, so it needs no case of its own.
-    let (ll_log, ll_table) = scratch.ll.states()?;
-    let (of_log, of_table) = scratch.of.states()?;
-    let (ml_log, ml_table) = scratch.ml.states()?;
-    let ll_state = br.get_bits(ll_log) as usize;
-    let of_state = br.get_bits(of_log) as usize;
-    let ml_state = br.get_bits(ml_log) as usize;
+    // The three tables are one array, and a state an index into it (see `SeqTables`).
+    let (ll_log, ll_start) = scratch.seq.first_state(SeqKind::LiteralLength)?;
+    let (of_log, of_start) = scratch.seq.first_state(SeqKind::Offset)?;
+    let (ml_log, ml_start) = scratch.seq.first_state(SeqKind::MatchLength)?;
+    let table = scratch.seq.entries()?;
+    let ll_state = ll_start + br.get_bits(ll_log) as usize;
+    let of_state = of_start + br.get_bits(of_log) as usize;
+    let ml_state = ml_start + br.get_bits(ml_log) as usize;
 
     // Every sequence but the last, while the source has room for two refills, from the reader's
     // bits as a window (see `BitReaderReversed::sentinel_window`): a refill after each sequence
@@ -65,13 +67,12 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
     // on a padded copy of what is left, which may read past that start: what it decodes from
     // there is undone with the block when the bits remaining are checked after it.
     let mut seq_idx = 0;
-    let tables = [ll_table, ml_table, of_table];
     let mut states = [ll_state, ml_state, of_state];
     // One call for both, so that a small block pays for the loop's setup once.
     if fast_sequences::<E>(
         &mut br,
         &mut padded,
-        tables,
+        table,
         &mut states,
         executor,
         &mut seq_idx,
@@ -82,9 +83,9 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
     let [mut ll_state, mut ml_state, mut of_state] = states;
 
     for seq_idx in seq_idx..section.num_sequences {
-        let ll = at(ll_table, ll_state);
-        let ml = at(ml_table, ml_state);
-        let of = at(of_table, of_state);
+        let ll = at(table, ll_state);
+        let ml = at(table, ml_state);
+        let of = at(table, of_state);
 
         let (of_add, ml_add, ll_add) =
             br.get_bits_triple(of.nb_add_bits, ml.nb_add_bits, ll.nb_add_bits);
@@ -136,7 +137,7 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
 fn fast_sequences<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
     br: &mut BitReaderReversed<'x>,
     padded: &'x mut [u8; PADDING + PADDED_LEFT],
-    tables: [&[SeqEntry; SIZE]; 3],
+    table: &[SeqEntry; ALL],
     states: &mut [usize; 3],
     executor: &mut SequenceExecutor<'_>,
     seq_idx: &mut u32,
@@ -146,10 +147,10 @@ fn fast_sequences<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>
     if crate::common::cpu::has_bmi2() {
         // SAFETY: the processor has BMI2.
         return unsafe {
-            fast_sequences_bmi2(br, padded, tables, states, executor, seq_idx, num_sequences)
+            fast_sequences_bmi2(br, padded, table, states, executor, seq_idx, num_sequences)
         };
     }
-    fast_sequences_body(br, padded, tables, states, executor, seq_idx, num_sequences)
+    fast_sequences_body(br, padded, table, states, executor, seq_idx, num_sequences)
 }
 
 /// [`fast_sequences_body`] built with BMI2.
@@ -158,13 +159,13 @@ fn fast_sequences<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>
 fn fast_sequences_bmi2<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
     br: &mut BitReaderReversed<'x>,
     padded: &'x mut [u8; PADDING + PADDED_LEFT],
-    tables: [&[SeqEntry; SIZE]; 3],
+    table: &[SeqEntry; ALL],
     states: &mut [usize; 3],
     executor: &mut SequenceExecutor<'_>,
     seq_idx: &mut u32,
     num_sequences: u32,
 ) -> Result<bool, E> {
-    fast_sequences_body(br, padded, tables, states, executor, seq_idx, num_sequences)
+    fast_sequences_body(br, padded, table, states, executor, seq_idx, num_sequences)
 }
 
 /// The body of [`fast_sequences`]: on `br` while it can refill fast, then on its padded copy in
@@ -173,7 +174,7 @@ fn fast_sequences_bmi2<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
 fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
     br: &mut BitReaderReversed<'x>,
     padded: &'x mut [u8; PADDING + PADDED_LEFT],
-    [ll_table, ml_table, of_table]: [&[SeqEntry; SIZE]; 3],
+    table: &[SeqEntry; ALL],
     states: &mut [usize; 3],
     executor: &mut SequenceExecutor<'_>,
     seq_idx: &mut u32,
@@ -215,9 +216,9 @@ fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
                 while chunk > 0 {
                     // SAFETY: the chunk's count bounds the refills, as above.
                     window = unsafe { refill_raw(&mut ip, window) };
-                    let ll = at(ll_table, ll_state);
-                    let ml = at(ml_table, ml_state);
-                    let of = at(of_table, of_state);
+                    let ll = at(table, ll_state);
+                    let ml = at(table, ml_state);
+                    let of = at(table, of_state);
                     let of_add = take_bits(&mut window, of.nb_add_bits);
                     let ml_add = take_bits(&mut window, ml.nb_add_bits);
                     if of.nb_add_bits + ml.nb_add_bits + ll.nb_add_bits > 56 - 26 {
@@ -255,9 +256,9 @@ fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
             if left == 0 && ip as usize - src_addr >= 15 {
                 // SAFETY: as for a chunk of one.
                 window = unsafe { refill_raw(&mut ip, window) };
-                let ll = at(ll_table, ll_state);
-                let ml = at(ml_table, ml_state);
-                let of = at(of_table, of_state);
+                let ll = at(table, ll_state);
+                let ml = at(table, ml_state);
+                let of = at(table, of_state);
                 let of_add = take_bits(&mut window, of.nb_add_bits);
                 let ml_add = take_bits(&mut window, ml.nb_add_bits);
                 if of.nb_add_bits + ml.nb_add_bits + ll.nb_add_bits > 56 - 26 {
@@ -345,7 +346,7 @@ fn maybe_update_fse_tables(
             vprintln!("Updating ll table");
             vprintln!("Used bytes: {}", bytes);
             scratch
-                .ll
+                .seq
                 .build_from_fse(&scratch.literal_lengths, SeqKind::LiteralLength)?;
         }
         ModeType::RLE => {
@@ -357,11 +358,11 @@ fn maybe_update_fse_tables(
             if source[0] > MAX_LITERAL_LENGTH_CODE {
                 return Err(DecodeSequenceError::MissingByteForRleMlTable);
             }
-            scratch.ll.build_rle(source[0], SeqKind::LiteralLength);
+            scratch.seq.build_rle(source[0], SeqKind::LiteralLength);
         }
         ModeType::Predefined => {
             vprintln!("Use predefined ll table");
-            scratch.ll.build_predefined(SeqKind::LiteralLength)?;
+            scratch.seq.build_predefined(SeqKind::LiteralLength)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat ll table");
@@ -378,7 +379,7 @@ fn maybe_update_fse_tables(
             vprintln!("Used bytes: {}", bytes);
             bytes_read += bytes;
             scratch
-                .of
+                .seq
                 .build_from_fse(&scratch.offsets, SeqKind::Offset)?;
         }
         ModeType::RLE => {
@@ -390,11 +391,11 @@ fn maybe_update_fse_tables(
             if of_source[0] > MAX_OFFSET_CODE {
                 return Err(DecodeSequenceError::MissingByteForRleMlTable);
             }
-            scratch.of.build_rle(of_source[0], SeqKind::Offset);
+            scratch.seq.build_rle(of_source[0], SeqKind::Offset);
         }
         ModeType::Predefined => {
             vprintln!("Use predefined of table");
-            scratch.of.build_predefined(SeqKind::Offset)?;
+            scratch.seq.build_predefined(SeqKind::Offset)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat of table");
@@ -413,7 +414,7 @@ fn maybe_update_fse_tables(
             vprintln!("Updating ml table");
             vprintln!("Used bytes: {}", bytes);
             scratch
-                .ml
+                .seq
                 .build_from_fse(&scratch.match_lengths, SeqKind::MatchLength)?;
         }
         ModeType::RLE => {
@@ -425,11 +426,11 @@ fn maybe_update_fse_tables(
             if ml_source[0] > MAX_MATCH_LENGTH_CODE {
                 return Err(DecodeSequenceError::MissingByteForRleMlTable);
             }
-            scratch.ml.build_rle(ml_source[0], SeqKind::MatchLength);
+            scratch.seq.build_rle(ml_source[0], SeqKind::MatchLength);
         }
         ModeType::Predefined => {
             vprintln!("Use predefined ml table");
-            scratch.ml.build_predefined(SeqKind::MatchLength)?;
+            scratch.seq.build_predefined(SeqKind::MatchLength)?;
         }
         ModeType::Repeat => {
             vprintln!("Repeat ml table");
