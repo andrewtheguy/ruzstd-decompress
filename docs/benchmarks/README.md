@@ -1667,6 +1667,54 @@ unchanged.
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
   AddressSanitizer) found nothing; it runs the native build, whose code is unchanged.
 
+## 2026-11-06: the tiles' decoders kept across the passes
+
+The question: in wasm on terminal's tiles, 35% of the time is the harness's `replay`, and
+16% libc's `memmove` and `memset`. What are they?
+
+`replay`, in V8's code, is nearly all the sequences' fast loop, inlined into it (`perf`
+over `node --perf-prof`, a build of `main` at `6647a72`). The libc time is large copies
+(`memmove`), forward and backward, and `memset`. Natively (callgrind, the same harness),
+copying and zeroing were 44% of terminal's instructions. 11.3% was the ring buffer's
+`reserve_amortized` (17 a pass, each copying the ring's data to a buffer twice the size),
+and 6.3% its `init_ahead` zeroing the room it grew into (77 a pass). Neither should happen
+more than once for a decoder that is reused: a reset keeps the ring's capacity.
+
+`replay` made its two `FrameDecoder`s and the bitmap's buffer anew each pass. So every
+pass grew both rings from empty, the still stream's (with no content size, and a window of
+up to 8 MB) a doubling at a time from the 128 KB a frame is given at its start. zDesk's
+`WlshareTiles` keeps them for the session. Both harnesses (`decode_bench` and libzstd's)
+now make them once, in a `Session`, for all the passes. On terminal's tiles, a pass went
+from 21.97 M instructions to 17.71 M natively (callgrind, ten passes against six:
+`reserve_amortized` now runs 17 times in all, in the first). What is left of libc natively
+(13% of the samples) is copying: the still stream's bodies to the bitmap (6.8%), the long
+matches (2.4%), and `read_to_end` zeroing its buffer (0.8%).
+
+The full run, on lab2 after a restart (run 24): `main`'s code with the harness before (WS5)
+and after (NH), and libzstd's with each (Z, ZS). Every variant decoded every workload to the
+same output.
+
+| workload | native WS5 | native NH | wasm WS5 | wasm NH | Z | ZS |
+|---|---:|---:|---:|---:|---:|---:|
+| terminal 2880x1800@2 | 1.02 | **0.93 (−8.3%)** | 1.28 | **1.19 (−6.8%)** | 1.65 | 1.65 |
+| mixed 2880x1800@2 | 493.98 | 482.53 (−2.3%) | 674.34 | 668.78 (−0.8%) | 413.35 | 414.74 |
+
+ms a pass, the median of three rounds. The other workloads, whose harness and decoder are
+as they were, moved by up to 6.7% natively and 4.3% in wasm, mostly within their spreads;
+the GitHub frames beyond them (natively +3.0% over 0.9%; in wasm +1.8% over 0.6%, and with
+their dictionary +3.9% over 3.6%). Every workload:
+[`results/run24-session.md`](results/run24-session.md).
+
+- libzstd's times are as they were: its contexts do not grow a buffer a doubling at a time.
+- Natively, ruzstd-decompress now takes 0.57 times libzstd's time on terminal's tiles,
+  from 0.62, and 1.16 on mixed's, from 1.19; 1.06 by geomean over the workloads.
+- Tile results from before run 24 count the growth in every pass. They are not comparable
+  with those after it.
+- The decoder is unchanged. A frame's ring is given its window at the start, up to its
+  content size and a block, so that a header claiming a large frame costs nothing until
+  its data does. The still stream, whose size is not known, still grows from there: once
+  for a reused decoder, as in zDesk.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

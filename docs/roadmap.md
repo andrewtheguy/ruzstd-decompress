@@ -1,18 +1,18 @@
 # Roadmap
 
-What to make faster next, most promising first, as of 2026-11-05 (after the
-table of pairs' rounds, run 22 of
+What to make faster next, most promising first, as of 2026-11-06 (after the
+tiles' decoders kept across the passes, run 24 of
 [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so.
 zDesk decodes in WebAssembly. The crate stays free of unsafe code.
 
-Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.07 times
-libzstd's time: 1.29–1.31 times on Silesia but `nci` (1.25) and `x-ray` (1.09), 1.25 on
-the GitHub frames with their dictionary, 1.19 on mixed's tiles. It is faster on the GitHub
-frames without it (0.96 times libzstd's time), the raw blocks of the video clip (0.78) and
-terminal's tiles (0.62). In wasm, the workloads take 1.3–1.45 times their native time, the
-dictionary frames 1.8; the video clip's raw blocks take the same.
+Natively, by geomean over the 10 workloads (run 24), ruzstd-decompress takes 1.06 times
+libzstd's time: 1.23–1.32 times on Silesia but `x-ray` (1.09), 1.19 on the GitHub frames
+with their dictionary, 1.16 on mixed's tiles. It is as fast on the GitHub frames without it
+(1.00), and faster on the raw blocks of the video clip (0.77) and terminal's tiles (0.57).
+In wasm, the workloads take 1.27–1.48 times their native time, the dictionary frames 1.9;
+the video clip's raw blocks take the same.
 
 ## 1. The sequences, again
 
@@ -122,11 +122,13 @@ of 4 bytes, holding the multiplier, would save only that table's load.
   with a checksum now; of the workloads, only the general corpora's have one
   (the `zstd` command's default), none of the tiles'.
 - The harness's own function (`decode_bench`'s `replay`) is mostly decoder
-  code inlined into it: natively on uncover, 14.7% of its 15.3% is the
-  sequences' decoding (`decode_sequences`), which counts with item 1. In V8
-  it is about 10% of video and runs in the baseline tier (Liftoff)
-  throughout, being called once a pass: what of that is the decoder's is not
-  yet known.
+  code inlined into it. In V8 it was 35% of terminal's tiles before run 24,
+  nearly all the sequences' fast loop (lab2, 2026-11-06), which counts with
+  item 1. Until run 24 it made the tiles' decoders anew each pass, growing
+  their rings from empty: 18% of terminal's instructions natively, which
+  zDesk, keeping its decoders for the session, does not pay. What is left of
+  libc there natively (13%) is copying: the still stream's bodies to the
+  bitmap, the long matches, and `read_to_end` zeroing its buffer (under 1%).
 - The ring buffer's lazy initialisation cost silesia 2–4% in wasm in the
   quick checks before (not in a full run), with nothing in V8's profile to
   show where.
