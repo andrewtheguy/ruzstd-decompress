@@ -1,42 +1,52 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-05 (after the
-matches into the dictionary, run 20 of
+short sequences' copy, run 21 of
 [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so.
 zDesk decodes in WebAssembly. The crate stays free of unsafe code.
 
-Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.12 times
-libzstd's time: 1.35–1.47 times on Silesia but `x-ray` (1.20), 1.28 on the GitHub
-frames with their dictionary. It is faster on the GitHub frames without it (0.95 times
-libzstd's time), the raw blocks of the video clip (0.76) and terminal's tiles (0.63). In
-wasm, the workloads take 1.2–1.4 times their native time, the dictionary frames 1.8;
-the video clip's raw blocks take 1.09 times.
+Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.09 times
+libzstd's time: 1.31–1.34 times on Silesia but `x-ray` (1.21), 1.22 on the GitHub
+frames with their dictionary and on mixed's tiles. It is faster on the GitHub frames
+without it (0.95 times libzstd's time), the raw blocks of the video clip (0.77) and
+terminal's tiles (0.62). In wasm, the workloads take 1.2–1.4 times their native time, the
+dictionary frames 1.8; the video clip's raw blocks take the same.
 
 ## 1. The sequences, again
 
-On silesia `-3` (lab2, before run 18), the sequences' decoding and execution were
-3.1 G instructions a pass to libzstd's 1.7 G, at a higher rate a cycle: the gap is
-the instructions. Natively, the fast loop now keeps the ring's and the executor's
-state in locals (4–6% off Silesia); in WebAssembly the same was 6–12% slower in V8,
-so that build executes them as before (run 18 lists what was tried). What is left:
+On silesia `-3` (lab2, before run 21), the sequences' decoding and execution were
+3.1 G instructions a pass to libzstd's 1.7 G, about 215 a sequence, 44 of them loads and
+stores of the stack: the loop's state does not fit the registers. Natively, the fast loop
+keeps the ring's and the executor's state in locals (4–6% off Silesia), and copies a
+short sequence in two copies of 16 bytes, without loops or most of their checks (run 21:
+silesia `-3` 4–10% faster, its mispredictions near libzstd's); in WebAssembly the locals
+were 6–12% slower in V8, so that build executes them as before (run 18 lists what was
+tried). What is left:
 - **WebAssembly**: V8's code for the loop spills either way. A form of the loop it
   takes better is not known; the forms tried are in run 18.
-- **The chunk copies' bounds checks**: three a chunk of the literals and of the
-  match, that the copy could check once for the sequence. Slicing each chunked copy
-  once was tried on lab1 (no faster natively, mixed and silesia 4–5% slower in wasm),
-  before the buffer's state was in locals.
-- The 2–11% of sequences the fast copy does not take (lab1, tiles): matches from
-  less than 16 bytes back (a repeated pattern was tried, and was no faster), and
-  those near the end of the initialised buffer.
+- **The registers**: the loop's 44 loads and stores of the stack a sequence. Decoding a
+  batch into an array before executing it, by a function each, and a table's entry
+  packed into a `u64`, were both slower (run 21): the decoding alone took 117–119
+  instructions a sequence, the six fields' takes 48 of them.
+- **The longer sequences' copies**, natively: those with over 16 literals or a match over
+  16 bytes, or its source within 16 bytes of the tail, about a quarter on silesia, still
+  go by chunks with three or four bounds checks each. Taking up to 32 of each the same
+  way made the loop's spills worse (run 21's S3). In wasm, every sequence is copied that
+  way.
+- The sequences the fast copy does not take, 4% on silesia (run 21): matches from less
+  than 16 bytes back (a repeated pattern was tried on lab1, and was no faster), and
+  matches back across the ring's wrap, at about 197 instructions each in the slow path.
+  Taken by the fast loop's writer, or by one of the slow path's, they were no faster
+  as the harness decodes; decoded by `read_to_end`, which leaves twice as many of them,
+  the loop's writer ran 2% fewer instructions.
 - **The dictionary frames in wasm** take 1.8 times their native time: there the fast
   copy takes no match into the dictionary, which the slow path takes (run 20; the check
   for one in the loop made V8's code 2% slower on silesia).
-- libzstd's sequence loop is built for BMI2 when the processor has it (its
-  `_bmi2` functions), whose shifts take no `cl` register: the take of each field of
-  bits is 7 instructions here. The crate cannot pick a function at run time without
-  unsafe code; a build for `x86-64-v3` would show what it is worth.
+- Not BMI2: a build for `x86-64-v3`, whose shifts take any register, ran 7% fewer
+  instructions on Silesia in 0.5–2% more cycles (run 21). What libzstd's lead is, in
+  cycles, at much the same mispredictions, is not yet known.
 
 ## 2. What is left of the table builds
 

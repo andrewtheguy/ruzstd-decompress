@@ -1374,6 +1374,118 @@ natively −1.7%, in wasm −0.6%. Every workload:
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found nothing, both
   on nightly with AddressSanitizer and on stable without a sanitizer.
 
+## 2026-11-05: the short sequences' copy
+
+The question: natively, Silesia took 1.35–1.47 times libzstd's time (run 20), the largest
+gap left. Where does it go?
+
+On lab2 (`perf stat`, silesia `-3`, `main` at `70ddb0a`, against libzstd 1.5.7): 3.94 G
+instructions a pass to libzstd's 2.41 G, and 1.03 G cycles to its 0.73 G. The sequences'
+decoding and execution were 79% of the instructions (3.12 G) to libzstd's 71% (1.72 G):
+1.4 G of the 1.53 G between them. A pass has 14.46 M sequences. Counted over one (an
+instrumented copy) and from callgrind's exact count of each instruction of one, decoded as
+the harness's `frame` mode decodes:
+
+- **About 215 instructions a sequence**, 44 of them loads and stores of the stack: the
+  loop's state (the reader's, three states, three tables, the literals', the ring's, the
+  offset history and the block's sum) does not fit the registers. The three table pointers
+  are loaded from the stack for each sequence, and most of the entries' fields stored there
+  and loaded again.
+- **Taking the bits**: 8 instructions for each of the six fields a sequence, 48 in all (the
+  count's `mov` to `cl` twice, its mask and `not`). `wrapping_shr` of `!n` and a `u128`
+  shift both compiled to the same code.
+- **The copies**: the match's chunks cost 17 instructions each, four of them bounds checks,
+  and the literals' 16. 55% of the sequences have no literals; most have at most 16 of
+  them and a match of at most 16 bytes, at least 16 back.
+- **The slow path** took 4% of the sequences (586 K a pass), at about 197 instructions
+  each: 212 K with matches from less than 16 bytes back, and 372 K matches back across the
+  ring's wrap, past its start into its end.
+
+The variants (callgrind, one pass of silesia `-3`, the whole process's instructions; the
+first column decoded by `read_to_end` from a `StreamingDecoder`, the second as the harness
+decodes, blocks up to 1 MB then all collected, whose ring wraps differently):
+
+| | | `read_to_end` | harness |
+|---|---|---:|---:|
+| B0 | `main` at `70ddb0a` | 5,211 M | 4,087 M |
+| S1 | B0, a sequence of at most 16 literals and a match of at most 16 bytes, at least 16 back, in one copy of 16 bytes each, no loops | 5,064 M | |
+| S2 | S1, the ring split at the tail, the room checked on the free part's length, and the short copy's indices relative to the two parts: of its seven bounds checks, two left | 4,872 M | |
+| S3 | S2, the same for up to 32 literals and 32 bytes of match, and longer ones in one copy where the source is wholly before the tail | 5,106 M | |
+| S4 | S2, the block's sum out of the fast loop: its writer takes no sequence past the block's most, which the slow path then reports | 4,840 M | 3,766 M |
+| S7 | S4, the matches across the wrap in the writer, the data's first part as its dictionary | 4,743 M | 3,778 M |
+| S8 | S4, those matches in the slow path, by a writer of its own | | 3,794 M |
+| B2 | S4, 32 sequences decoded into an array, then executed, by a function each | | 4,015 M |
+| P1 | S4, a table's entry packed into a `u64` | | 3,889 M |
+| B3 | B2 and P1 | | 4,086 M |
+
+- **S3** made more of the loop's values live: decoded by `read_to_end`, its stack loads and
+  stores went from 45 a sequence to 53.
+- **S7** took the matches across the wrap, and the slow path took half the instructions
+  (115.8 M to 55.7 M), but the loop's registers went to the case: 6 instructions a sequence
+  more, all of them loads and stores of the stack. **S8** took them out of the loop, at the
+  cost of the push and the repeat it saves: the writer's setup, the dictionary's copy path
+  and a `memmove`.
+- **B2** split the loop to free the registers. Decoding alone, `decode_batch` still kept the
+  12 fields of the three entries live, which LLVM loads at once, and spilled, at 117
+  instructions a sequence; with P1's entries (**B3**) it spilled hardly at all and still
+  took 119: the six fields' 48, extracting the fields, the refill, the batch's stores.
+- **x86-64-v3** (S4 built with `-C target-cpu=x86-64-v3`, BMI2's shifts by any register,
+  `perf stat` on lab2): 7% fewer instructions on Silesia, and 0.5–2% more cycles. libzstd's
+  `_bmi2` functions are not where its lead is.
+
+S4 is the commit:
+
+- **Natively**, the ring's writer (`SeqWriter`) takes the buffer split at the tail. A
+  sequence of at most 16 literals and a match of at most 16 bytes, its source wholly before
+  the tail, is two copies of 16 bytes, from slices the room check bounds: `copy_short`.
+  The literals must have `CHUNK` bytes after them, not `CHUNK - 1`.
+- The writer takes no sequence that would take the block past its most; the slow path adds
+  each of its sequences to the block's sum and reports one past it, and a run adds what its
+  writer wrote. In wasm, the sum is checked for each sequence as before.
+
+On lab2 (`perf stat`, one run of each, a pass, natively):
+
+| workload | B0 instructions | S4 instructions | B0 cycles | S4 cycles | libzstd cycles |
+|---|---:|---:|---:|---:|---:|
+| silesia `-3` | 3,936 M | 3,625 M (−7.9%) | 1,017 M | 950 M (−6.6%) | 722 M |
+| silesia `-19` | 3,725 M | 3,427 M (−8.0%) | 1,058 M | 1,008 M (−4.8%) | 746 M |
+| silesia `--fast=4` | 2,432 M | 2,241 M (−7.9%) | 658 M | 585 M (−11.0%) | 465 M |
+| GitHub, with the dictionary | 69.4 M | 67.3 M (−2.9%) | 17.9 M | 17.6 M (−1.8%) | 13.3 M |
+| GitHub, small frames | 204.6 M | 198.0 M (−3.2%) | 69.4 M | 67.7 M (−2.4%) | 73.1 M |
+| terminal 2880x1800@2 | 11.73 M | 11.19 M (−4.6%) | 3.92 M | 3.77 M (−3.8%) | 6.72 M |
+
+Its branch mispredictions on silesia `-3` went from 7.67 M a pass to 5.56 M, near
+libzstd's 5.39 M: much of the cycles saved.
+
+The full run, on lab2 after a restart (run 21; S4 is `SF` there, with the tests' changes).
+Every variant decoded every workload to the same output.
+
+| workload | native B0 | native S4 | wasm B0 | wasm S4 | libzstd |
+|---|---:|---:|---:|---:|---:|
+| silesia `-3` | 295.78 | **264.76 (−10.5%)** | 373.29 | 377.08 (+1.0%) | 202.61 |
+| silesia `-19` | 293.92 | **280.07 (−4.7%)** | 378.85 | 382.37 (+0.9%) | 211.78 |
+| silesia `--fast=4` | 181.54 | **169.09 (−6.9%)** | 229.09 | 231.58 (+1.1%) | 126.42 |
+| `nci` | 25.34 | 24.23 (−4.4%) | 33.19 | 32.72 (−1.4%) | 18.52 |
+| GitHub, with the dictionary | 4.79 | 4.88 (+1.9%) | 8.60 | 8.82 (+2.5%) | 4.01 |
+| GitHub, small frames | 18.74 | 18.50 (−1.3%) | 25.50 | 25.45 (−0.2%) | 19.48 |
+| terminal 2880x1800@2 | 1.05 | 1.03 (−1.3%) | 1.30 | 1.30 (+0.2%) | 1.66 |
+| mixed 2880x1800@2 | 520.49 | 510.05 (−2.0%) | 673.17 | 679.78 (+1.0%) | 417.30 |
+
+ms a pass. `x-ray` and the video clip are within 3% both ways, but `x-ray` in wasm
+(−4.6%, over a 12% spread). Geomean against B0:
+natively −3.1%, in wasm +0.1%. Every workload:
+[`results/run21-seq.md`](results/run21-seq.md). B0's spread on silesia `-3` was 10%.
+
+- Run again alone, B0 and S4 in turn six times each: natively, the dictionary frames took
+  4.69 ms to B0's 4.77 (1.7% faster), silesia `-3` 271.9 to 282.2. In wasm the dictionary
+  frames took 8.59 to 8.49 and silesia `-3` 376.9 to 368.5, each over 8–12%; by `perf stat`
+  under Node, S4's wasm ran the same instructions as B0's on silesia `-3` (5,550 M a pass),
+  with the same mispredictions (8.1 M), in 1–3% fewer or more cycles from one run to the
+  next. The wasm build's fast loop is as it was.
+- Natively, ruzstd-decompress now takes 1.31 times libzstd's time on silesia `-3`, from 1.46.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
+  AddressSanitizer) found nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
