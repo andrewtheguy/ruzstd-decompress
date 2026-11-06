@@ -53,15 +53,30 @@ fn load_tiles(path: &str, most: usize) -> (Vec<u8>, Vec<Tile>) {
     (data, tiles)
 }
 
-/// The tiles decoded as `WlshareTiles::planar` and `::still` decode them, the
-/// bitmap left in one reused buffer: one decoder for every planar tile and one
-/// for the still stream, each reset for a tile or a new stream rather than made
-/// anew. Returns the bytes out and, with `check`, a hash over every bitmap.
-fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
-    let mut bitmap: Vec<u8> = Vec::new();
-    let mut planar = FrameDecoder::new();
-    let mut still = FrameDecoder::new();
-    still.set_max_window_size(STILL_WINDOW_MOST);
+/// What `WlshareTiles` keeps from one tile to the next, for the whole session: one
+/// decoder for every planar tile and one for the still stream, and the bitmap's
+/// buffer. Made once for all the passes, as zDesk makes it once for a session, so
+/// that a pass does not grow their buffers from empty again.
+struct Session {
+    bitmap: Vec<u8>,
+    planar: FrameDecoder,
+    still: FrameDecoder,
+}
+
+impl Session {
+    fn new() -> Session {
+        let mut still = FrameDecoder::new();
+        still.set_max_window_size(STILL_WINDOW_MOST);
+        Session { bitmap: Vec::new(), planar: FrameDecoder::new(), still }
+    }
+}
+
+/// The tiles decoded as `WlshareTiles::planar` and `::still` decode them, by the
+/// session's decoders, each reset for a tile or a new stream rather than made
+/// anew, the bitmap left in its buffer. Returns the bytes out and, with `check`,
+/// a hash over every bitmap.
+fn replay(data: &[u8], tiles: &[Tile], session: &mut Session, check: bool) -> (u64, u64) {
+    let Session { bitmap, planar, still } = session;
     let mut in_still = false;
     let (mut out, mut hash) = (0u64, 0xcbf29ce484222325u64);
     for t in tiles {
@@ -70,9 +85,9 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
         if t.kind == 0 {
             bitmap.clear();
             let mut source = body;
-            let frame = StreamingDecoder::new_with_decoder(&mut source, &mut planar).unwrap();
+            let frame = StreamingDecoder::new_with_decoder(&mut source, &mut *planar).unwrap();
             let mut capped = Read::take(frame, most as u64 + 1);
-            capped.read_to_end(&mut bitmap).unwrap();
+            capped.read_to_end(bitmap).unwrap();
             assert!(bitmap.len() <= most);
             drop(capped);
             assert!(source.is_empty());
@@ -83,7 +98,7 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
                 in_still = true;
             }
             assert!(in_still, "a body that continues no stream");
-            let frame = &mut still;
+            let frame = &mut *still;
             while !source.is_empty() {
                 let header = u32::from_le_bytes([source[0], source[1], source[2], 0]);
                 assert!(header & 1 == 0, "a last block");
@@ -96,11 +111,11 @@ fn replay(data: &[u8], tiles: &[Tile], check: bool) -> (u64, u64) {
             }
             // The body's blocks' bytes, all collected as soon as they are decoded.
             bitmap.clear();
-            frame.collect_to_writer(&mut bitmap).unwrap();
+            frame.collect_to_writer(&mut *bitmap).unwrap();
         }
         out += bitmap.len() as u64;
         if check {
-            for &x in &bitmap {
+            for &x in bitmap.iter() {
                 hash = (hash ^ u64::from(x)).wrapping_mul(0x100000001b3);
             }
         }
@@ -211,9 +226,13 @@ fn main() {
             let most = args.get(3).map_or(usize::MAX, |s| s.parse().unwrap());
             let (data, tiles) = load_tiles(path, most);
             let bytes_in: usize = tiles.iter().map(|t| t.len).sum();
-            let (out, hash) = replay(&data, &tiles, true);
+            let mut session = Session::new();
+            let (out, hash) = replay(&data, &tiles, &mut session, true);
+            // Again by the same, reused, decoders, as the timed passes are: the same bitmaps.
+            let again = replay(&data, &tiles, &mut session, true);
+            assert_eq!(again, (out, hash), "a reused session decoded differently");
             let times = time(|| {
-                black_box(replay(&data, &tiles, false));
+                black_box(replay(&data, &tiles, &mut session, false));
             });
             (times, bytes_in as u64, out, format!("\"{hash:016x}\""))
         }
@@ -234,6 +253,9 @@ fn main() {
                 dec.add_dict(dict).unwrap();
             }
             let (n, out, hash) = frames(&data, &mut dec, true);
+            // Again by the same decoder, as the timed passes are: the same frames' content.
+            let again = frames(&data, &mut dec, true);
+            assert_eq!(again, (n, out, hash), "a reused decoder decoded differently");
             let times = time(|| {
                 black_box(frames(&data, &mut dec, false));
             });
