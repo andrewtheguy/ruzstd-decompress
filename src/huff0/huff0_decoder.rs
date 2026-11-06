@@ -1,6 +1,8 @@
 //! Utilities for decoding Huff0 encoded huffman data.
 
 use crate::bit_io::BitReaderReversed;
+#[cfg(not(target_family = "wasm"))]
+use crate::bit_io::refill_raw;
 use crate::decoding::errors::HuffmanTableError;
 use crate::fse::{FSETable, build_states};
 use alloc::vec::Vec;
@@ -158,6 +160,7 @@ impl HuffmanTable {
     /// The four streams are independent, so decoding them in one loop lets the CPU overlap them.
     /// After a refill at least 56 bits are available, enough for `56 / max_num_bits` symbols
     /// per stream before the next refill check.
+    #[inline(always)]
     pub(crate) fn decode_4_streams(
         &self,
         brs: &mut [BitReaderReversed<'_>; 4],
@@ -173,8 +176,71 @@ impl HuffmanTable {
     }
 
     /// [`Self::decode_4_streams`], `N` symbols a stream a refill: `N * max_num_bits` must be at
+    /// most 56. Natively, as libzstd's loop, by raw pointers, in steps of a refill and `N`
+    /// lookups a stream, as many at a time as every stream has the output and the source for;
+    /// then each stream on its own.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    fn decode_4_streams_n<const N: usize>(
+        &self,
+        brs: &mut [BitReaderReversed<'_>; 4],
+        outs: [&mut [u8]; 4],
+    ) {
+        debug_assert!(N * self.max_num_bits as usize <= 56);
+        let table: *const Entry = self.table().as_ptr();
+        let [out0, out1, out2, out3] = outs;
+        let mut at = [0; 4];
+        if brs.iter().all(|b| b.can_refill_fast()) {
+            let [b0, b1, b2, b3] = brs;
+            let mut s = [
+                RawStream::new(b0, out0),
+                RawStream::new(b1, out1),
+                RawStream::new(b2, out2),
+                RawStream::new(b3, out3),
+            ];
+            loop {
+                let steps = s.iter().map(|s| s.steps(N)).min().unwrap_or(0);
+                if steps == 0 {
+                    break;
+                }
+                for _ in 0..steps {
+                    // SAFETY: `steps` is at most the refills each source has bytes for and the
+                    // steps of `N` bytes each output has room for. The table has an entry for
+                    // every index of `MAX_MAX_NUM_BITS` bits.
+                    unsafe {
+                        for s in &mut s {
+                            s.refill();
+                        }
+                        for k in 0..N {
+                            for s in &mut s {
+                                s.single(table, k);
+                            }
+                        }
+                        for s in &mut s {
+                            s.op = s.op.add(N);
+                        }
+                    }
+                }
+            }
+            let [s0, s1, s2, s3] = s;
+            at = [
+                s0.finish(b0, out0),
+                s1.finish(b1, out1),
+                s2.finish(b2, out2),
+                s3.finish(b3, out3),
+            ];
+        }
+        let [br0, br1, br2, br3] = brs;
+        self.decode_stream_n::<N>(br0, &mut out0[at[0]..]);
+        self.decode_stream_n::<N>(br1, &mut out1[at[1]..]);
+        self.decode_stream_n::<N>(br2, &mut out2[at[2]..]);
+        self.decode_stream_n::<N>(br3, &mut out3[at[3]..]);
+    }
+
+    /// [`Self::decode_4_streams`], `N` symbols a stream a refill: `N * max_num_bits` must be at
     /// most 56. The readers are copied into locals for the loop, so that their state can stay in
     /// registers, and the output is taken `N` bytes at a time, so its stores need no checks.
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     fn decode_4_streams_n<const N: usize>(
         &self,
@@ -241,7 +307,38 @@ impl HuffmanTable {
     /// [`Self::decode_4_streams`], from the table of pairs when [`choose_pairs`] says it pays for
     /// its build: `compressed_size` is the literals' size in the block, the table's description
     /// included.
+    ///
+    /// On x86-64 it runs in a build with BMI2 where the processor has it, as libzstd's does: its
+    /// shifts take their count from any register, where the others' take it only from `cl`.
     pub(crate) fn decode_4_streams_sized(
+        &mut self,
+        brs: &mut [BitReaderReversed<'_>; 4],
+        outs: [&mut [u8]; 4],
+        compressed_size: usize,
+    ) {
+        #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
+        if crate::common::cpu::has_bmi2() {
+            // SAFETY: the processor has BMI2.
+            return unsafe { self.decode_4_streams_sized_bmi2(brs, outs, compressed_size) };
+        }
+        self.decode_4_streams_sized_body(brs, outs, compressed_size);
+    }
+
+    /// [`Self::decode_4_streams_sized_body`] built with BMI2.
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
+    #[target_feature(enable = "bmi2")]
+    fn decode_4_streams_sized_bmi2(
+        &mut self,
+        brs: &mut [BitReaderReversed<'_>; 4],
+        outs: [&mut [u8]; 4],
+        compressed_size: usize,
+    ) {
+        self.decode_4_streams_sized_body(brs, outs, compressed_size);
+    }
+
+    /// The four streams decoded as [`Self::decode_4_streams_sized`] says.
+    #[inline(always)]
+    fn decode_4_streams_sized_body(
         &mut self,
         brs: &mut [BitReaderReversed<'_>; 4],
         outs: [&mut [u8]; 4],
@@ -323,10 +420,67 @@ impl HuffmanTable {
         *at += entry.len();
     }
 
+    /// [`Self::decode_4_streams`] from the table of pairs: natively, as libzstd's loop, by raw
+    /// pointers, in steps of a refill and [`PAIRS_A_REFILL`] lookups a stream, as many at a time as
+    /// every stream has the output and the source for; then each stream on its own (see
+    /// [`Self::decode_stream_pairs`]).
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    fn decode_4_streams_pairs(&self, brs: &mut [BitReaderReversed<'_>; 4], outs: [&mut [u8]; 4]) {
+        let pairs = self.pairs();
+        let [out0, out1, out2, out3] = outs;
+        let mut at = [0; 4];
+        if brs.iter().all(|b| b.can_refill_fast()) {
+            let [b0, b1, b2, b3] = brs;
+            let mut s = [
+                RawStream::new(b0, out0),
+                RawStream::new(b1, out1),
+                RawStream::new(b2, out2),
+                RawStream::new(b3, out3),
+            ];
+            let table: *const PairEntry = pairs.as_ptr();
+            loop {
+                let steps = s.iter().map(|s| s.steps(PAIRS_OUT)).min().unwrap_or(0);
+                if steps == 0 {
+                    break;
+                }
+                for _ in 0..steps {
+                    // SAFETY: `steps` is at most the refills each source has bytes for and the
+                    // steps of `PAIRS_OUT` bytes each output has room for; a step's lookups
+                    // write at most that much. The table has an entry for every index of
+                    // `MAX_MAX_NUM_BITS` bits.
+                    unsafe {
+                        for s in &mut s {
+                            s.refill();
+                        }
+                        for _ in 0..PAIRS_A_REFILL {
+                            for s in &mut s {
+                                s.pair(table);
+                            }
+                        }
+                    }
+                }
+            }
+            let [s0, s1, s2, s3] = s;
+            at = [
+                s0.finish(b0, out0),
+                s1.finish(b1, out1),
+                s2.finish(b2, out2),
+                s3.finish(b3, out3),
+            ];
+        }
+        let [br0, br1, br2, br3] = brs;
+        self.decode_stream_pairs(br0, &mut out0[at[0]..]);
+        self.decode_stream_pairs(br1, &mut out1[at[1]..]);
+        self.decode_stream_pairs(br2, &mut out2[at[2]..]);
+        self.decode_stream_pairs(br3, &mut out3[at[3]..]);
+    }
+
     /// [`Self::decode_4_streams`] from the table of pairs, in rounds of [`PAIRS_ROUND`] refills
     /// and [`PAIRS_A_REFILL`] lookups a stream after each, while every stream has the output a
     /// round's lookups may write to and can refill fast that many times; then each stream on its
     /// own (see [`Self::decode_stream_pairs`]).
+    #[cfg(target_family = "wasm")]
     fn decode_4_streams_pairs(&self, brs: &mut [BitReaderReversed<'_>; 4], outs: [&mut [u8]; 4]) {
         let pairs = self.pairs();
         let [out0, out1, out2, out3] = outs;
@@ -755,6 +909,94 @@ fn fill_rank<const L: usize>(entries: &mut [Entry], symbols: &[u8], num_bits: u8
     }
 }
 
+/// One of the four streams in the native loops, as libzstd's: where its reader's container
+/// starts, its window (see [`BitReaderReversed::sentinel_window`]), and the next byte of its
+/// output, by raw pointers, with the bounds a run of steps is counted from.
+#[cfg(not(target_family = "wasm"))]
+struct RawStream {
+    ip: *const u8,
+    src: usize,
+    window: u64,
+    op: *mut u8,
+    out_end: usize,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl RawStream {
+    /// The stream of `br`, which must be able to refill fast, writing to `out`.
+    #[inline(always)]
+    fn new(br: &mut BitReaderReversed<'_>, out: &mut [u8]) -> RawStream {
+        br.ensure_bits_fast(57);
+        let window = br.sentinel_window();
+        let (src, index) = br.raw_index();
+        let out = out.as_mut_ptr_range();
+        RawStream {
+            // SAFETY: the index is within the source.
+            ip: unsafe { src.add(index) },
+            src: src as usize,
+            window,
+            op: out.start,
+            out_end: out.end as usize,
+        }
+    }
+
+    /// How many steps of a refill and lookups writing at most `out` bytes the stream has the
+    /// source and the output for: each refill moves `ip` down by at most 7 and needs it 7 past
+    /// the source's start (see [`refill_raw`]).
+    #[inline(always)]
+    fn steps(&self, out: usize) -> usize {
+        ((self.ip as usize - self.src) / 7).min((self.out_end - self.op as usize) / out)
+    }
+
+    /// # Safety
+    ///
+    /// As [`refill_raw`].
+    #[inline(always)]
+    unsafe fn refill(&mut self) {
+        // SAFETY: the caller's.
+        self.window = unsafe { refill_raw(&mut self.ip, self.window) };
+    }
+
+    /// The symbol at the top of the window to `op + k`, and its bits shifted out.
+    ///
+    /// # Safety
+    ///
+    /// `table` must have `TABLE_SIZE` entries, and `op + k` be in the output.
+    #[inline(always)]
+    unsafe fn single(&mut self, table: *const Entry, k: usize) {
+        // SAFETY: the caller's; the index is `MAX_MAX_NUM_BITS` bits.
+        unsafe {
+            let [symbol, bits] = *table.add((self.window >> (64 - MAX_MAX_NUM_BITS)) as usize);
+            *self.op.add(k) = symbol;
+            self.window = self.window.wrapping_shl(u32::from(bits));
+        }
+    }
+
+    /// The one or two symbols at the top of the window to `op`, `op` moved past them, and their
+    /// bits shifted out. Both bytes of the entry are written.
+    ///
+    /// # Safety
+    ///
+    /// `table` must have `TABLE_SIZE` entries, and the output 2 bytes from `op`.
+    #[inline(always)]
+    unsafe fn pair(&mut self, table: *const PairEntry) {
+        // SAFETY: the caller's; the index is `MAX_MAX_NUM_BITS` bits.
+        unsafe {
+            let entry = *table.add((self.window >> (64 - MAX_MAX_NUM_BITS)) as usize);
+            core::ptr::write_unaligned(self.op.cast::<[u8; 2]>(), entry.symbols());
+            self.window = entry.shift(self.window);
+            self.op = self.op.add(entry.len());
+        }
+    }
+
+    /// The reader `br` where the stream left it, and how far into `out` it wrote.
+    #[inline(always)]
+    fn finish(self, br: &mut BitReaderReversed<'_>, out: &[u8]) -> usize {
+        br.resume_index(self.ip as usize - self.src, self.window);
+        self.op as usize - out.as_ptr() as usize
+    }
+}
+
 impl Default for HuffmanTable {
     fn default() -> Self {
         Self::new()
@@ -815,11 +1057,11 @@ impl PairEntry {
 /// `MAX_MAX_NUM_BITS` bits, of the 56 a refill leaves.
 const PAIRS_A_REFILL: usize = 56 / MAX_MAX_NUM_BITS as usize;
 
-/// The refills of a round of the four streams' loop from the table of pairs, which checks the
-/// output's room and the sources' bytes left once a round: natively 4, with which x-ray and
-/// mixed's tiles decoded 7% and 3–5% faster than with 1 (lab2, 2026-11-05); in wasm 1, V8's
-/// code for 2 or more being 10–17% slower.
-const PAIRS_ROUND: usize = if cfg!(target_family = "wasm") { 1 } else { 4 };
+/// The refills of a round of wasm's four streams' loop from the table of pairs, which checks
+/// the output's room and the sources' bytes left once a round: V8's code for 2 or more was
+/// 10–17% slower.
+#[cfg(target_family = "wasm")]
+const PAIRS_ROUND: usize = 1;
 
 /// The output a stream needs left for a refill's lookups from the table of pairs: two bytes
 /// each, and every one written at most two past the last.

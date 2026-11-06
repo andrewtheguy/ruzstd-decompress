@@ -85,6 +85,7 @@ impl<'s> BitReaderReversed<'s> {
     }
 
     /// Whether `n` refills in a row can be fast, `n` at least 1: each moves by at most 7 bytes.
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     pub fn can_refill_fast_times(&self, n: usize) -> bool {
         self.index >= 8 + 7 * (n - 1)
@@ -183,6 +184,7 @@ impl<'s> BitReaderReversed<'s> {
     /// check can bound, so that they need no bounds checks of their own. Only while the
     /// container holds the 8 bytes from `index`, as after [`Self::ensure_bits_fast`]; `None`
     /// otherwise.
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     pub fn tail(&self) -> Option<&'s [u8]> {
         if self.extra_bits != 0 {
@@ -198,6 +200,7 @@ impl<'s> BitReaderReversed<'s> {
     /// The bytes taken are at most 8 to the compiler (`trailing_zeros` is at most 64), so that a
     /// check of `8 + 8 * n` bytes before `n` refills spares them any of their own, and nothing
     /// is masked on the way from the window to the load.
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     pub fn refill_tail(tail: &mut &'s [u8], window: u64) -> u64 {
         let consumed = window.trailing_zeros() as usize;
@@ -209,6 +212,7 @@ impl<'s> BitReaderReversed<'s> {
 
     /// The reader where a loop of [`Self::refill_tail`] on its [`Self::tail`] left `tail` and
     /// `window`.
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     pub fn resume_tail(&mut self, tail: &'s [u8], window: u64) {
         debug_assert!(tail.as_ptr() == self.source.as_ptr() && tail.len() <= self.source.len());
