@@ -90,7 +90,15 @@ On uncover (lab1), which builds 847 sequence tables and 88 Huffman tables a pass
 - The Huffman tables' build was rewritten in run 19 (the GitHub frames 24%
   faster natively); on those frames it is now a third of the pass, over a third of that
   reading the FSE-coded weights, a chain from one state to the next as in
-  libzstd.
+  libzstd. In wasm (lab2, 2026-11-06, V8's code, instructions sampled) it is 32% of
+  those frames, 7.7% of terminal's tiles and 1.7% of mixed's, where the sequence tables'
+  build is 2.0%, 4.4% and 1.7% (2.3% of silesia `-3`). Of the Huffman build there, about
+  35% is the weights' FSE loop, waiting on each state's load; 16% the pass over all the
+  weights that lists the symbols with a code and the highest weight; 10% placing the
+  symbols by weight, a count through memory; 8% the table's fill and 5% the counts by
+  weight. Listing the symbols in the weights' loop, which has room for it, was no clear
+  gain (harness medians, five rounds): the GitHub frames 1.8% faster natively and 1.0% in
+  wasm, terminal's tiles 1.1% slower both ways, all within the spread.
 - Not keeping a table that is the same as the last: no FSE-compressed
   description in terminal's, uncover's or browser's tiles is the same as the
   one before it of its kind (counted 2026-11-05, with each table keeping the
