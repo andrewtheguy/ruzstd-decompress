@@ -25,7 +25,9 @@ silesia `-3` 4–10% faster, its mispredictions near libzstd's); in WebAssembly 
 were 6–12% slower in V8, so that build executes them as before (run 18 lists what was
 tried). What is left:
 - **WebAssembly**: V8's code for the loop spills either way. A form of the loop it
-  takes better is not known; the forms tried are in run 18.
+  takes better is not known; the forms tried are in run 18. Since #23 it runs 1.4% more
+  instructions on silesia `-3` than before (75 M a pass, about 5 a sequence), not more of
+  the stack's loads and stores: V8's code for the loop as #23 wrote it (run 23).
 - **The registers**: the loop's 44 loads and stores of the stack a sequence. Decoding a
   batch into an array before executing it, by a function each, and a table's entry
   packed into a `u64`, were both slower (run 21): the decoding alone took 117–119

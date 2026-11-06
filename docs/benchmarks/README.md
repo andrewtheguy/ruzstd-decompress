@@ -1597,6 +1597,76 @@ K0's spread on `x-ray` was 16%.
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
   AddressSanitizer) found nothing.
 
+## 2026-11-06: Silesia in wasm since alpha.7
+
+The question: v0.9.2-alpha.8's release comparison had Silesia 2–6% slower in wasm than
+v0.9.2-alpha.7, over spreads of 0.4–4.1% (8.7% for `-19`), with every other workload faster.
+Which of #21–#28 is it?
+
+Each merge built as a variant (Q21 to Q28, `main` after #21 to #28), with v0.9.2-alpha.7 (A7),
+all with the harness of #21 on. Their times were too spread to tell (five rounds on lab2:
+silesia `-3`'s spread 6–13% each, one pass of 965 ms). Their instructions are not (wasm
+under Node, `perf stat` of the whole process over its passes, three runs each, a pass;
+[`results/run23-counts.log`](results/run23-counts.log)):
+
+| | silesia `-3` | `--fast=4` | `nci` | `x-ray` |
+|---|---:|---:|---:|---:|
+| A7 | 5,446 M | 3,315 M | 430.5 M | 195.2 M |
+| Q21 (#21, the benchmarks) | 5,447 M | 3,315 M | 430.6 M | 195.0 M |
+| Q22 (#22, the dictionary kept) | 5,446 M | 3,313 M | 430.4 M | 195.1 M |
+| Q23 (#23, the sequences' run) | **5,569 M (+2.2%)** | **3,379 M (+1.9%)** | **441.9 M (+2.6%)** | 195.2 M |
+| Q24 to Q28 | 5,549–5,569 M | 3,377–3,379 M | 440.2–441.6 M | 194.3–195.3 M |
+
+A build's three counts differ by 0.7% at most, mostly by under 0.1%. So #23, which gave the native build its
+run of sequences with the buffer's state in locals and kept wasm's executor as it was: its
+wasm runs about 8 instructions more a sequence on silesia, `x-ray`, nearly all literals, as
+many as before. The cycles moved by 1–6%, about as much as from one run to the next.
+
+What it changed for wasm: the sequence's copy became `copy_sequence`, shared with the
+native writer, which took the ring's `Vec` and made a slice of it at each chunk's copy. In
+the module, both chunk loops now load the `Vec`'s pointer and length for each chunk (the
+match's loop 45 wasm instructions to 35 before), as the chunks' stores might have changed
+them. The variants, on `main` at `c59e9f0` (Q28):
+
+| | | silesia `-3` | `--fast=4` | `nci` |
+|---|---|---:|---:|---:|
+| Q28 | `main` | 5,553 M | 3,378 M | 441.4 M |
+| WS2 | the ring's buffer as a slice to the limit, once a sequence | 5,521 M | 3,357 M | 436.8 M |
+| WS4 | WS2, its room checked against the slice's length, not the limit | 5,542 M | 3,382 M | 436.8 M |
+| WS5 | WS2, `copy_sequence` taking a slice (the commit) | 5,521 M | 3,357 M | 436.5 M |
+
+The chunk loops are as before #23 in WS2 and on. Moving the block's sum and its check back
+after the copy, as alpha.7 had them, took 85 M instructions more than WS2 on silesia `-3`.
+The rest, 75 M a pass, is V8's code for the loop as #23 wrote it, which is not more of the
+stack's loads and stores: sampled over its instructions, they are 18% of the function in
+WS2, 22% in Q22.
+
+The full run of the wasm build, on lab2 after a restart, six rounds (run 23; Q28 and WS5
+decoded every workload to the same output):
+
+| workload | Q28 | WS5 | spread Q28 |
+|---|---:|---:|---:|
+| silesia `-3` | 372.15 | 365.53 (−1.8%) | 8.3% |
+| silesia `-19` | 378.11 | 375.15 (−0.8%) | 4.4% |
+| silesia `--fast=4` | 231.56 | 226.23 (−2.3%) | 6.4% |
+| `nci` | 32.76 | 32.37 (−1.2%) | 8.2% |
+| `x-ray` | 12.74 | 12.85 (+0.9%) | 10.3% |
+| GitHub, with the dictionary | 8.41 | 8.32 (−1.1%) | 1.6% |
+| GitHub, small frames | 25.51 | 25.32 (−0.7%) | 4.9% |
+| mixed 2880x1800@2 | 668.48 | 675.03 (+1.0%) | 6.7% |
+| terminal 2880x1800@2 | 1.30 | 1.29 (−0.8%) | 1.9% |
+| video clip, raw blocks | 16.05 | 15.46 (−3.7%) | 10.2% |
+
+ms a pass, the median of six rounds; geomean −1.1%, every difference within its spread.
+Every workload: [`results/run23-wasm.md`](results/run23-wasm.md). The native build's code is
+unchanged.
+
+- The release comparison's 2–6% was partly the runs' spread: here Q28's times, paired
+  round by round with A7's, were 2–3% slower on `nci` and `--fast=4`, and its cycles
+  from 1.5% fewer to 2.7% more on Silesia.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
+  AddressSanitizer) found nothing; it runs the native build, whose code is unchanged.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
