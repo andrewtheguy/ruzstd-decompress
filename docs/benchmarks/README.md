@@ -1371,8 +1371,8 @@ natively −1.7%, in wasm −0.6%. Every workload:
   changed, and its spread in wasm was 5.7%.
 - Natively, ruzstd-decompress now takes 1.28 times libzstd's time on the dictionary frames,
   from 1.57.
-- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on stable) found
-  nothing.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each) found nothing, both
+  on nightly with AddressSanitizer and on stable without a sanitizer.
 
 ## Running it again
 
