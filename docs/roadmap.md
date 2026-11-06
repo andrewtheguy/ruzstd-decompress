@@ -145,7 +145,13 @@ sequences' fast loop the same way put the tail's length on its chain, and was sl
 
 - The frame checksum (XXH64, the `twox-hash` crate) is made only for frames
   with a checksum now; of the workloads, only the general corpora's have one
-  (the `zstd` command's default), none of the tiles'.
+  (the `zstd` command's default), none of the tiles'. Natively it is 5.7% of
+  silesia `-3`'s cycles, 7.0% of `x-ray`'s and 9.8% of `nci`'s (lab2,
+  2026-11-06, `perf record`, `main` at `ee09977`): about 0.26 cycles a byte,
+  XXH64's own rate, its eight multiplications a 32-byte stripe at one a cycle.
+  It is fed in large slices, as the bytes leave the buffer. libzstd checks the
+  checksum by default too, at the same cost; only not checking it would save
+  it.
 - The harness's own function (`decode_bench`'s `replay`) is mostly decoder
   code inlined into it. In V8 it was 35% of terminal's tiles before run 24,
   nearly all the sequences' fast loop (lab2, 2026-11-06), which counts with
@@ -154,6 +160,19 @@ sequences' fast loop the same way put the tail's length on its chain, and was sl
   zDesk, keeping its decoders for the session, does not pay. What is left of
   libc there natively (13%) is copying: the still stream's bodies to the
   bitmap, the long matches, and `read_to_end` zeroing its buffer (under 1%).
-- The ring buffer's lazy initialisation cost silesia 2–4% in wasm in the
-  quick checks before (not in a full run), with nothing in V8's profile to
-  show where.
+  The first two are copies any decoder makes. The zeroing is std's: zDesk
+  reads a planar tile through `std::io::Read::take` and `read_to_end`, which
+  zero the spare room a `read` is given, once a call. Under `Take` only
+  `read_buf`, unstable, would spare it; without `Take`, a `read_to_end` of
+  `StreamingDecoder`'s own, collecting into the `Vec`, would, with zDesk
+  checking its cap another way.
+- The ring buffer's lazy initialisation: zeroing the whole ring when it grows
+  (LZ1), against `main` at `ee09977` (lab2, 2026-11-06, six rounds, a pass's
+  `perf stat` and the harness median), ran the same instructions on Silesia,
+  silesia `-3` 2.0% faster in wasm (2.1% fewer cycles) and 0.8% natively;
+  `nci` 1.0% slower in wasm, 1.6% faster natively; `x-ray` within its spread.
+  Mixed's tiles, whose decoders are kept as zDesk keeps them, ran 1.4% more
+  instructions, 1.9% slower in wasm and 3.0% natively. The harness's frame
+  mode makes a decoder each pass, so each pass reserves its ring anew and
+  initialises it 16 KB at a time as the tail reaches it; a kept decoder does
+  that once. Lazy stays.
