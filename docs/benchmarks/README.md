@@ -1760,3 +1760,15 @@ and results.
    [BASE]` for the tables against BASE, A by default (`uv run --python 3.13
    python -I summary.py OUT.jsonl M`). `build.sh` uses a variant's
    `rust-toolchain.toml` if it has one, else the default toolchain.
+
+In wasm, V8 runs a function in its unoptimized tier (Liftoff) until its optimized code
+(TurboFan) is ready, and a call already running stays in it. The harness's checked
+passes, before the timed ones, take that: on mixed's tiles the first, a call of `replay`
+with the sequences' loop inlined, runs in Liftoff to its end, 2.1 s, about three times a
+TurboFan pass, and every pass after it is TurboFan's (lab2, 2026-11-06, `perf` samples
+by time of the harness with one checked pass). The timed passes are not affected: with
+`--no-liftoff` the medians were slower, not faster (the middle of three runs: mixed's
+tiles 1.3%, the GitHub frames 1.1%, terminal's tiles 3.3%). A count over the whole
+process, such as `perf stat` of Node, does include that pass: on mixed's tiles, which
+time three passes, it is no measure of one. The tiles and frames modes run two checked
+passes since `ce55cf2`, the frame mode one.
