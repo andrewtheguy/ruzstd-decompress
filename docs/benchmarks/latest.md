@@ -1,8 +1,8 @@
 # Where the decoder stands
 
-The latest full benchmark of ruzstd-decompress against libzstd: run 27 of
-[`README.md`](README.md) (2026-11-06, "the raw loops in wasm"), B27, the branch `wasm-raw`
-at `8c37fd6`. The README holds each change's own run; this page is the state they add up
+The latest full benchmark of ruzstd-decompress against libzstd: run 28 of
+[`README.md`](README.md) (2026-11-06, "the sequences in V8, on the dictionary frames"), B28,
+the branch `seq-one-table` at `bd3b6d9`. The README holds each change's own run; this page is the state they add up
 to, and is replaced by the next full run.
 
 ## How it was measured
@@ -55,39 +55,44 @@ costs.
 
 | workload | libzstd | native | native ÷ libzstd | wasm | wasm ÷ native |
 |---|---:|---:|---:|---:|---:|
-| terminal's tiles | 1.82 | 0.80 | **0.44** | 1.08 | 1.35 |
-| the video clip | 20.45 | 15.09 | **0.74** | 15.36 | 1.02 |
-| the GitHub frames | 19.40 | 17.82 | **0.92** | 24.68 | 1.39 |
-| `x-ray` | 8.85 | 9.57 | 1.08 | 11.41 | 1.19 |
-| mixed's tiles | 426.35 | 460.39 | 1.08 | 585.95 | 1.27 |
-| silesia `--fast=4` | 127.08 | 143.73 | 1.13 | 200.83 | 1.40 |
-| the GitHub frames with their dictionary | 3.62 | 4.12 | 1.14 | 7.03 | 1.71 |
-| silesia `-3` | 199.12 | 229.29 | 1.15 | 313.47 | 1.37 |
-| `nci` | 18.19 | 20.88 | 1.15 | 28.05 | 1.34 |
-| silesia `-19` | 203.66 | 239.23 | 1.17 | 329.45 | 1.38 |
-| **geomean** | | | **0.96** | | **1.33** |
+| terminal's tiles | 1.65 | 0.79 | **0.48** | 1.05 | 1.33 |
+| the video clip | 19.97 | 15.04 | **0.75** | 15.30 | 1.02 |
+| the GitHub frames | 19.45 | 18.43 | **0.95** | 24.52 | 1.33 |
+| `x-ray` | 8.68 | 9.45 | 1.09 | 11.16 | 1.18 |
+| the GitHub frames with their dictionary | 3.69 | 4.03 | 1.09 | 6.56 | 1.63 |
+| silesia `-19` | 205.09 | 225.76 | 1.10 | 341.31 | 1.51 |
+| mixed's tiles | 411.06 | 456.85 | 1.11 | 582.75 | 1.28 |
+| `nci` | 18.38 | 20.66 | 1.12 | 28.15 | 1.36 |
+| silesia `--fast=4` | 124.61 | 141.54 | 1.14 | 190.59 | 1.35 |
+| silesia `-3` | 203.59 | 232.99 | 1.14 | 319.64 | 1.37 |
+| **geomean** | | | **0.97** | | **1.33** |
 
-How far the rounds were apart (largest less smallest, over the median): libzstd 1.0–9.7%;
-ruzstd-decompress natively 1.1–3.8%, but the GitHub frames with their dictionary 15.9%; in
-wasm 0.9–8.1%, but silesia `-19` 11.1%. A wasm process runs in a faster or a slower mode for
-all of its passes, so a wasm figure moves more from one run to the next than its rounds
-show. Every build, every workload: [`results/run27-wasm-raw.md`](results/run27-wasm-raw.md),
-the raw lines in the `.jsonl` beside it (B27 is `XB` there).
+How far the rounds were apart (largest less smallest, over the median): libzstd 0.8–5.7%,
+but terminal's tiles 10.2%; ruzstd-decompress natively 1.4–6.7%, but the video clip 10.1%;
+in wasm 1.4–7.6%, but the video clip 14.9%. A wasm process runs in a faster or a slower mode
+for all of its passes, so a wasm figure moves more from one run to the next than its rounds
+show: silesia `-19` took 1.38 times its native time in run 27 and 1.51 here, where its wasm
+figure is 3.5% over M28's (`main`), within M28's 5.6% spread.
+Every build, every workload: [`results/run28-dict-copy.md`](results/run28-dict-copy.md), the
+raw lines in the `.jsonl` beside it.
 
 ## What it says
 
-- **Natively**, ruzstd-decompress takes 0.96 times libzstd's time by geomean: the
+- **Natively**, ruzstd-decompress takes 0.97 times libzstd's time by geomean (0.96 in run
+  27, the same within the rounds' spread): the
   sequences' and the Huffman streams' loops run by raw pointers, as libzstd's, in a BMI2
   build where the processor has it (run 26).
-- **Ahead of libzstd natively**: terminal's tiles (0.44), the video clip's raw blocks (0.74)
-  and the GitHub frames (0.92).
-- **Behind most on Silesia**, 1.08–1.17 times natively, `x-ray` included, and the GitHub
-  frames with their dictionary 1.14. The sequences' loop runs as many instructions a cycle
+- **Ahead of libzstd natively**: terminal's tiles (0.48), the video clip's raw blocks (0.75)
+  and the GitHub frames (0.95).
+- **Behind most on Silesia**, 1.09–1.14 times natively, `x-ray` included, the GitHub frames
+  with their dictionary 1.09 and mixed's tiles 1.11. The sequences' loop runs as many instructions a cycle
   as libzstd's, with as many misses and mispredictions; it trails by about 7 cycles a
   sequence, with about 10 more stores of its spills (item 1 of the [roadmap](../roadmap.md)).
 - **In wasm**, which runs the same raw loops since run 27 (10.8% faster than before by
-  geomean), the workloads take 1.19–1.71 times their native time, 1.33 by geomean (1.50 in
-  run 26); the dictionary frames most, the video clip's raw blocks about the same.
+  geomean), the workloads take 1.18–1.63 times their native time, 1.33 by geomean (1.50 in
+  run 26); the dictionary frames most, 1.71 in run 27 before their matches from the
+  dictionary were copied inline (run 28, 10.3% faster in wasm), the video clip's raw blocks
+  about the same.
 
 ## Running it again
 

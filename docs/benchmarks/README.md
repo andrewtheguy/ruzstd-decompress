@@ -1979,6 +1979,83 @@ the computation back above the copy, and then the new states are spilled instead
 patches: [`variants/T1-one-table.patch`](variants/T1-one-table.patch),
 [`variants/T3-states-barrier.patch`](variants/T3-states-barrier.patch) (T2 is both).
 
+T1 was then taken after all, for wasm (below).
+
+## 2026-11-06: the sequences in V8, on the dictionary frames
+
+The question: the GitHub frames with their dictionary took 1.71 times their native time in
+wasm (run 27), the most of the workloads. What does V8's code spend?
+
+A pass (XB, lab2, `perf stat`): natively 57.0 M instructions and 15.5 M cycles, in wasm
+100.7 M and 26.3 M (Node's whole process over the passes run, so slightly more). Instructions
+sampled (`v8prof.sh`): the sequences are 58% of the native pass, about 33 M, and 56% in wasm,
+about 57 M; besides them, 6% of the wasm pass was in V8's `memory_copy_wrapper`, the call out
+of the module V8 makes for a `memory.copy`, which is what a `memcpy` of unknown length
+compiles to under bulk memory. A uprobe on the wrapper, with its size argument and its
+caller (`perf record --call-graph dwarf` and `node --perf-basic-prof`), over the harness's
+five passes of 9,114 frames (the uprobe slows it to three timed ones):
+
+| caller | calls | sizes |
+|---|---:|---|
+| the sequences (`decode_sequences`) | 595 k | 415 k of 33–64 bytes, 91 k of 65–256, 46 k of 16 or less, 42 k of 17–32 |
+| `read_frame_header` | 89 k | 16 or less (`read_exact` from a slice) |
+| `StreamingDecoder::read` | 45 k | |
+| `DecodeBuffer::read`, the output's copy | 46 k | 43 k of 257 B–4 KB |
+| `decode_literals` | 31 k | 16 or less |
+
+In the sequences the calls were `push_from_dict`'s copy of a match's bytes from the
+dictionary, past the fast path's 32 or near the dictionary's end, and the padded copy of a
+stream's last bytes, once a block (`BitReaderReversed::padded`).
+
+The variants, against XB (`main` at `25377d5`'s code), wasm, a pass's instructions and
+cycles (`perf stat` of Node, the median of three rounds; `cycw3.sh`, `cycw2.sh` with the
+dictionary frames):
+
+| | | the GitHub frames with their dictionary | silesia `-3` | `nci` | mixed's tiles |
+|---|---|---:|---:|---:|---:|
+| XB | instructions (cycles), M a pass | 100.7 (26.5) | 4,538 (1,178) | 364.8 (107.2) | 9,161 (2,951) |
+| D1 | up to 256 bytes from the dictionary in chunks of 16, the last ending at the copy's end; the padded copy a fixed 22 bytes where the stream has them | −4.3% (−4.4%) | −0.6% (−0.3%) | −0.7% (−0.5%) | +0.0% (−0.6%) |
+| D2 | D1, the sequence tables in one allocation (T1, above) | −5.2% (−5.3%) | −2.1% (−1.1%) | −1.8% (−1.7%) | −0.5% (−1.3%) |
+
+`memory_copy_wrapper` went from 6.0% of the dictionary frames' pass to 1.9%. In V8's code
+for the loop the three tables' bases were three values, two of them reloaded from the stack
+each sequence; with one, `nci` and mixed's tiles took fewer cycles than any of XB's rounds.
+Natively D2 is as in T1, more instructions in as many cycles (below). What else the profile
+shows of V8's code for the loop, for later: it spills about ten values on the loop's back
+edge and reloads them, the bit window among them, so that the refill's chain goes through the
+stack; and a read of bits takes about ten instructions to the native build's four, V8 using
+no BMI2 shifts, so every count goes through `cl`, with an `and` of 63 and moves around it.
+
+The commits: `a9d5384` (D1, with the raw writer's test now making matches of up to 302 bytes,
+1,537 of the dictionary's copies past 32 bytes) and `bd3b6d9` (T1).
+
+The full run, on lab2 after a restart (run 28): M28 is `main` at `25377d5`, B28 the branch
+at `bd3b6d9`. Every build decoded every workload to the same output.
+
+| workload | native M28 | native B28 | wasm M28 | wasm B28 | libzstd |
+|---|---:|---:|---:|---:|---:|
+| silesia `-3` | 222.85 | 232.99 (+4.6%) | 317.45 | 319.64 (+0.7%) | 203.59 |
+| silesia `-19` | 230.05 | 225.76 (−1.9%) | 329.92 | 341.31 (+3.5%) | 205.09 |
+| silesia `--fast=4` | 140.16 | 141.54 (+1.0%) | 193.82 | 190.59 (−1.7%) | 124.61 |
+| `nci` | 20.66 | 20.66 (−0.0%) | 28.24 | 28.15 (−0.3%) | 18.38 |
+| `x-ray` | 9.40 | 9.45 (+0.5%) | 11.01 | 11.16 (+1.4%) | 8.68 |
+| the GitHub frames with their dictionary | 4.25 | 4.03 (−5.0%) | 7.31 | 6.56 (−10.3%) | 3.69 |
+| the GitHub frames | 17.68 | 18.43 (+4.2%) | 24.89 | 24.52 (−1.5%) | 19.45 |
+| mixed's tiles 2880x1800@2 | 458.52 | 456.85 (−0.4%) | 593.36 | 582.75 (−1.8%) | 411.06 |
+| the video clip | 15.49 | 15.04 (−2.9%) | 16.30 | 15.30 (−6.1%) | 19.97 |
+| terminal's tiles 2880x1800@2 | 0.79 | 0.79 (+0.5%) | 1.05 | 1.05 (+0.0%) | 1.65 |
+
+ms a pass, the median of three rounds; geomean against M28 natively 0.0%, in wasm −1.7%.
+Beyond M28's spread in wasm: the dictionary frames (−10.3%, over 5.8%), the rest within it.
+Natively the GitHub frames' +4.2% is just past M28's 4.0% spread; a pass's cycles, counted
+after the run (`cyc.sh`, three rounds), are within 1.3% of M28's on every workload counted,
+the GitHub frames' +0.0%, silesia `-3`'s −0.2%, the instructions 0.5–4.2% more. Every workload:
+[`results/run28-dict-copy.md`](results/run28-dict-copy.md).
+
+- The tests pass natively, under Node (`wasm32-wasip1`, with and without default features)
+  and on arm64 (`remote-lxc`). AddressSanitizer under the fuzzers (`decode`, `decode_dict`,
+  `interop`, three minutes each) and Miri over AGENTS.md's tests found nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

@@ -1,7 +1,7 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-06 (after the
-raw loops in wasm, run 27 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
+dictionary frames in V8, run 28 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so. The
 decoder is a generic one, natively and in WebAssembly alike.
@@ -33,15 +33,22 @@ more than x86-64's registers. What is left:
   live across it; forced before it, the states themselves are spilled. Tried and slower or no
   faster: the states stored on an error so that they are computed before the copies, the
   short matches' copy inline, and 8 sequences decoded ahead with their matches' sources
-  prefetched (run 26); the three tables in one allocation, one base for all three, and the
-  states computed before the copies by an empty `asm!` (1–6% more instructions, the cycles
-  within 3% either way; [`benchmarks/README.md`](benchmarks/README.md), 2026-11-06).
+  prefetched (run 26); the states computed before the copies by an empty `asm!`. The three
+  tables in one allocation, one base for all three, run 1–6% more instructions natively in
+  as many cycles; they are kept for wasm (run 28).
 - **WebAssembly** runs the same loop since run 27, with the Huffman streams' raw loops: both
   together 10.8% faster than wasm's safe loops by geomean. With the sequences' raw loop alone
   (three rounds), silesia `-3` was 15% faster, the GitHub frames with their dictionary 15%
-  and terminal's tiles 12%, nearly all of what both gave there. What V8's code for it spends
-  is not yet profiled; the dictionary frames take 1.71 times their native time there, the
-  most of the workloads.
+  and terminal's tiles 12%, nearly all of what both gave there. Profiled on the dictionary
+  frames (run 28): matches from the dictionary were copied by `memory.copy`, a call out of
+  the module in V8, now in chunks inline, and the tables are one allocation, which took
+  those frames from 1.71 to 1.63 times their native time, still the most. What is left
+  there is V8's code for the loop: it spills about ten values at the loop's back edge, the
+  bit window among them, so the refill's chain goes through the stack, and a read of bits
+  is about ten instructions to the native build's four (no BMI2 shifts: every count in
+  `cl`, masked by 63). Fewer values carried from one sequence to the next would help it
+  most. Smaller: `read_frame_header`'s reads of a few bytes by `read_exact`, each a
+  `memory.copy` call, about 2 a frame.
 
 ## 2. What is left of the table builds
 
