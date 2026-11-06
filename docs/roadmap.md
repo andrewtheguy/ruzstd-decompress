@@ -33,9 +33,10 @@ more than x86-64's registers. What is left:
   live across it; forced before it, the states themselves are spilled. Tried and slower or no
   faster: the states stored on an error so that they are computed before the copies, the
   short matches' copy inline, and 8 sequences decoded ahead with their matches' sources
-  prefetched (run 26); the states computed before the copies by an empty `asm!`. The three
-  tables in one allocation, one base for all three, run 1–6% more instructions natively in
-  as many cycles; they are kept for wasm (run 28).
+  prefetched (run 26); the states computed before the copies by an empty `asm!` (alone,
+  0.1–6.6% more instructions natively). The three tables in one allocation, one base for
+  all three, run 0.0–1.8% more instructions natively in as many cycles; they are kept for
+  wasm (run 28).
 - **WebAssembly** runs the same loop since run 27, with the Huffman streams' raw loops: both
   together 10.8% faster than wasm's safe loops by geomean. With the sequences' raw loop alone
   (three rounds), silesia `-3` was 15% faster, the GitHub frames with their dictionary 15%
