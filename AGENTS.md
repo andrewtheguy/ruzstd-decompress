@@ -13,8 +13,8 @@
   if one fails, naming the failed ones at the end and exiting nonzero:
   `failed=; for t in decode decode_dict interop; do cargo +nightly fuzz run $t -- -max_total_time=180 || failed="$failed $t"; done; [ -z "$failed" ] || { echo "fuzzing failed:$failed (crashes in fuzz/artifacts/)"; false; }`.
   With the crate's unsafe code forbidden, AddressSanitizer checks mostly `interop`'s libzstd,
-  the C reference. Where there is no nightly, `cargo fuzz run --sanitizer none` on stable.
-  A crash is saved under `fuzz/artifacts/`; commit it with the fix, and `cargo test artifacts`
-  replays them all.
+  the C reference. Fuzz only on nightly, never without a sanitizer; install nightly where it
+  is missing. A crash is saved under `fuzz/artifacts/`; commit it with the fix, and
+  `cargo test artifacts` replays them all.
 - The crate forbids unsafe code (`#![forbid(unsafe_code)]` in `src/lib.rs`).
 - Decode performance is measured as `docs/benchmarks/README.md` describes.
