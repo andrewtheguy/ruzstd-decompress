@@ -1887,11 +1887,14 @@ ms a pass natively, the median of three rounds; geomean against M26 −9.0%, and
 libzstd 1.07 for M26, **0.97** for R26. M26's spread was 0.5–7.7%. Every workload:
 [`results/run26-raw.md`](results/run26-raw.md).
 
-In wasm R26 ran 1.7% slower than M26 by geomean, and 1.0% over three more rounds
-([`results/run26-wasm.md`](results/run26-wasm.md)), within the spread but for silesia `-3`,
-+2.4% and +3.1%. The only change on wasm's path through the sequences was the shifts without
-masks, which wasm now takes as before: with that (R27, three rounds of wasm alone) the
-geomean is −0.1% against M26, every workload within M26's spread
+In wasm R26 ran 1.7% slower than M26 by geomean in the full run, silesia `-3` +3.9% (within
+M26's 4.6% spread); beyond M26's spread, the video clip +8.5% (over 3.5%) and terminal's
+tiles +3.2% (over 0.7%). Three more rounds of wasm alone
+([`results/run26-wasm.md`](results/run26-wasm.md)) gave +0.6% by geomean; beyond M26's
+spread there, silesia `-3` +2.4% (over 1.8%), the GitHub frames +2.1% (over 1.7%) and
+silesia `-19` +1.2% (over 1.1%). The only change on wasm's path through the sequences was the
+shifts without masks, which wasm now takes as before: with that (R27, three rounds of wasm
+alone) the geomean is −0.1% against M26, every workload within M26's spread
 ([`results/run26-wasm-r27.md`](results/run26-wasm-r27.md)).
 
 ## Running it again
