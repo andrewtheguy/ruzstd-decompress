@@ -979,3 +979,56 @@ fn failed_block_adds_no_output() {
     // Errors past the first block were reached, not only ones in the frame header.
     assert!(failed_with_output_before > 0);
 }
+
+/// The small files of the corpus, and those compressed with the small dictionary, decoded and
+/// checked against their originals: every path of the crate's unsafe loops, the sequences' and
+/// the Huffman streams', on files small enough for Miri, which checks their pointers (see
+/// AGENTS.md; it reads the files with isolation off).
+#[test]
+#[cfg(feature = "std")]
+fn small_files_decode() {
+    use crate::decoding::{Dictionary, FrameDecoder, StreamingDecoder};
+    use std::io::Read;
+
+    let mut files: Vec<_> = std::fs::read_dir("./decodecorpus_files")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "zst")
+                && std::fs::metadata(path).unwrap().len() <= 5_000
+        })
+        .collect();
+    files.sort();
+    assert!(files.len() > 50, "{} files", files.len());
+    for path in &files {
+        let compressed = std::fs::read(path).unwrap();
+        let original = std::fs::read(path.with_extension("")).unwrap();
+        let mut decoder = StreamingDecoder::new(&compressed[..]).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert!(out == original, "{}", path.display());
+    }
+
+    let dict = std::fs::read("./dict_tests/dictionary-small").unwrap();
+    let mut frame_decoder = FrameDecoder::new();
+    frame_decoder
+        .add_dict(Dictionary::decode_dict(&dict).unwrap())
+        .unwrap();
+    let mut small: Vec<_> = std::fs::read_dir("./dict_tests/files-small")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    small.sort();
+    assert!(!small.is_empty());
+    for path in &small {
+        let compressed = std::fs::read(path).unwrap();
+        let name = path.file_stem().unwrap();
+        let original =
+            std::fs::read(std::path::Path::new("./dict_tests/files").join(name)).unwrap();
+        let mut decoder =
+            StreamingDecoder::new_with_decoder(&compressed[..], &mut frame_decoder).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        assert!(out == original, "{}", path.display());
+    }
+}

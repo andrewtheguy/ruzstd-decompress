@@ -1799,6 +1799,104 @@ apart, and the 16 above are the measure. Every workload:
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
   AddressSanitizer) found nothing.
 
+## 2026-11-06: unsafe code in the native loops
+
+The question: with the ban on unsafe code lifted (`b4c6dca`), how close do the sequences' and
+the Huffman streams' loops come to libzstd natively, written as libzstd writes them? Before,
+on silesia `-3`, ruzstd-decompress ran 3,600 M instructions a pass to libzstd's 2,408 M, the
+sequences' loop nearly all of the difference, with 44 loads and stores of the stack a
+sequence and a bounds check on each copy (see the [roadmap](../roadmap.md), item 1).
+
+The steps (lab2, natively, a pass's instructions and cycles, `perf stat` of the harness, one
+run each; `main` is U0):
+
+| | | silesia `-3` instructions | cycles |
+|---|---|---:|---:|
+| U0 | `main` at `abd76b0` | 3,600 M | 969 M |
+| U1 | the sequences' loop by raw pointers: `RawRun`, `RawWriter`, `refill_raw` | 3,067 M | 843 M |
+| U2 | U1, a BMI2 build of the loop chosen by `cpuid`; the offset history picked by selects; matches across the ring's wrap in the loop | 2,802 M | 850 M |
+| U3 | U2, the offset history in three fields, the room check against one address | 2,819 M | 833–859 M |
+| U5 | U3, the sequences counted in chunks the source has room for; the shifts without masks | 2,733 M | 845 M |
+| U6 | U5, the four Huffman streams' loops by raw pointers, in a BMI2 build | 2,645 M | 810–855 M |
+| U10 | U6, the padded copy in the same call; each block's last sequence in the loop | 2,674 M | 818–858 M |
+| libzstd | | 2,408 M | 718–736 M |
+
+- **U1** keeps the reader's position as a pointer, refilled with no checks, and the
+  literals' position, the offset history and the ring's tail in locals; a sequence is
+  copied as libzstd's `ZSTD_execSequence` copies it, in a chunk of 16 and then chunks of 32
+  past its end into free space (`WILD`, 32: the literals' padding grew to that), after one
+  check for room. A match within 16 bytes is spread as `ZSTD_overlapCopy8` spreads it, out of
+  line, and one into the dictionary in the loop.
+- **U2**: the BMI2 build's shifts take their count from any register (`shlx`, `shrx`),
+  9% fewer instructions, in as many cycles, as `x86-64-v3` did in run 21. Where the data
+  wraps, the ring's older part, from the head to its end, is taken as the dictionary is: of
+  silesia `-3`'s 14.46 M sequences a pass, 2.6% reach back across the wrap, which went to the
+  slow path before; now 1,493 do, those for which the ring needs room.
+- From U2 on, ruzstd-decompress runs as many instructions a cycle as libzstd (3.3 on silesia
+  `-3`), and the instructions have stopped telling the cycles: U5 runs 3% fewer than U3 in as
+  many. A pass's loads (742 M to libzstd's 706 M), L1 misses (27 M to 30 M), L2 misses
+  (3.9 M to 3.8 M) and mispredictions (4.8 M to 5.4 M) are much the same as libzstd's; its
+  stores are 43% more (423 M to 296 M), about 10 a sequence of the loop's spills: it holds
+  11 values from one sequence to the next and 6 for the whole loop, more than x86-64's
+  registers.
+- **U6**: a Huffman lookup is a shift, a load, a store and a shift, as in libzstd's
+  assembly loop, the steps counted from what every stream has left of its source and its
+  output, with no check of its own: `x-ray` 133 M to 104 M instructions (libzstd 92 M) and
+  36.8 M to 34.6 M cycles; mixed's tiles 11% fewer instructions, 1% fewer cycles.
+- **U10**: a small block paid the loop's setup twice, for the source and for its padded copy,
+  and its last sequence went through the slow tail and the safe writer's setup: the GitHub
+  frames with their dictionary, about 23 sequences a block, 59.2 M to 57.1 M instructions and
+  16.1 M to 15.0 M cycles. The padding at the stream's end is skipped in one step.
+
+Tried and left out (one run each, U4 against U3, the others against U6):
+
+| | | silesia `-3` instructions | cycles |
+|---|---|---:|---:|
+| U4 | U5 with the states stored on an error, so that LLVM computes them before the copies, not after | +4.1% | +3–6% |
+| U7 | the copy of a match within 16 bytes inline | −0.7% | +1.5% |
+| U8 | 8 sequences decoded ahead of their copy, each match's source prefetched, as libzstd's decoder for long windows | +24.6% | +10.1% |
+
+U8's queue went through the stack, about 45 instructions a sequence; libzstd uses that decoder
+only for windows over 16 MB, and Silesia's match sources miss L2 0.27 times a sequence.
+
+The commits: `ac3616b` (the sequences, U10's), `e56ebae` (the Huffman streams) and
+`dc41c17` (wasm's shifts, below). WebAssembly keeps its safe loops: none of this changes
+what it runs, but for the padding skipped in one step and the literals' padding.
+AddressSanitizer under the fuzzers (`decode`, `decode_dict`, `interop`, three minutes each)
+and Miri, over a test of the raw writer against a byte at a time and the decode of the
+corpus's small files (AGENTS.md), found nothing; the tests pass on arm64 (`remote-lxc`),
+which runs the same loops without BMI2.
+
+The full run, on lab2 after a restart (run 26): M26 is `main` at `abd76b0` (U0), R26 the
+branch at U10. Every build decoded every workload to the same output.
+
+| workload | M26 | R26 | libzstd | M26 ÷ libzstd | R26 ÷ libzstd |
+|---|---:|---:|---:|---:|---:|
+| silesia `-3` | 255.96 | 224.07 (−12.5%) | 199.74 | 1.28 | **1.12** |
+| silesia `-19` | 266.48 | 228.26 (−14.3%) | 203.74 | 1.31 | **1.12** |
+| silesia `--fast=4` | 160.56 | 140.50 (−12.5%) | 127.34 | 1.26 | **1.10** |
+| `nci` | 23.81 | 21.25 (−10.8%) | 18.38 | 1.30 | **1.16** |
+| `x-ray` | 9.82 | 9.62 (−2.1%) | 8.75 | 1.12 | **1.10** |
+| the GitHub frames with their dictionary | 4.67 | 4.06 (−13.1%) | 3.63 | 1.29 | **1.12** |
+| the GitHub frames | 18.67 | 17.49 (−6.3%) | 19.51 | 0.96 | **0.90** |
+| mixed's tiles 2880x1800@2 | 492.56 | 471.39 (−4.3%) | 413.15 | 1.19 | **1.14** |
+| the video clip | 15.00 | 15.38 (+2.6%) | 20.30 | 0.74 | **0.76** |
+| terminal's tiles 2880x1800@2 | 0.93 | 0.79 (−14.9%) | 1.65 | 0.56 | **0.48** |
+
+ms a pass natively, the median of three rounds; geomean against M26 −9.0%, and against
+libzstd 1.07 for M26, **0.97** for R26. M26's spread was 0.5–7.7%. Every workload:
+[`results/run26-raw.md`](results/run26-raw.md).
+
+In wasm R26 ran 1.7% slower than M26 by geomean in the full run, silesia `-3` +3.9% (within
+M26's 4.6% spread); beyond M26's spread, the video clip +8.5% (over 3.5%) and terminal's
+tiles +3.2% (over 0.7%). Three more rounds of wasm alone
+([`results/run26-wasm.md`](results/run26-wasm.md)) gave +0.6% by geomean; beyond M26's
+spread there, silesia `-3` +2.4% (over 1.8%), the GitHub frames +2.1% (over 1.7%) and
+silesia `-19` +1.2% (over 1.1%). The only change on wasm's path through the sequences was the
+shifts without masks, which wasm now takes as before: with that (R27, three rounds of wasm
+alone) the geomean is −0.1% against M26, every workload within M26's spread
+([`results/run26-wasm-r27.md`](results/run26-wasm-r27.md)).
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

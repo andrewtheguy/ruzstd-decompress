@@ -6,6 +6,8 @@ use super::scratch::FSEScratch;
 use super::sequence_table::{LL_DEFAULT_ACC_LOG, LL_DEFAULT_DISTRIBUTION};
 use super::sequence_table::{SIZE, SeqEntry, SeqKind, at};
 use crate::bit_io::BitReaderReversed;
+#[cfg(not(target_family = "wasm"))]
+use crate::bit_io::refill_raw;
 use crate::bit_io::{PADDED_LEFT, PADDING};
 use crate::blocks::sequence_section::{
     MAX_LITERAL_LENGTH_CODE, MAX_MATCH_LENGTH_CODE, MAX_OFFSET_CODE,
@@ -33,18 +35,14 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
     let mut padding_bits = 0;
     let mut br = BitReaderReversed::new(bit_stream);
 
-    //skip the 0 padding at the end of the last byte of the bit stream and throw away the first 1 found
-    let mut skipped_bits = 0;
-    loop {
-        let val = br.get_bits(1);
-        skipped_bits += 1;
-        if val == 1 || skipped_bits > 8 {
-            break;
+    // Skip the zeros at the top of the stream's last byte and the 1 after them; a last byte of
+    // zeros, or none, is not the stream's end (the reader goes on into the byte before, so the
+    // error counts 9 bits, as it read them one at a time).
+    match bit_stream.last() {
+        Some(&last) if last != 0 => {
+            br.get_bits(last.leading_zeros() as u8 + 1);
         }
-    }
-    if skipped_bits > 8 {
-        //if more than 7 bits are 0, this is not the correct end of the bitstream. Either a bug or corrupted data
-        return Err(DecodeSequenceError::ExtraPadding { skipped_bits }.into());
+        _ => return Err(DecodeSequenceError::ExtraPadding { skipped_bits: 9 }.into()),
     }
 
     // An RLE table is a table of one state that reads no bits, so it needs no case of its own.
@@ -70,6 +68,20 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
     let mut seq_idx = 0;
     let tables = [ll_table, ml_table, of_table];
     let mut states = [ll_state, ml_state, of_state];
+    // Natively, one call for both, so that a small block pays for the loop's setup once.
+    #[cfg(not(target_family = "wasm"))]
+    if fast_sequences::<E>(
+        &mut br,
+        &mut padded,
+        tables,
+        &mut states,
+        executor,
+        &mut seq_idx,
+        section.num_sequences,
+    )? {
+        padding_bits = PADDING as isize * 8;
+    }
+    #[cfg(target_family = "wasm")]
     if section.num_sequences > 1 && br.can_refill_fast() {
         fast_sequences::<E>(
             &mut br,
@@ -80,6 +92,7 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
             section.num_sequences,
         )?;
     }
+    #[cfg(target_family = "wasm")]
     if seq_idx + 1 < section.num_sequences
         && let Some(copy) = br.padded(&mut padded)
     {
@@ -138,6 +151,193 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
 
 /// The fast loop of [`decode_sequences`]: sequences while `br` can refill twice and one is
 /// left after them, the states and the count moved on.
+///
+/// Natively, as libzstd's loop: the reader's position a raw pointer and the executor's state
+/// in a [`RawRun`] of locals, so that the loop keeps them in registers and checks no bounds
+/// but its own.
+///
+/// [`RawRun`]: crate::decoding::sequence_execution::RawRun
+///
+/// On x86-64 it runs in a build with BMI2 where the processor has it, as libzstd's does: its
+/// shifts take their count from any register, where the others' take it only from `cl`.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+fn fast_sequences<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
+    br: &mut BitReaderReversed<'x>,
+    padded: &'x mut [u8; PADDING + PADDED_LEFT],
+    tables: [&[SeqEntry; SIZE]; 3],
+    states: &mut [usize; 3],
+    executor: &mut SequenceExecutor<'_>,
+    seq_idx: &mut u32,
+    num_sequences: u32,
+) -> Result<bool, E> {
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
+    if crate::common::cpu::has_bmi2() {
+        // SAFETY: the processor has BMI2.
+        return unsafe {
+            fast_sequences_bmi2(br, padded, tables, states, executor, seq_idx, num_sequences)
+        };
+    }
+    fast_sequences_body(br, padded, tables, states, executor, seq_idx, num_sequences)
+}
+
+/// [`fast_sequences_body`] built with BMI2.
+#[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
+#[target_feature(enable = "bmi2")]
+fn fast_sequences_bmi2<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
+    br: &mut BitReaderReversed<'x>,
+    padded: &'x mut [u8; PADDING + PADDED_LEFT],
+    tables: [&[SeqEntry; SIZE]; 3],
+    states: &mut [usize; 3],
+    executor: &mut SequenceExecutor<'_>,
+    seq_idx: &mut u32,
+    num_sequences: u32,
+) -> Result<bool, E> {
+    fast_sequences_body(br, padded, tables, states, executor, seq_idx, num_sequences)
+}
+
+/// The native [`fast_sequences`]: on `br` while it can refill fast, then on its padded copy in
+/// `padded` (see [`BitReaderReversed::padded`]), to which it sets `br`, returning `true`.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
+    br: &mut BitReaderReversed<'x>,
+    padded: &'x mut [u8; PADDING + PADDED_LEFT],
+    [ll_table, ml_table, of_table]: [&[SeqEntry; SIZE]; 3],
+    states: &mut [usize; 3],
+    executor: &mut SequenceExecutor<'_>,
+    seq_idx: &mut u32,
+    num_sequences: u32,
+) -> Result<bool, E> {
+    if num_sequences <= *seq_idx {
+        return Ok(false);
+    }
+    // The sequences the loop may take, all but the last, which is taken after them where the
+    // source has room, without the next states' bits.
+    let mut left = num_sequences - *seq_idx - 1;
+    let first_left = left;
+    let mut last = true;
+    let [mut ll_state, mut ml_state, mut of_state] = *states;
+    let mut padded = Some(padded);
+    let mut on_padded = false;
+    let mut run = executor.raw_run();
+    loop {
+        if br.can_refill_fast() {
+            br.ensure_bits_fast(57);
+            let mut window = br.sentinel_window();
+            let (src, index) = br.raw_index();
+            let src_addr = src as usize;
+            // SAFETY: the index is within the source.
+            let mut ip = unsafe { src.add(index) };
+            // In chunks, each as many sequences as the source has room for: a sequence refills
+            // at most twice, each moving `ip` down by at most 7, so a chunk of `k` from at least
+            // `15 + 14 * (k - 1)` bytes past the start leaves `ip` at least 1 past, with the 8
+            // bytes from it in the source, as `ip` started with. Within a chunk, the loop checks
+            // only its count.
+            loop {
+                // `(d - 15) / 14 + 1` sequences from `d` bytes past the start, none below 15.
+                let room = (ip as usize - src_addr).saturating_sub(1) / 14;
+                let mut chunk = left.min(room as u32);
+                if chunk == 0 {
+                    break;
+                }
+                left -= chunk;
+                while chunk > 0 {
+                    // SAFETY: the chunk's count bounds the refills, as above.
+                    window = unsafe { refill_raw(&mut ip, window) };
+                    let ll = at(ll_table, ll_state);
+                    let ml = at(ml_table, ml_state);
+                    let of = at(of_table, of_state);
+                    let of_add = take_bits(&mut window, of.nb_add_bits);
+                    let ml_add = take_bits(&mut window, ml.nb_add_bits);
+                    if of.nb_add_bits + ml.nb_add_bits + ll.nb_add_bits > 56 - 26 {
+                        // SAFETY: the second of the sequence's two refills, as above.
+                        window = unsafe { refill_raw(&mut ip, window) };
+                    }
+                    let ll_add = take_bits(&mut window, ll.nb_add_bits);
+                    ll_state =
+                        usize::from(ll.next_state) + take_bits(&mut window, ll.nb_bits) as usize;
+                    ml_state =
+                        usize::from(ml.next_state) + take_bits(&mut window, ml.nb_bits) as usize;
+                    of_state =
+                        usize::from(of.next_state) + take_bits(&mut window, of.nb_bits) as usize;
+                    // SAFETY: the executor is used only through `run` until `finish_raw`,
+                    // and a new run is made after each use of it.
+                    let slow = unsafe {
+                        run.execute(
+                            ll.base_value + ll_add as u32,
+                            ml.base_value + ml_add as u32,
+                            of.base_value + of_add as u32,
+                        )
+                    };
+                    match slow {
+                        Ok(None) => {}
+                        Ok(Some(slow)) => {
+                            executor.finish_raw(run);
+                            executor.execute_slow(slow)?;
+                            run = executor.raw_run();
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                    chunk -= 1;
+                }
+            }
+            if left == 0 && ip as usize - src_addr >= 15 {
+                // SAFETY: as for a chunk of one.
+                window = unsafe { refill_raw(&mut ip, window) };
+                let ll = at(ll_table, ll_state);
+                let ml = at(ml_table, ml_state);
+                let of = at(of_table, of_state);
+                let of_add = take_bits(&mut window, of.nb_add_bits);
+                let ml_add = take_bits(&mut window, ml.nb_add_bits);
+                if of.nb_add_bits + ml.nb_add_bits + ll.nb_add_bits > 56 - 26 {
+                    // SAFETY: as for a chunk of one.
+                    window = unsafe { refill_raw(&mut ip, window) };
+                }
+                let ll_add = take_bits(&mut window, ll.nb_add_bits);
+                // SAFETY: as in the loop above.
+                let slow = unsafe {
+                    run.execute(
+                        ll.base_value + ll_add as u32,
+                        ml.base_value + ml_add as u32,
+                        of.base_value + of_add as u32,
+                    )
+                };
+                match slow {
+                    Ok(None) => {}
+                    Ok(Some(slow)) => {
+                        executor.finish_raw(run);
+                        executor.execute_slow(slow)?;
+                        run = executor.raw_run();
+                    }
+                    Err(err) => return Err(err.into()),
+                }
+                last = false;
+            }
+            br.resume_index(ip as usize - src_addr, window);
+        }
+        // Near the stream's start, on a padded copy of what is left, once.
+        if left == 0 && !last {
+            break;
+        }
+        let Some(buf) = padded.take() else {
+            break;
+        };
+        let Some(copy) = br.padded(buf) else {
+            break;
+        };
+        *br = copy;
+        on_padded = true;
+    }
+    executor.finish_raw(run);
+    *seq_idx += first_left - left + u32::from(!last);
+    *states = [ll_state, ml_state, of_state];
+    Ok(on_padded)
+}
+
+/// The fast loop of [`decode_sequences`]: sequences while `br` can refill twice and one is
+/// left after them, the states and the count moved on.
+#[cfg(target_family = "wasm")]
 #[inline(always)]
 fn fast_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
     br: &mut BitReaderReversed<'_>,
@@ -189,6 +389,11 @@ fn fast_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
 /// 0, as the first shift keeps the second under 64.
 #[inline(always)]
 fn take_bits(window: &mut u64, n: u8) -> u64 {
+    // Natively, `!n` is `63 - n` in the shift's six bits, which x86's shifts mask the count to:
+    // no masking of their own. In wasm, as before, the native form being no faster in V8.
+    #[cfg(not(target_family = "wasm"))]
+    let bits = (*window >> 1).wrapping_shr(!u32::from(n));
+    #[cfg(target_family = "wasm")]
     let bits = (*window >> 1) >> (63 - n);
     *window <<= n;
     bits

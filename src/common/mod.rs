@@ -18,3 +18,6 @@ pub const MAX_WINDOW_SIZE: u64 = (1 << 41) + 7 * (1 << 38);
 ///
 /// <https://github.com/facebook/zstd/blob/eca205fc7849a61ab287492931a04960ac58e031/doc/educational_decoder/zstd_decompress.c#L28-L29>
 pub const MAX_BLOCK_SIZE: u32 = 128 * 1024;
+
+#[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
+pub(crate) mod cpu;

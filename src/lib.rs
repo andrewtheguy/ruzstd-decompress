@@ -8,7 +8,7 @@
 #![doc = include_str!("../Readme.md")]
 #![no_std]
 #![deny(trivial_casts, trivial_numeric_casts, rust_2018_idioms)]
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn, clippy::undocumented_unsafe_blocks)]
 
 #[cfg(feature = "std")]
 extern crate std;

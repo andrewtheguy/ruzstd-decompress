@@ -5,12 +5,12 @@ use core::hash::Hasher;
 
 use super::ringbuffer::RingBuffer;
 #[cfg(not(target_family = "wasm"))]
-use super::ringbuffer::SeqWriter;
+use super::ringbuffer::{RawWriter, SeqWriter};
 use crate::decoding::errors::DecodeBufferError;
 
 /// The bytes a block's literals are followed by for the buffer's fast copy of a sequence, which
 /// reads whole chunks of them.
-pub const LITERALS_PADDING: usize = 16;
+pub const LITERALS_PADDING: usize = super::ringbuffer::WILD;
 const _: () = assert!(LITERALS_PADDING >= super::ringbuffer::CHUNK);
 
 /// The frame's decoded bytes: those not yet collected, and before them as many of the
@@ -155,6 +155,28 @@ impl DecodeBuffer {
             ring: self.buffer.seq_writer(dict, dict_room, most),
             total_output_counter: &mut self.total_output_counter,
         }
+    }
+
+    /// A raw writer of sequences to the buffer, for the fast loop (see [`RawWriter`]), of at
+    /// most `most` bytes; nothing else may touch the buffer until [`Self::finish_raw_writer`]
+    /// takes it back.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn raw_writer(&mut self, most: usize) -> RawWriter {
+        let (dict, dict_room): (&[u8], usize) = match self.dict_room() {
+            Some(room) => (&self.dict_content, room),
+            None => (&[], 0),
+        };
+        self.buffer.raw_writer(dict, dict_room, most)
+    }
+
+    /// The bytes `writer`, from [`Self::raw_writer`], wrote, added to the buffer; how many.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn finish_raw_writer(&mut self, writer: RawWriter) -> usize {
+        let written = self.buffer.finish_raw(writer);
+        self.total_output_counter += written as u64;
+        written
     }
 
     /// How many bytes more of the ring matches may reach past into the dictionary: while the
