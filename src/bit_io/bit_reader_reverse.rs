@@ -1,13 +1,14 @@
 use core::convert::TryInto;
 
-/// The zero bytes before a [`BitReaderReversed::padded`] copy of a source: enough that
-/// [`BitReaderReversed::can_refill_fast_twice`] holds until the window is wholly before the
-/// source's start, so that a loop of fast refills on the copy reads all of the source.
+/// The zero bytes before a [`BitReaderReversed::padded`] copy of a source: enough that the
+/// index stays at 15 or more, room for two fast refills in a row, until the window is wholly
+/// before the source's start, so that a loop of fast refills on the copy reads all of the
+/// source.
 pub const PADDING: usize = 32;
 
 /// The most bytes of a source a [`BitReaderReversed::padded`] copy takes: those a reader has
-/// left when [`BitReaderReversed::can_refill_fast_twice`] stops holding, at most 14 before its
-/// window and the window's 8.
+/// left when its index falls below 15, too few for two fast refills in a row: at most 14
+/// before its window and the window's 8.
 pub const PADDED_LEFT: usize = 22;
 
 /// Zstandard encodes some types of data in a way that the data must be read
@@ -186,9 +187,10 @@ impl<'s> BitReaderReversed<'s> {
 
     /// The reader on a copy of what is left of its source, after [`PADDING`] zero bytes, in
     /// `buf`: it reads on as this one would, the zeros past the source's start included, but
-    /// [`Self::can_refill_fast_twice`] holds until its window starts 17 bytes before the
-    /// source's start, so that fast refills reach that start and past it. Its
-    /// [`Self::bits_remaining`] counts the zero bytes, `PADDING * 8` more than this one's.
+    /// its index stays at 15 or more, room for two fast refills in a row, until its window
+    /// starts 17 bytes before the source's start, so that fast refills reach that start and
+    /// past it. Its [`Self::bits_remaining`] counts the zero bytes, `PADDING * 8` more than
+    /// this one's.
     ///
     /// Only while the container holds the 8 bytes from `index`, as every refill leaves it but
     /// one reaching the source's start, and at most [`PADDED_LEFT`] bytes are left; `None`
