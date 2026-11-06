@@ -19,9 +19,9 @@
 - After changes to unsafe code, or to what calls it, run the tests that reach it under Miri, on
   nightly (install it with `rustup +nightly component add miri` where it is missing), with
   isolation off so that they read the corpus files:
-  `MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test --lib -- raw_writer small_files_decode ringbuffer short_writer`.
-  Keep that set reaching every unsafe path, and small enough for Miri.
-- Unsafe code is allowed where it makes decoding measurably faster (natively, against libzstd),
+  `MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test --lib -- raw_writer small_files_decode short_writer`.
+  Keep that set reaching every unsafe path, and small enough for Miri (about 12 minutes here).
+- Unsafe code is allowed where it makes decoding measurably faster on the benchmarks' workloads,
   kept to the hot loops' loads and copies; the rest of the crate stays safe. Every `unsafe`
   block has a `// SAFETY:` comment saying why its pointers are in bounds
   (`clippy::undocumented_unsafe_blocks`), every `unsafe fn` a `# Safety` section, and

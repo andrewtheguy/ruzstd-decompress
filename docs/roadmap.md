@@ -1,29 +1,41 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-06 (after the
-table of pairs' checks, run 25 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
+unsafe native loops, run 26 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
-as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so.
-zDesk decodes in WebAssembly. The crate stays free of unsafe code.
+as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so. The
+decoder is a generic one, natively and in WebAssembly alike.
 
-Natively, by geomean over the 10 workloads (run 24), ruzstd-decompress takes 1.06 times
-libzstd's time: 1.23–1.32 times on Silesia but `x-ray` (1.09), 1.19 on the GitHub frames
-with their dictionary, 1.16 on mixed's tiles. It is as fast on the GitHub frames without it
-(1.00), and faster on the raw blocks of the video clip (0.77) and terminal's tiles (0.57).
-In wasm, the workloads take 1.27–1.48 times their native time, the dictionary frames 1.9;
-the video clip's raw blocks take the same.
+Unsafe code is allowed since run 26, kept to the hot loops: natively, the sequences' and the
+four Huffman streams' loops run by raw pointers, as libzstd's, in a BMI2 build where the
+processor has it. WebAssembly keeps the safe loops.
+
+Natively, by geomean over the 10 workloads (run 26), ruzstd-decompress takes 0.97 times
+libzstd's time: 1.10–1.16 times on Silesia, `x-ray` included, 1.12 on the GitHub frames
+with their dictionary, 1.14 on mixed's tiles; 0.90 on the GitHub frames without it, and
+less on the raw blocks of the video clip (0.76) and terminal's tiles (0.48). In wasm the
+workloads take 1.24–1.48 times their native time before run 26 (the dictionary frames 1.9,
+the video clip's raw blocks the same): on Silesia 1.44–1.87 times native libzstd's (run 26).
 
 ## 1. The sequences, again
 
-On silesia `-3` (lab2, before run 21), the sequences' decoding and execution were
-3.1 G instructions a pass to libzstd's 1.7 G, about 215 a sequence, 44 of them loads and
-stores of the stack: the loop's state does not fit the registers. Natively, the fast loop
-keeps the ring's and the executor's state in locals (4–6% off Silesia), and copies a
-short sequence in two copies of 16 bytes, without loops or most of their checks (run 21:
-silesia `-3` 4–10% faster, its mispredictions near libzstd's); in WebAssembly the locals
-were 6–12% slower in V8, so that build executes them as before (run 18 lists what was
-tried). What is left:
-- **WebAssembly**: V8's code for the loop spills either way. A form of the loop it
+Natively (run 26), the loop is libzstd's: the reader's position a raw pointer, the
+literals', the offset history and the ring's tail in locals, each sequence copied in wild
+chunks past its end after one check for room, a match within 16 bytes and one back across
+the ring's wrap in the loop, in a BMI2 build. On silesia `-3` it runs as many instructions a
+cycle as libzstd (3.3), its loads, L1 and L2 misses and mispredictions much the same; it
+trails by about 7 cycles a sequence (40 to 35), with about 10 stores a sequence more, the
+loop's spills: 11 values carried from one sequence to the next and 6 for the whole loop,
+more than x86-64's registers. What is left:
+- **The registers**, natively: the three tables' bases could be one, were the tables in one
+  allocation, the states then indices into it; that frees two. Tried and slower or no
+  faster: the states stored on an error so that they are computed before the copies, the
+  short matches' copy inline, and 8 sequences decoded ahead with their matches' sources
+  prefetched (run 26).
+- **The raw loop in WebAssembly**: not tried. Its loops are still the safe ones. The raw
+  pointers would take Rust's bounds checks away there too; whether V8's code for the raw
+  loop spills less than for the safe one (below) is to be measured, on the same workloads.
+- **The safe loop in WebAssembly**: V8's code for the loop spills either way. A form of the loop it
   takes better is not known; the forms tried are in run 18. Since #23 it runs 1.4% more
   instructions on silesia `-3` than before (75 M a pass, about 5 a sequence), not more of
   the stack's loads and stores: V8's code for the loop as #23 wrote it (run 23). Each of a
@@ -35,35 +47,9 @@ tried). What is left:
   frames 1.5% more instructions, `x-ray` and terminal's tiles the same. V8 takes four
   instructions to load a mask (no scaled index for a wasm load) and spills more of the
   loop's values. Natively it ran 4% more cycles on silesia `-3` and nci.
-- **The registers**: the loop's 44 loads and stores of the stack a sequence. Decoding a
-  batch into an array before executing it, by a function each, and a table's entry
-  packed into a `u64`, were both slower (run 21): the decoding alone took 117–119
-  instructions a sequence, the six fields' takes 48 of them.
-- **The longer sequences' copies**, natively: those with over 16 literals or a match over
-  16 bytes, or its source within 16 bytes of the tail, about a quarter on silesia, still
-  go by chunks with three or four bounds checks each. Taking up to 32 of each the same
-  way made the loop's spills worse (run 21's S3). In wasm, every sequence is copied that
-  way. Natively they are not worth more (counted 2026-11-05 on lab2, after run 21): about
-  10 of the 245 instructions a sequence (callgrind), 2–3% of the cycles sampled. Of the
-  236 M cycles a pass ruzstd trails libzstd by on silesia `-3`, 225 M are the sequences',
-  and it is the instruction count, 3,625 M to 2,408 M a pass (`perf stat`), at more
-  instructions a cycle (3.9 to 3.2); the cache misses, the loads stalled on a store and the
-  TLB misses are much the same as libzstd's. The hottest instruction in both is the match
-  source's load (17% of the cycles, libzstd's 14%). The rest of the 80 instructions more a
-  sequence are the six fields' takes, a third the cost in libzstd's BMI2 build of its loop
-  (chosen at run time, which needs unsafe code), and the checks and the spills.
-- The sequences the fast copy does not take, 4% on silesia (run 21): matches from less
-  than 16 bytes back (a repeated pattern was tried on lab1, and was no faster), and
-  matches back across the ring's wrap, at about 197 instructions each in the slow path.
-  Taken by the fast loop's writer, or by one of the slow path's, they were no faster
-  as the harness decodes; decoded by `read_to_end`, which leaves twice as many of them,
-  the loop's writer ran 2% fewer instructions.
 - **The dictionary frames in wasm** take 1.8 times their native time: there the fast
   copy takes no match into the dictionary, which the slow path takes (run 20; the check
   for one in the loop made V8's code 2% slower on silesia).
-- Not BMI2: a build for `x86-64-v3`, whose shifts take any register, ran 7% fewer
-  instructions on Silesia in 0.5–2% more cycles (run 21). What libzstd's lead is, in
-  cycles, at much the same mispredictions, is not yet known.
 
 ## 2. What is left of the table builds
 
@@ -101,14 +87,12 @@ On uncover (lab1), which builds 847 sequence tables and 88 Huffman tables a pass
 
 ## 3. The Huffman loops
 
-Natively, the four streams' loop from the table of pairs takes four refills a round
-between its checks (run 22: `x-ray` 8% and mixed's tiles 5% fewer cycles). On `x-ray` it
-runs about 15.8 instructions a lookup, libzstd's assembly loop about 9: the lookup's own
-11 or so, a third of them the stack's, the four windows, output chunks, their offsets and
-the table being more than the registers hold; and each refill's 16, with its bounds
-checks. An entry of separate bytes, each loaded on its own, took 1 instruction a lookup
-fewer and 14% more cycles on `x-ray`; the output staged on the stack and copied out each
-round, 6% more (run 22 lists what was tried).
+Natively (run 26), both of the four streams' loops run by raw pointers, as libzstd's
+assembly loop: a lookup is a shift, a load, a store and a shift, the steps counted from what
+every stream has left of its source and output, in a BMI2 build. On `x-ray` a pass runs
+104 M instructions to libzstd's 92 M, in 1.10 times its time; mixed's tiles, mostly Huffman
+literals, 1.14. The loop waits on each stream's chain from one lookup to the next, as
+libzstd's does.
 
 In wasm, the table of pairs' loop moves its windows on by a multiplication,
 and each stream finishes from the table of pairs: video 5–6% faster in
