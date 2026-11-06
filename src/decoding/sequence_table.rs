@@ -66,27 +66,48 @@ impl SeqKind {
 }
 
 /// A sequence decoding table: an FSE table's states, or an RLE code as a table of one state.
+///
+/// Each kind of table has entries of its own: one built from a description, a block's or a
+/// dictionary's, or copied from a dictionary; the predefined one; and the RLE one. A block
+/// using the predefined table or an RLE code then leaves the dictionary's table where it was,
+/// for the frames after it.
 #[derive(Clone)]
 pub struct SeqTable {
-    /// Empty until a table is built, so that a new decoder allocates nothing it may not use,
-    /// then always `SIZE` long.
+    /// The entries in use, of the kind `slot`: empty until a table of its kind is built, so
+    /// that a new decoder allocates nothing it may not use, then always `SIZE` long.
     entries: Vec<SeqEntry>,
+    /// The other kinds' entries, by [`Slot`], that of `slot` being empty: swapped with
+    /// `entries` when another kind is used, so that the loop over the sequences finds the table
+    /// in use as it would were there only one.
+    others: [Vec<SeqEntry>; 3],
+    /// The kind in use.
+    slot: Slot,
     /// How many bits the first state is read from; `None` until a table is built, since a block
     /// that repeats the previous table needs there to be one.
     accuracy_log: Option<u8>,
-    /// The entries are the predefined distribution's states, which a later block asking for
-    /// them, in this frame or a later one, can keep: a reset leaves them.
+    /// The predefined entries hold the predefined distribution's states, which a later block
+    /// asking for them, in this frame or a later one, can keep: a reset leaves them.
     holds_predefined: bool,
-    /// The dictionary whose table the entries are, as copied, kept through resets as
+    /// The dictionary whose table the built entries are, as copied, kept through resets as
     /// `holds_predefined` is, so that a frame using it again need not copy it in (see
     /// [`Self::reinit_from_dict`]); `None` once anything else may have been built in them.
     dict: Option<u32>,
+}
+
+/// Which of a [`SeqTable`]'s entries are in use.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum Slot {
+    Built = 0,
+    Predefined = 1,
+    Rle = 2,
 }
 
 impl SeqTable {
     pub fn new() -> SeqTable {
         SeqTable {
             entries: Vec::new(),
+            others: [Vec::new(), Vec::new(), Vec::new()],
+            slot: Slot::Built,
             accuracy_log: None,
             holds_predefined: false,
             dict: None,
@@ -100,13 +121,13 @@ impl SeqTable {
     /// Take `other`'s states, the table of dictionary `dict_id`: copied only if this table no
     /// longer holds them from an earlier frame.
     pub fn reinit_from_dict(&mut self, other: &SeqTable, dict_id: u32) {
+        self.select(Slot::Built);
         if self.dict != Some(dict_id) {
             self.entries.clear();
             self.entries.extend_from_slice(&other.entries);
             self.dict = Some(dict_id);
         }
         self.accuracy_log = other.accuracy_log;
-        self.holds_predefined = other.holds_predefined;
     }
 
     /// Forget which dictionary's table this one holds, so that the next frame using one copies
@@ -115,17 +136,37 @@ impl SeqTable {
         self.dict = None;
     }
 
-    /// Room for every state, made on the first build.
-    fn sized(&mut self) {
+    /// Use the entries of `slot`.
+    fn select(&mut self, slot: Slot) {
+        if self.slot != slot {
+            core::mem::swap(&mut self.entries, &mut self.others[self.slot as usize]);
+            core::mem::swap(&mut self.entries, &mut self.others[slot as usize]);
+            self.slot = slot;
+        }
+    }
+
+    /// The entries of `slot`, with room for every state, made on its first build; now in use.
+    fn take(&mut self, slot: Slot) -> &mut [SeqEntry; SIZE] {
+        self.select(slot);
         if self.entries.len() != SIZE {
             self.entries.resize(SIZE, SeqEntry::default());
         }
+        self.entries
+            .as_mut_slice()
+            .try_into()
+            .expect("sized to SIZE")
     }
 
     /// Build the table of `fse`'s distribution (read with [`FSETable::read_distribution`]), a
     /// table of `kind`'s codes.
     pub fn build_from_fse(&mut self, fse: &FSETable, kind: SeqKind) -> Result<(), FSETableError> {
-        self.build(fse.accuracy_log, &fse.symbol_probabilities, kind)
+        self.dict = None;
+        self.build(
+            Slot::Built,
+            fse.accuracy_log,
+            &fse.symbol_probabilities,
+            kind,
+        )
     }
 
     /// Take the predefined distribution's states, unless the table already holds them.
@@ -135,37 +176,34 @@ impl SeqTable {
             SeqKind::MatchLength => (ML_DEFAULT_ACC_LOG, &ML_DEFAULT_DISTRIBUTION),
             SeqKind::Offset => (OF_DEFAULT_ACC_LOG, &OF_DEFAULT_DISTRIBUTION),
         };
-        if !self.holds_predefined {
-            self.build(acc_log, distribution, kind)?;
+        if self.holds_predefined {
+            self.select(Slot::Predefined);
+        } else {
+            self.build(Slot::Predefined, acc_log, distribution, kind)?;
             self.holds_predefined = true;
         }
         self.accuracy_log = Some(acc_log);
         Ok(())
     }
 
-    /// The states of a distribution of `kind`'s codes, each with its code's value, built
-    /// straight from the probabilities as libzstd builds them (`ZSTD_buildFSETable`).
+    /// The states of a distribution of `kind`'s codes in the entries of `slot`, each with its
+    /// code's value, built straight from the probabilities as libzstd builds them
+    /// (`ZSTD_buildFSETable`).
     fn build(
         &mut self,
+        slot: Slot,
         acc_log: u8,
         probabilities: &[i32],
         kind: SeqKind,
     ) -> Result<(), FSETableError> {
         self.accuracy_log = None;
-        self.holds_predefined = false;
-        self.dict = None;
         if probabilities.len() > kind.codes() {
             return Err(FSETableError::TooManySymbols {
                 got: probabilities.len(),
             });
         }
         let (base, bits) = kind.values();
-        self.sized();
-        let entries: &mut [SeqEntry; SIZE] = self
-            .entries
-            .as_mut_slice()
-            .try_into()
-            .expect("sized to SIZE");
+        let entries = self.take(slot);
         build_states(
             acc_log,
             probabilities,
@@ -186,16 +224,13 @@ impl SeqTable {
     /// Every state is `code`, and no bits are read for the next one.
     pub fn build_rle(&mut self, code: u8, kind: SeqKind) {
         let (base_value, nb_add_bits) = kind.code_value(code);
-        self.sized();
-        self.entries[0] = SeqEntry {
+        self.take(Slot::Rle)[0] = SeqEntry {
             base_value,
             next_state: 0,
             nb_add_bits,
             nb_bits: 0,
         };
         self.accuracy_log = Some(0);
-        self.holds_predefined = false;
-        self.dict = None;
     }
 
     /// How many bits the first state is read from, and the states, as an array: a state masked
@@ -415,6 +450,7 @@ mod tests {
         table.build_predefined(SeqKind::LiteralLength).unwrap();
         assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
         assert_eq!(states(&table)[0], SeqEntry::default(), "not rebuilt");
+        table.entries[0] = expected[0];
 
         table.build_rle(20, SeqKind::LiteralLength);
         assert_eq!(table.states().unwrap().0, 0);
@@ -427,8 +463,31 @@ mod tests {
                 nb_bits: 0
             }
         );
-        // An RLE table is not the predefined one any more.
+        // An RLE table leaves the predefined one, and either leaves a dictionary's.
         table.build_predefined(SeqKind::LiteralLength).unwrap();
         assert_eq!(states(&table), expected);
+
+        let mut dict = SeqTable::new();
+        let mut other = fse.clone();
+        other.symbol_probabilities[0] += 1;
+        other.symbol_probabilities[1] -= 1;
+        dict.build_from_fse(&other, SeqKind::LiteralLength).unwrap();
+        let dict_states = states(&dict);
+        assert_ne!(dict_states, expected);
+        table.reinit_from_dict(&dict, 7);
+        assert_eq!(states(&table), dict_states);
+        table.build_predefined(SeqKind::LiteralLength).unwrap();
+        assert_eq!(states(&table), expected);
+        table.build_rle(20, SeqKind::LiteralLength);
+        table.reset();
+        // The next frame takes the dictionary's again with no copy, and then one built from a
+        // block's description replaces it.
+        table.others[Slot::Built as usize][0] = SeqEntry::default();
+        table.reinit_from_dict(&dict, 7);
+        assert_eq!(states(&table)[0], SeqEntry::default(), "not copied");
+        table.build_from_fse(&fse, SeqKind::LiteralLength).unwrap();
+        assert_eq!(states(&table), expected);
+        table.reinit_from_dict(&dict, 7);
+        assert_eq!(states(&table), dict_states);
     }
 }

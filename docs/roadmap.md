@@ -1,18 +1,18 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-05 (after the
-Huffman tables' build, run 19 of
+matches into the dictionary, run 20 of
 [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so.
 zDesk decodes in WebAssembly. The crate stays free of unsafe code.
 
-Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.15 times
-libzstd's time: 1.34–1.44 times on Silesia but `x-ray` (1.21), 1.57 on the GitHub
-frames with their dictionary. It is faster on the GitHub frames without it (0.96 times
-libzstd's time), the raw blocks of the video clip (0.80) and terminal's tiles (0.60). In
-wasm, the workloads take 1.2–1.4 times their native time, the dictionary frames 1.6;
-the video clip's raw blocks take 1.08 times.
+Natively, by geomean over the 10 workloads, ruzstd-decompress takes 1.12 times
+libzstd's time: 1.35–1.47 times on Silesia but `x-ray` (1.20), 1.28 on the GitHub
+frames with their dictionary. It is faster on the GitHub frames without it (0.95 times
+libzstd's time), the raw blocks of the video clip (0.76) and terminal's tiles (0.63). In
+wasm, the workloads take 1.2–1.4 times their native time, the dictionary frames 1.8;
+the video clip's raw blocks take 1.09 times.
 
 ## 1. The sequences, again
 
@@ -30,6 +30,9 @@ so that build executes them as before (run 18 lists what was tried). What is lef
 - The 2–11% of sequences the fast copy does not take (lab1, tiles): matches from
   less than 16 bytes back (a repeated pattern was tried, and was no faster), and
   those near the end of the initialised buffer.
+- **The dictionary frames in wasm** take 1.8 times their native time: there the fast
+  copy takes no match into the dictionary, which the slow path takes (run 20; the check
+  for one in the loop made V8's code 2% slower on silesia).
 - libzstd's sequence loop is built for BMI2 when the processor has it (its
   `_bmi2` functions), whose shifts take no `cl` register: the take of each field of
   bits is 7 instructions here. The crate cannot pick a function at run time without
