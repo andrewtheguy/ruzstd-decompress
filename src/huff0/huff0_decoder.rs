@@ -334,7 +334,21 @@ impl HuffmanTable {
         let (mut at0, mut at1, mut at2, mut at3) = (0, 0, 0, 0);
         let can_refill =
             |b: [&BitReaderReversed<'_>; 4]| b.iter().all(|b| b.can_refill_fast_times(PAIRS_ROUND));
-        if can_refill([&b0, &b1, &b2, &b3]) {
+        // The last offset of each stream's output from which a round's lookups have the room
+        // they may write to: one compare a stream a round, from which the compiler also knows
+        // the round's slice of the output is in bounds.
+        const ROUND_OUT: usize = PAIRS_ROUND * PAIRS_OUT;
+        // The tail a stream needs for a round's refills, as `refill_tail` counts them.
+        const ROUND_TAIL: usize = 8 + 8 * PAIRS_ROUND;
+        let limits = (
+            out0.len().checked_sub(ROUND_OUT),
+            out1.len().checked_sub(ROUND_OUT),
+            out2.len().checked_sub(ROUND_OUT),
+            out3.len().checked_sub(ROUND_OUT),
+        );
+        if let (Some(l0), Some(l1), Some(l2), Some(l3)) = limits
+            && can_refill([&b0, &b1, &b2, &b3])
+        {
             b0.ensure_bits_fast(57);
             b1.ensure_bits_fast(57);
             b2.ensure_bits_fast(57);
@@ -345,21 +359,30 @@ impl HuffmanTable {
                 b2.sentinel_window(),
                 b3.sentinel_window(),
             );
+            // The refills from each source's tail, checked against its length once a round.
+            let (Some(mut t0), Some(mut t1), Some(mut t2), Some(mut t3)) =
+                (b0.tail(), b1.tail(), b2.tail(), b3.tail())
+            else {
+                unreachable!("each container holds its 8 bytes after a fast refill")
+            };
             // While every stream has the output a round's lookups may write to.
-            while let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
-                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out0, at0),
-                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out1, at1),
-                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out2, at2),
-                room::<{ PAIRS_ROUND * PAIRS_OUT }>(out3, at3),
-            ) {
+            while at0 <= l0 && at1 <= l1 && at2 <= l2 && at3 <= l3 {
+                let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
+                    room::<ROUND_OUT>(out0, at0),
+                    room::<ROUND_OUT>(out1, at1),
+                    room::<ROUND_OUT>(out2, at2),
+                    room::<ROUND_OUT>(out3, at3),
+                ) else {
+                    unreachable!("each offset is at most its limit")
+                };
                 let (mut d0, mut d1, mut d2, mut d3) = (0, 0, 0, 0);
                 for refill in 0..PAIRS_ROUND {
                     // The check before the round's first refill was for all of its refills.
                     if refill > 0 {
-                        w0 = b0.refill_window_fast(w0);
-                        w1 = b1.refill_window_fast(w1);
-                        w2 = b2.refill_window_fast(w2);
-                        w3 = b3.refill_window_fast(w3);
+                        w0 = BitReaderReversed::refill_tail(&mut t0, w0);
+                        w1 = BitReaderReversed::refill_tail(&mut t1, w1);
+                        w2 = BitReaderReversed::refill_tail(&mut t2, w2);
+                        w3 = BitReaderReversed::refill_tail(&mut t3, w3);
                     }
                     for _ in 0..PAIRS_A_REFILL {
                         Self::decode_pair_aligned(pairs, &mut w0, c0, &mut d0);
@@ -372,18 +395,22 @@ impl HuffmanTable {
                 at1 += d1;
                 at2 += d2;
                 at3 += d3;
-                if !can_refill([&b0, &b1, &b2, &b3]) {
+                if !(t0.len() >= ROUND_TAIL
+                    && t1.len() >= ROUND_TAIL
+                    && t2.len() >= ROUND_TAIL
+                    && t3.len() >= ROUND_TAIL)
+                {
                     break;
                 }
-                w0 = b0.refill_window_fast(w0);
-                w1 = b1.refill_window_fast(w1);
-                w2 = b2.refill_window_fast(w2);
-                w3 = b3.refill_window_fast(w3);
+                w0 = BitReaderReversed::refill_tail(&mut t0, w0);
+                w1 = BitReaderReversed::refill_tail(&mut t1, w1);
+                w2 = BitReaderReversed::refill_tail(&mut t2, w2);
+                w3 = BitReaderReversed::refill_tail(&mut t3, w3);
             }
-            b0.consume_to_sentinel(w0);
-            b1.consume_to_sentinel(w1);
-            b2.consume_to_sentinel(w2);
-            b3.consume_to_sentinel(w3);
+            b0.resume_tail(t0, w0);
+            b1.resume_tail(t1, w1);
+            b2.resume_tail(t2, w2);
+            b3.resume_tail(t3, w3);
         }
 
         *brs = [b0, b1, b2, b3];

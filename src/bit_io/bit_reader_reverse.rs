@@ -177,6 +177,46 @@ impl<'s> BitReaderReversed<'s> {
         (self.bit_container | 1) << self.bits_consumed
     }
 
+    /// The source up to the container's last byte, `source[..index + 8]`, for a loop of
+    /// [`Self::refill_tail`]: the refills are checked against its length, which the loop's own
+    /// check can bound, so that they need no bounds checks of their own. Only while the
+    /// container holds the 8 bytes from `index`, as after [`Self::ensure_bits_fast`]; `None`
+    /// otherwise.
+    #[inline(always)]
+    pub fn tail(&self) -> Option<&'s [u8]> {
+        if self.extra_bits != 0 {
+            return None;
+        }
+        self.source.get(..self.index.checked_add(8)?)
+    }
+
+    /// [`Self::refill_window_fast`] on `tail`, from [`Self::tail`]: the window after the bits
+    /// taken off the top of `window`, and `tail` moved down by the whole bytes taken. Only while
+    /// `tail` is at least 16 bytes long; the reader is set from it by [`Self::resume_tail`].
+    ///
+    /// The bytes taken are at most 8 to the compiler (`trailing_zeros` is at most 64), so that a
+    /// check of `8 + 8 * n` bytes before `n` refills spares them any of their own, and nothing
+    /// is masked on the way from the window to the load.
+    #[inline(always)]
+    pub fn refill_tail(tail: &mut &'s [u8], window: u64) -> u64 {
+        let consumed = window.trailing_zeros() as usize;
+        let rest = &tail[..tail.len() - consumed / 8];
+        let bytes = rest.last_chunk::<8>().expect("a tail of 16 bytes or more");
+        *tail = rest;
+        (u64::from_le_bytes(*bytes) | 1) << (consumed % 8)
+    }
+
+    /// The reader where a loop of [`Self::refill_tail`] on its [`Self::tail`] left `tail` and
+    /// `window`.
+    #[inline(always)]
+    pub fn resume_tail(&mut self, tail: &'s [u8], window: u64) {
+        debug_assert!(tail.as_ptr() == self.source.as_ptr() && tail.len() <= self.source.len());
+        let bytes = tail.last_chunk::<8>().expect("a tail of 8 bytes or more");
+        self.index = tail.len() - 8;
+        self.bit_container = u64::from_le_bytes(*bytes);
+        self.consume_to_sentinel(window);
+    }
+
     /// The reader on a copy of what is left of its source, after [`PADDING`] zero bytes, in
     /// `buf`: it reads on as this one would, the zeros past the source's start included, but
     /// [`Self::can_refill_fast_twice`] holds until its window starts 17 bytes before the

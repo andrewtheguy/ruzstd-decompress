@@ -1715,6 +1715,87 @@ their dictionary +3.9% over 3.6%). Every workload:
   its data does. The still stream, whose size is not known, still grows from there: once
   for a reused decoder, as in zDesk.
 
+## 2026-11-06: the table of pairs' checks in wasm
+
+The question: in wasm, what does a round of the four streams' loop from the table of pairs
+spend besides its lookups? On `x-ray`, which it decodes nearly all of, the loop is 85% of
+the instructions sampled (`perf` over `node --perf-prof`, `main` at `74df403`). Of a round
+of 20 lookups, about 40 instructions are the four streams' output room checks, which LLVM
+vectorizes and V8 takes back lane by lane, and about 24 the refills' bounds checks on each
+source (`&source[index..][..8]`), with the length loaded from the stack.
+
+The four output positions go through a vector (LLVM's SLP vectorizer) on the way to each
+store. With that vectorizer off for the whole build (`-C llvm-args=-vectorize-slp=false`),
+the wasm was slower, not faster (harness medians, three rounds): `x-ray` 5.8%, mixed's tiles
+4.8%, Silesia `-3` and `nci` 2.8–2.9%. The vector keeps the positions out of the general
+registers, of which V8 has too few for the loop.
+
+The variants (lab2, wasm unless said, a pass's instructions and cycles over the whole
+process, the median of the runs):
+
+| | | `x-ray` instructions | `x-ray` cycles |
+|---|---|---:|---:|
+| M30 | `main` at `74df403` | 194.2 M | 47.8–51.0 M |
+| P1 | each stream's last offset with a round's room, found once: one compare a round | −4.1% | within the spread |
+| P2 | P1, the refills from the source to the container's end, checked against its length once a round | −10.0% | between P1's and M30's |
+| P2c | P2 without the mask on the bytes taken | −10.7% | below M30's |
+| P3 | P2c, the sequences' fast loop refilled the same way | −11.3% | |
+
+- **P1**: the four room checks became one vector compare (`i32x4.le_u`, `all_true`).
+- **P2** put two operations on each stream's chain from one lookup to the next, at each
+  refill: the mask on the bytes taken (`& 63`, which proved the refill in bounds), and the
+  `- 8` to the window's start, which wasm cannot fold into the load. Its loop runs fewer
+  instructions than P1's in more cycles: it waits on those chains.
+- **P2c** takes the bytes as at most 8, as `trailing_zeros` is at most 64 to the compiler,
+  and checks `8 + 8 * refills` bytes a round: no mask, no bounds checks. Writing the offset
+  as `(len - 8) - bytes`, to take the `- 8` off the chain, LLVM wrote back to
+  `(len - bytes) - 8` with a bounds check.
+- **P3** ran fewer instructions on Silesia (wasm 2.2%, natively 1.1%) in more cycles (wasm
+  `-3` 1.7%, `nci` 2.1%): the tail's length is on the sequences' chain.
+
+The wasm builds' times move with the process: each run lands in a faster or a slower mode,
+`x-ray` 12.0 or 13 ms and more, for M30 as for P2c. In 16 rounds of each in turn (`perf
+stat`, a pass), P2c against M30:
+
+| | `x-ray` cycles | `x-ray` median | mixed cycles | mixed median |
+|---|---:|---:|---:|---:|
+| wasm | −7.3% | −7.4% (14 of 16 rounds faster) | −0.8% | −0.8% |
+| native | +1.4% | +1.0% | −0.3% | −1.1% |
+
+Mixed's tiles in wasm, in four such sets of runs, were −1.2%, +1.9%, −0.8% and +2.3%: no
+clear change. Natively the loop runs 4 refills a round and its instructions fell 3.6% on
+`x-ray`, in 1% more cycles there, in every run.
+
+The commit (P2c): in the four streams' loop from the table of pairs, each stream's last
+offset with a round's room is found once, and the refills are from the source up to the
+container's end (`BitReaderReversed::tail`, `refill_tail`, `resume_tail`), checked once a
+round. A round now stops with up to 40 bytes of a source left natively, where it stopped
+at 37, the rest decoded a stream at a time as before; in wasm at 16, as before.
+
+The full run, on lab2 after a restart (run 25). Every variant decoded every workload to the
+same output.
+
+| workload | native M30 | native P2c | wasm M30 | wasm P2c | libzstd |
+|---|---:|---:|---:|---:|---:|
+| `x-ray` | 9.63 | 9.73 (+1.0%) | 12.78 | 12.76 (−0.1%) | 8.87 |
+| mixed 2880x1800@2 | 481.25 | 481.47 (+0.0%) | 661.62 | 676.93 (+2.3%) | 412.30 |
+| silesia `-3` | 259.54 | 254.40 (−2.0%) | 376.73 | 367.40 (−2.5%) | 197.09 |
+| terminal 2880x1800@2 | 0.93 | 0.96 (+3.2%) | 1.21 | 1.19 (−2.1%) | 1.70 |
+
+ms a pass, the median of three rounds; geomean against M30 natively −1.2%, in wasm −0.5%.
+Beyond M30's spread: natively Silesia `-19` −5.2% (over 2.3%), terminal's tiles +3.2%
+(over 2.6%), the GitHub frames with their dictionary −1.5% (over 0.8%) and `x-ray`; in wasm
+the GitHub frames with their dictionary +4.9% (over 1.8%) and Silesia `-19` +1.7% (over
+1.1%). Its wasm rounds on `x-ray` were 12.25, 14.59 and
+12.76 ms for P2c, 12.78, 12.80 and 12.54 for M30: three rounds do not tell the modes
+apart, and the 16 above are the measure. Every workload:
+[`results/run25-tail.md`](results/run25-tail.md).
+
+- Natively, ruzstd-decompress takes 1.10 times libzstd's time on `x-ray`, and 1.17 on
+  mixed's tiles.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on nightly with
+  AddressSanitizer) found nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
