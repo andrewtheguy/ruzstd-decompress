@@ -382,10 +382,13 @@ fn fast_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
 /// 0, as the first shift keeps the second under 64.
 #[inline(always)]
 fn take_bits(window: &mut u64, n: u8) -> u64 {
-    // `!n` is `63 - n` in the shift's six bits, which x86's and wasm's shifts mask the count
-    // to: no masking of their own.
+    // Natively, `!n` is `63 - n` in the shift's six bits, which x86's shifts mask the count to:
+    // no masking of their own. In wasm, as before, the native form being no faster in V8.
+    #[cfg(not(target_family = "wasm"))]
     let bits = (*window >> 1).wrapping_shr(!u32::from(n));
-    *window = window.wrapping_shl(u32::from(n));
+    #[cfg(target_family = "wasm")]
+    let bits = (*window >> 1) >> (63 - n);
+    *window <<= n;
     bits
 }
 
