@@ -9,6 +9,9 @@ lossless tiles, which zDesk's page decodes in WebAssembly
 since 2026-11-05 (see "the workloads, for a generic decoder" below); the runs
 before that date measured 14.
 
+Where the decoder stands now, against libzstd, natively and in wasm, from the latest full
+run: [`latest.md`](latest.md). The sections below are each change's own run, oldest first.
+
 ## 2026-11-04: the safe ring buffer
 
 The question: do the unsafe optimizations (the custom ring buffer and its
