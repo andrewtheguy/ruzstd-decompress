@@ -299,9 +299,17 @@ impl RingBuffer {
 
     /// A writer of sequences to the tail, for a run of them (see [`SeqWriter`]), whose matches
     /// may reach into `dict`, the dictionary's content, for `dict_room` bytes more of the ring.
+    /// It takes no sequence that would take it past `most` bytes.
     #[inline(always)]
-    pub fn seq_writer<'a>(&'a mut self, dict: &'a [u8], dict_room: usize) -> SeqWriter<'a> {
+    pub fn seq_writer<'a>(
+        &'a mut self,
+        dict: &'a [u8],
+        dict_room: usize,
+        most: usize,
+    ) -> SeqWriter<'a> {
         let (limit, data_start) = self.sequence_bounds();
+        // The room check keeps the sequences' bytes `2 * CHUNK` short of the limit.
+        let limit = limit.min(self.tail.saturating_add(most).saturating_add(2 * CHUNK));
         // A match reaches into the dictionary only past all of the data; the writer takes
         // that only where the data does not wrap, so that it is all before the tail.
         let tail = self.tail;
@@ -436,14 +444,17 @@ impl SeqWriter<'_> {
     /// changed nothing, otherwise; a match reaching past the dictionary's start included, which
     /// the slow path reports.
     ///
-    /// `literals` must hold the `ll` literals and then at least `CHUNK - 1` bytes more (see
-    /// [`copy_literals`]).
+    /// `literals` must hold the `ll` literals and then at least `CHUNK` bytes more (see
+    /// [`copy_short`]).
     #[inline(always)]
     pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
         let tail = self.tail;
         // Rounded up, each piece takes less than one chunk more. The room left keeps the tail
         // short of `cap`, or of the head, so it needs no wrapping and the sentinel stays free.
-        if tail + ll + ml + 2 * CHUNK > self.buf.len() {
+        let Some((before, room)) = self.buf.split_at_mut_checked(tail) else {
+            return false;
+        };
+        if ll + ml + 2 * CHUNK > room.len() {
             return false;
         }
         let dst = tail + ll;
@@ -453,8 +464,12 @@ impl SeqWriter<'_> {
             if offset < CHUNK {
                 return false;
             }
-            copy_literals(self.buf, tail, literals, ll);
-            copy_match(self.buf, dst, offset, ml);
+            if ll <= CHUNK && ml <= CHUNK && offset >= ll + CHUNK {
+                copy_short(before, room, literals, ll, offset - ll);
+            } else {
+                copy_literals(self.buf, tail, literals, ll);
+                copy_match(self.buf, dst, offset, ml);
+            }
         } else {
             // Past the data, into the dictionary: none where the frame has none, or where the
             // data wraps, or once the frame is past its window.
@@ -552,6 +567,17 @@ fn copy_sequence<B: AsMut<[u8]> + ?Sized>(
         buf.as_mut().copy_within(src..src + ml, dst);
     }
     Some(dst + ml)
+}
+
+/// A sequence of at most a chunk of literals and a chunk of match: a chunk of each, without
+/// loops. `room` is the free space from the tail, with room for both and a chunk more;
+/// `before` is what is before the tail, the match's source `back` bytes from its end and at
+/// least a chunk back.
+#[inline(always)]
+fn copy_short(before: &[u8], room: &mut [u8], literals: &[u8], ll: usize, back: usize) {
+    room[..CHUNK].copy_from_slice(&literals[..CHUNK]);
+    let src = &before[before.len() - back..];
+    room[ll..ll + CHUNK].copy_from_slice(&src[..CHUNK]);
 }
 
 /// The `ll` literals at the start of `literals` to `tail` in `buf`: short ones in whole
@@ -799,12 +825,11 @@ mod tests {
                 3 if !model.is_empty() => {
                     let len_before = model.len();
                     #[cfg(not(target_family = "wasm"))]
-                    let mut writer = rb.seq_writer(&[], 0);
+                    let mut writer = rb.seq_writer(&[], 0, usize::MAX);
                     for _ in 0..1 + next(4) {
                         let ll = next(40);
-                        let padded: alloc::vec::Vec<u8> = (0..ll + super::CHUNK - 1)
-                            .map(|_| next(256) as u8)
-                            .collect();
+                        let padded: alloc::vec::Vec<u8> =
+                            (0..ll + super::CHUNK).map(|_| next(256) as u8).collect();
                         let offset = 1 + next(model.len() + ll + 8);
                         let ml = 3 + next(60);
                         #[cfg(not(target_family = "wasm"))]
@@ -894,12 +919,11 @@ mod tests {
             }
             let room = if next(4) == 0 { next(100) } else { usize::MAX };
             let start = model.len();
-            let mut writer = rb.seq_writer(&dict, room);
+            let mut writer = rb.seq_writer(&dict, room, usize::MAX);
             for _ in 0..1 + next(4) {
                 let ll = next(40);
-                let padded: alloc::vec::Vec<u8> = (0..ll + super::CHUNK - 1)
-                    .map(|_| next(256) as u8)
-                    .collect();
+                let padded: alloc::vec::Vec<u8> =
+                    (0..ll + super::CHUNK).map(|_| next(256) as u8).collect();
                 let offset = 1 + next(model.len() + ll + dict.len() + 10);
                 let ml = 3 + next(60);
                 if !writer.push_sequence(&padded, ll, offset, ml) {

@@ -11,7 +11,7 @@ use crate::decoding::errors::DecodeBufferError;
 /// The bytes a block's literals are followed by for the buffer's fast copy of a sequence, which
 /// reads whole chunks of them.
 pub const LITERALS_PADDING: usize = 16;
-const _: () = assert!(LITERALS_PADDING >= super::ringbuffer::CHUNK - 1);
+const _: () = assert!(LITERALS_PADDING >= super::ringbuffer::CHUNK);
 
 /// The frame's decoded bytes: those not yet collected, and before them as many of the
 /// collected ones as the window needs, which blocks to come may copy from.
@@ -58,10 +58,12 @@ impl SequenceWriter<'_> {
         self.ring.push_sequence(literals, ll, offset, ml)
     }
 
-    /// Write the run's sequences to the buffer.
+    /// Write the run's sequences to the buffer; the bytes they took.
     #[inline(always)]
-    pub fn finish(self) {
-        *self.total_output_counter += self.ring.finish() as u64;
+    pub fn finish(self) -> usize {
+        let written = self.ring.finish();
+        *self.total_output_counter += written as u64;
+        written
     }
 }
 
@@ -140,16 +142,17 @@ impl DecodeBuffer {
         self.buffer.extend_from_reader(read, fill_length)
     }
 
-    /// A writer of sequences to the buffer, for a run of them (see [`SequenceWriter`]).
+    /// A writer of sequences to the buffer, for a run of them (see [`SequenceWriter`]), of at
+    /// most `most` bytes.
     #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
-    pub fn sequence_writer(&mut self) -> SequenceWriter<'_> {
+    pub fn sequence_writer(&mut self, most: usize) -> SequenceWriter<'_> {
         let (dict, dict_room): (&[u8], usize) = match self.dict_room() {
             Some(room) => (&self.dict_content, room),
             None => (&[], 0),
         };
         SequenceWriter {
-            ring: self.buffer.seq_writer(dict, dict_room),
+            ring: self.buffer.seq_writer(dict, dict_room, most),
             total_output_counter: &mut self.total_output_counter,
         }
     }
@@ -192,7 +195,7 @@ impl DecodeBuffer {
         let Some(room) = self.dict_room() else {
             return false;
         };
-        let mut writer = self.buffer.seq_writer(&self.dict_content, room);
+        let mut writer = self.buffer.seq_writer(&self.dict_content, room, usize::MAX);
         let done = writer.push_sequence(literals, ll, offset, ml);
         writer.finish();
         if done {
@@ -585,7 +588,7 @@ mod tests {
             let fits = buf.total_output_counter <= window as u64;
             #[cfg(not(target_family = "wasm"))]
             if matches % 2 == 1 {
-                let mut writer = buf.sequence_writer();
+                let mut writer = buf.sequence_writer(usize::MAX);
                 let done = writer.push_sequence(&[0; super::LITERALS_PADDING], 0, offset, 8);
                 writer.finish();
                 if !fits {

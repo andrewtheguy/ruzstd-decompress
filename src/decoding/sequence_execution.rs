@@ -50,14 +50,17 @@ impl<'a> SequenceExecutor<'a> {
     #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn run(&mut self) -> SequenceRun<'_, 'a> {
+        // The writer takes no sequence past the block's most, which the slow path reports.
+        let most = self
+            .max_block_decoded_len
+            .saturating_sub(self.seq_sum as usize);
         SequenceRun {
-            out: self.buffer.sequence_writer(),
+            out: self.buffer.sequence_writer(most),
             padded_literals: self.padded_literals,
             literals_len: self.literals_len,
             literals_copy_counter: &mut self.literals_copy_counter,
             offset_hist: &mut *self.offset_hist,
             seq_sum: &mut self.seq_sum,
-            max_block_decoded_len: self.max_block_decoded_len,
         }
     }
 
@@ -85,6 +88,13 @@ impl<'a> SequenceExecutor<'a> {
     /// closely, or the buffer needs room.
     #[inline(never)]
     pub fn execute_slow(&mut self, seq: SlowSequence) -> Result<(), ExecuteSequencesError> {
+        // Natively, the block's decoded length is checked here, the fast loop's writer taking
+        // no sequence past it; in WebAssembly, for each sequence before its copy.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.seq_sum += (seq.ll + seq.ml) as u32;
+            check_decoded_len(self.seq_sum, self.max_block_decoded_len)?;
+        }
         // In WebAssembly, the ring's fast copy takes no match into the dictionary; the
         // writer that natively takes every sequence takes those here (see `DecodeBuffer`).
         #[cfg(target_family = "wasm")]
@@ -152,8 +162,8 @@ pub struct SequenceRun<'x, 'a> {
     literals_len: usize,
     literals_copy_counter: &'x mut usize,
     offset_hist: &'x mut [u32; 3],
+    /// The block's decoded length, which the writer's bytes add to when the run finishes.
     seq_sum: &'x mut u32,
-    max_block_decoded_len: usize,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -171,8 +181,7 @@ impl SequenceRun<'_, '_> {
             self.literals_len,
             self.literals_copy_counter,
             self.offset_hist,
-            self.seq_sum,
-            self.max_block_decoded_len,
+            None,
             &mut self.out,
         )
     }
@@ -180,7 +189,7 @@ impl SequenceRun<'_, '_> {
     /// Write the buffer's state back.
     #[inline(always)]
     pub fn finish(self) {
-        self.out.finish();
+        *self.seq_sum += self.out.finish() as u32;
     }
 }
 
@@ -206,8 +215,7 @@ impl SequenceRun<'_, '_> {
             e.literals_len,
             &mut e.literals_copy_counter,
             e.offset_hist,
-            &mut e.seq_sum,
-            e.max_block_decoded_len,
+            Some((&mut e.seq_sum, e.max_block_decoded_len)),
             &mut *e.buffer,
         )?;
         if let Some(slow) = slow {
@@ -244,9 +252,10 @@ impl PushSequence for DecodeBuffer {
     }
 }
 
-/// A sequence's checks and accounting, its literals' bound, its offset resolved and the
-/// block's decoded length, with its copy by `out`, the buffer's fast copy: what is left to
-/// [`SequenceExecutor::execute_slow`] where that does not take it.
+/// A sequence's checks and accounting, its literals' bound, its offset resolved and, given
+/// `seq_sum`, the block's decoded length and its most, with its copy by `out`, the buffer's
+/// fast copy: what is left to [`SequenceExecutor::execute_slow`] where that does not take it.
+/// Natively, the writer bounds the block's length instead (see [`SequenceExecutor::run`]).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn execute_with(
@@ -255,8 +264,7 @@ fn execute_with(
     literals_len: usize,
     literals_copy_counter: &mut usize,
     offset_hist: &mut [u32; 3],
-    seq_sum: &mut u32,
-    max_block_decoded_len: usize,
+    seq_sum: Option<(&mut u32, usize)>,
     out: &mut impl PushSequence,
 ) -> Result<Option<SlowSequence>, ExecuteSequencesError> {
     let (ll, ml) = (seq.ll as usize, seq.ml as usize);
@@ -273,9 +281,11 @@ fn execute_with(
         return Err(ExecuteSequencesError::ZeroOffset);
     }
     *literals_copy_counter = high;
-    *seq_sum += seq.ml;
-    *seq_sum += seq.ll;
-    check_decoded_len(*seq_sum, max_block_decoded_len)?;
+    if let Some((seq_sum, max)) = seq_sum {
+        *seq_sum += seq.ml;
+        *seq_sum += seq.ll;
+        check_decoded_len(*seq_sum, max)?;
+    }
     if out.push_sequence(&padded_literals[start..], ll, offset, ml) {
         Ok(None)
     } else {
