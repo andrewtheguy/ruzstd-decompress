@@ -28,11 +28,14 @@ cycle as libzstd (3.3), its loads, L1 and L2 misses and mispredictions much the 
 trails by about 7 cycles a sequence (40 to 35), with about 10 stores a sequence more, the
 loop's spills: 11 values carried from one sequence to the next and 6 for the whole loop,
 more than x86-64's registers. What is left:
-- **The registers**, natively: the three tables' bases could be one, were the tables in one
-  allocation, the states then indices into it; that frees two. Tried and slower or no
+- **The registers**, natively: what is spilled is not mostly the tables' bases. LLVM
+  computes the next states after the sequence's copy, keeping six of the entries' fields
+  live across it; forced before it, the states themselves are spilled. Tried and slower or no
   faster: the states stored on an error so that they are computed before the copies, the
   short matches' copy inline, and 8 sequences decoded ahead with their matches' sources
-  prefetched (run 26).
+  prefetched (run 26); the three tables in one allocation, one base for all three, and the
+  states computed before the copies by an empty `asm!` (1–6% more instructions, the cycles
+  within 3% either way; [`benchmarks/README.md`](benchmarks/README.md), 2026-11-06).
 - **WebAssembly** runs the same loop since run 27, with the Huffman streams' raw loops: both
   together 10.8% faster than wasm's safe loops by geomean. With the sequences' raw loop alone
   (three rounds), silesia `-3` was 15% faster, the GitHub frames with their dictionary 15%

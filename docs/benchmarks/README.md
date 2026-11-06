@@ -1952,6 +1952,33 @@ time by geomean, where M27 took 1.50 in run 26. Every workload:
   under the fuzzers (`decode`, `decode_dict`, `interop`, three minutes each) and Miri over
   AGENTS.md's tests found nothing. Both now check the loops wasm runs, on a 64-bit target.
 
+## 2026-11-06: the sequence tables in one allocation
+
+The question: the sequences' loop holds more values than x86-64 has registers (run 26), three
+of them the tables' bases. With the three tables in one allocation, a state an index into it
+and each entry's next state one too, the loop needs one base: does that take its spills away?
+
+The variants, against XB (run 27's B27, the same code as `main` at `25377d5`), natively, a
+pass's instructions and cycles (`perf stat` of the harness, `cyc.sh`, the median of three
+rounds), on lab2 after a restart:
+
+| | | silesia `-3` | silesia `--fast=4` | `nci` | `x-ray` | the GitHub frames | with their dictionary | mixed's tiles |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| XB | instructions (cycles), M a pass | 2,674 (827) | 1,666 (520) | 219 (76.3) | 104 (34.4) | 182 (66.9) | 57.1 (15.4) | 6,002 (2,592) |
+| T1 | the tables in one allocation of 4 × 512 states: each kind's built table in a region of its own, the predefined and RLE tables of all three in the fourth | +1.7% (−1.5%) | +1.8% (+3.0%) | +1.6% (−0.9%) | +0.0% (+2.3%) | +1.0% (−1.5%) | +1.8% (+0.6%) | +0.8% (+1.4%) |
+| T2 | T1, the next states held in an empty `asm!` before the copies, so that LLVM computes them there | +3.2% (−1.9%) | +3.6% (−1.3%) | +3.7% (+2.5%) | +0.1% (+2.6%) | +1.1% (−1.3%) | +2.1% (−1.9%) | +1.7% (+0.5%) |
+| T3 | XB with T2's `asm!` alone | +6.2% (+1.4%) | +6.6% (−0.2%) | +6.0% (+0.5%) | +0.1% (+0.6%) | +2.1% (−1.0%) | +5.3% (−1.3%) | +3.8% (+0.8%) |
+
+Each variant runs more instructions, and the cycles move by at most 3% either way, with no
+direction from one workload to the next. In five rounds of harness medians, T1 against XB was
+within the spread natively and in wasm. In T1's code (BMI2 build) the single base is itself
+reloaded from the stack: the registers it freed went to other values. The spills are not
+mostly the bases. LLVM moves the next states' computation below the sequence's copy, keeping
+each table entry's next state and bit count, six values, live across it; T2's `asm!` moves
+the computation back above the copy, and then the new states are spilled instead. The
+patches: [`variants/T1-one-table.patch`](variants/T1-one-table.patch),
+[`variants/T3-states-barrier.patch`](variants/T3-states-barrier.patch) (T2 is both).
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

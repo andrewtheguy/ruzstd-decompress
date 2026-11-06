@@ -1,0 +1,22 @@
+--- a/src/decoding/sequence_section_decoder.rs	2026-11-06 12:10:11.000000000 -0800
++++ b/src/decoding/sequence_section_decoder.rs	2026-11-06 13:10:23.254468524 -0800
+@@ -231,6 +231,19 @@
+                         usize::from(ml.next_state) + take_bits(&mut window, ml.nb_bits) as usize;
+                     of_state =
+                         usize::from(of.next_state) + take_bits(&mut window, of.nb_bits) as usize;
++                    // The next states, computed here, before the sequence's copies, so that their
++                    // entries' fields are not kept past them.
++                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
++                    // SAFETY: an empty asm block.
++                    unsafe {
++                        core::arch::asm!(
++                            "/* {0} {1} {2} */",
++                            in(reg) ll_state,
++                            in(reg) ml_state,
++                            in(reg) of_state,
++                            options(nostack, preserves_flags)
++                        );
++                    }
+                     // SAFETY: the executor is used only through `run` until `finish_raw`,
+                     // and a new run is made after each use of it.
+                     let slow = unsafe {
