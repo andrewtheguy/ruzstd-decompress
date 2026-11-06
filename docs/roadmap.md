@@ -106,9 +106,15 @@ wasm (lab1). Rounds of two refills or more were 10–17% slower in V8 (run 22). 
 in memory, and the four output positions still go through a vector each round
 of lookups (packing them into one `u32` avoided that, and was slower). Two
 streams to a loop, which fits in the registers, was much slower (video 15% in
-wasm). What is left: fewer lookups a refill, or the single symbols' table,
-which the small tiles and silesia mostly use, with the multiplication too
-(its entries would need 4 bytes, not 2).
+wasm). What is left: fewer lookups a refill. The single symbols' table, which
+the small tiles and silesia mostly use, is no faster with the multiplication
+(lab2, 2026-11-06, a pass's instructions and cycles in wasm). Its entries kept
+at 2 bytes, it took the multiplier from a table of 16 powers of two. In both
+loops, the GitHub frames took 18% more cycles: their one stream's loop waits
+on each lookup, and a multiplication takes longer than the shift. In the four
+streams' loop alone, silesia `-3` took 3.5% more and terminal's tiles 4.2%,
+mixed's 1% fewer. V8 ran about as many instructions as with the shift. Entries
+of 4 bytes, holding the multiplier, would save only that table's load.
 
 ## 4. Smaller
 
