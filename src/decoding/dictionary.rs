@@ -104,10 +104,10 @@ impl Dictionary {
         }
         let raw_tables = &raw_tables[ll_size..];
         let fse = &mut new_dict.fse;
-        fse.of.build_from_fse(&fse.offsets, SeqKind::Offset)?;
-        fse.ml
+        fse.seq.build_from_fse(&fse.offsets, SeqKind::Offset)?;
+        fse.seq
             .build_from_fse(&fse.match_lengths, SeqKind::MatchLength)?;
-        fse.ll
+        fse.seq
             .build_from_fse(&fse.literal_lengths, SeqKind::LiteralLength)?;
 
         if raw_tables.len() < 12 {

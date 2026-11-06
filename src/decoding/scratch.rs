@@ -1,7 +1,7 @@
 //! Structures that wrap around various decoders to make decoding easier.
 
 use super::decode_buffer::DecodeBuffer;
-use super::sequence_table::SeqTable;
+use super::sequence_table::SeqTables;
 use crate::decoding::dictionary::Dictionary;
 use crate::fse::FSETable;
 use crate::huff0::HuffmanTable;
@@ -26,7 +26,7 @@ pub struct DecoderScratch {
 
     /// The id of the dictionary whose content `buffer.dict_content` holds, which a frame using
     /// it again need not copy in; `None` once a dictionary may have been replaced. The tables
-    /// keep their own (see [`SeqTable::reinit_from_dict`] and
+    /// keep their own (see [`SeqTables::reinit_from_dict`] and
     /// [`HuffmanTable::reinit_from_dict`]).
     dict_loaded: Option<u32>,
 }
@@ -108,9 +108,7 @@ pub struct FSEScratch {
     pub offsets: FSETable,
     pub literal_lengths: FSETable,
     pub match_lengths: FSETable,
-    pub of: SeqTable,
-    pub ll: SeqTable,
-    pub ml: SeqTable,
+    pub seq: SeqTables,
 }
 
 impl FSEScratch {
@@ -119,9 +117,7 @@ impl FSEScratch {
             offsets: FSETable::new(MAX_OFFSET_CODE),
             literal_lengths: FSETable::new(MAX_LITERAL_LENGTH_CODE),
             match_lengths: FSETable::new(MAX_MATCH_LENGTH_CODE),
-            of: SeqTable::new(),
-            ll: SeqTable::new(),
-            ml: SeqTable::new(),
+            seq: SeqTables::new(),
         }
     }
 
@@ -129,24 +125,18 @@ impl FSEScratch {
         self.offsets.reset();
         self.literal_lengths.reset();
         self.match_lengths.reset();
-        self.of.reset();
-        self.ll.reset();
-        self.ml.reset();
+        self.seq.reset();
     }
 
     /// Take `other`'s tables, dictionary `dict_id`'s, which are all a later block can repeat:
     /// copied only where these no longer hold them from an earlier frame.
     pub fn reinit_from_dict(&mut self, other: &Self, dict_id: u32) {
-        self.of.reinit_from_dict(&other.of, dict_id);
-        self.ll.reinit_from_dict(&other.ll, dict_id);
-        self.ml.reinit_from_dict(&other.ml, dict_id);
+        self.seq.reinit_from_dict(&other.seq, dict_id);
     }
 
-    /// Forget which dictionary's tables these hold (see [`SeqTable::forget_dict`]).
+    /// Forget which dictionary's tables these hold (see [`SeqTables::forget_dict`]).
     pub fn forget_dict(&mut self) {
-        self.of.forget_dict();
-        self.ll.forget_dict();
-        self.ml.forget_dict();
+        self.seq.forget_dict();
     }
 }
 

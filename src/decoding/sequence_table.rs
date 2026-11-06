@@ -20,9 +20,12 @@ pub struct SeqEntry {
 }
 
 /// Room for the largest table, `1 << 9` states (literal and match lengths; offsets have at most
-/// `1 << 8`). A power of two, so that a state masked by `SIZE - 1` is in bounds, and indexing
-/// needs no check.
+/// `1 << 8`): the size of each region of [`SeqTables`].
 pub(crate) const SIZE: usize = 1 << 9;
+
+/// [`SeqTables`]' entries: four regions of [`SIZE`]. A power of two, so that a state masked by
+/// `ALL - 1` is in bounds, and indexing needs no check.
+pub(crate) const ALL: usize = 4 * SIZE;
 
 /// What the codes of one of the three tables stand for.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -65,102 +68,128 @@ impl SeqKind {
     }
 }
 
-/// A sequence decoding table: an FSE table's states, or an RLE code as a table of one state.
+/// The three kinds' sequence decoding tables in one allocation, so that the loop over the
+/// sequences finds all three from one base: a state is an index into it, and each entry's next
+/// state is one too.
 ///
-/// Each kind of table has entries of its own: one built from a description, a block's or a
-/// dictionary's, or copied from a dictionary; the predefined one; and the RLE one. A block
-/// using the predefined table or an RLE code then leaves the dictionary's table where it was,
-/// for the frames after it.
+/// Each kind has tables of its own: one built from a description, a block's or a
+/// dictionary's, or copied from a dictionary, in a region of [`SIZE`] states of its own; the
+/// predefined one; and the RLE one, an RLE code as a table of one state. The predefined and RLE
+/// tables of all three kinds share one more region (see [`Slot::start`]). A block using the
+/// predefined table or an RLE code then leaves the dictionary's table where it was, for the
+/// frames after it.
 #[derive(Clone)]
-pub struct SeqTable {
-    /// The entries in use, of the kind `slot`: empty until a table of its kind is built, so
-    /// that a new decoder allocates nothing it may not use, then always `SIZE` long.
+pub struct SeqTables {
+    /// Empty until a table is built, so that a new decoder allocates nothing it may not use,
+    /// then always [`ALL`] long.
     entries: Vec<SeqEntry>,
-    /// The other kinds' entries, by [`Slot`], that of `slot` being empty: swapped with
-    /// `entries` when another kind is used, so that the loop over the sequences finds the table
-    /// in use as it would were there only one.
-    others: [Vec<SeqEntry>; 3],
-    /// The kind in use.
+    /// Each kind's table in use and what it keeps, by `SeqKind as usize`.
+    kinds: [KindTables; 3],
+}
+
+/// What [`SeqTables`] keeps of one kind's tables.
+#[derive(Copy, Clone)]
+struct KindTables {
+    /// The table in use.
     slot: Slot,
     /// How many bits the first state is read from; `None` until a table is built, since a block
     /// that repeats the previous table needs there to be one.
     accuracy_log: Option<u8>,
-    /// The predefined entries hold the predefined distribution's states, which a later block
+    /// The predefined table holds the predefined distribution's states, which a later block
     /// asking for them, in this frame or a later one, can keep: a reset leaves them.
     holds_predefined: bool,
-    /// The dictionary whose table the built entries are, as copied, kept through resets as
+    /// The dictionary whose table the built one is, as copied, kept through resets as
     /// `holds_predefined` is, so that a frame using it again need not copy it in (see
-    /// [`Self::reinit_from_dict`]); `None` once anything else may have been built in them.
+    /// [`SeqTables::reinit_from_dict`]); `None` once anything else may have been built there.
     dict: Option<u32>,
 }
 
-/// Which of a [`SeqTable`]'s entries are in use.
+/// Which of a kind's tables is in use.
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum Slot {
-    Built = 0,
-    Predefined = 1,
-    Rle = 2,
+    Built,
+    Predefined,
+    Rle,
 }
 
-impl SeqTable {
-    pub fn new() -> SeqTable {
-        SeqTable {
-            entries: Vec::new(),
-            others: [Vec::new(), Vec::new(), Vec::new()],
+impl Slot {
+    /// Where `kind`'s table of this slot starts in [`SeqTables`]' entries: the built ones each in
+    /// a region of [`SIZE`], then the predefined ones (64, 64 and 32 states) and the RLE ones
+    /// (one each) in the last region.
+    fn start(self, kind: SeqKind) -> usize {
+        let k = kind as usize;
+        match self {
+            Slot::Built => k * SIZE,
+            Slot::Predefined => 3 * SIZE + k * 64,
+            Slot::Rle => 3 * SIZE + 160 + k,
+        }
+    }
+}
+
+const KINDS: [SeqKind; 3] = [
+    SeqKind::LiteralLength,
+    SeqKind::MatchLength,
+    SeqKind::Offset,
+];
+
+impl SeqTables {
+    pub fn new() -> SeqTables {
+        let kind = KindTables {
             slot: Slot::Built,
             accuracy_log: None,
             holds_predefined: false,
             dict: None,
+        };
+        SeqTables {
+            entries: Vec::new(),
+            kinds: [kind; 3],
         }
     }
 
     pub fn reset(&mut self) {
-        self.accuracy_log = None;
-    }
-
-    /// Take `other`'s states, the table of dictionary `dict_id`: copied only if this table no
-    /// longer holds them from an earlier frame.
-    pub fn reinit_from_dict(&mut self, other: &SeqTable, dict_id: u32) {
-        self.select(Slot::Built);
-        if self.dict != Some(dict_id) {
-            self.entries.clear();
-            self.entries.extend_from_slice(&other.entries);
-            self.dict = Some(dict_id);
+        for kind in &mut self.kinds {
+            kind.accuracy_log = None;
         }
-        self.accuracy_log = other.accuracy_log;
     }
 
-    /// Forget which dictionary's table this one holds, so that the next frame using one copies
-    /// it in: for when a dictionary of the same id may have replaced it.
+    /// Take `other`'s tables, dictionary `dict_id`'s: each copied only if this one no longer
+    /// holds it from an earlier frame.
+    pub fn reinit_from_dict(&mut self, other: &SeqTables, dict_id: u32) {
+        for kind in KINDS {
+            let k = kind as usize;
+            self.kinds[k].slot = Slot::Built;
+            self.kinds[k].accuracy_log = other.kinds[k].accuracy_log;
+            if self.kinds[k].dict != Some(dict_id) {
+                self.kinds[k].dict = Some(dict_id);
+                if let Some(from) = other.entries.get(k * SIZE..(k + 1) * SIZE) {
+                    self.entries_mut()[k * SIZE..(k + 1) * SIZE].copy_from_slice(from);
+                }
+            }
+        }
+    }
+
+    /// Forget which dictionary's tables these hold, so that the next frame using one copies
+    /// them in: for when a dictionary of the same id may have replaced it.
     pub fn forget_dict(&mut self) {
-        self.dict = None;
-    }
-
-    /// Use the entries of `slot`.
-    fn select(&mut self, slot: Slot) {
-        if self.slot != slot {
-            core::mem::swap(&mut self.entries, &mut self.others[self.slot as usize]);
-            core::mem::swap(&mut self.entries, &mut self.others[slot as usize]);
-            self.slot = slot;
+        for kind in &mut self.kinds {
+            kind.dict = None;
         }
     }
 
-    /// The entries of `slot`, with room for every state, made on its first build; now in use.
-    fn take(&mut self, slot: Slot) -> &mut [SeqEntry; SIZE] {
-        self.select(slot);
-        if self.entries.len() != SIZE {
-            self.entries.resize(SIZE, SeqEntry::default());
+    /// The entries, with room for every table, made on the first build.
+    fn entries_mut(&mut self) -> &mut [SeqEntry; ALL] {
+        if self.entries.len() != ALL {
+            self.entries.resize(ALL, SeqEntry::default());
         }
         self.entries
             .as_mut_slice()
             .try_into()
-            .expect("sized to SIZE")
+            .expect("sized to ALL")
     }
 
-    /// Build the table of `fse`'s distribution (read with [`FSETable::read_distribution`]), a
-    /// table of `kind`'s codes.
+    /// Build `kind`'s table of `fse`'s distribution (read with [`FSETable::read_distribution`]).
     pub fn build_from_fse(&mut self, fse: &FSETable, kind: SeqKind) -> Result<(), FSETableError> {
-        self.dict = None;
+        self.kinds[kind as usize].dict = None;
         self.build(
             Slot::Built,
             fse.accuracy_log,
@@ -169,24 +198,25 @@ impl SeqTable {
         )
     }
 
-    /// Take the predefined distribution's states, unless the table already holds them.
+    /// Take `kind`'s predefined distribution's states, unless they are held already.
     pub fn build_predefined(&mut self, kind: SeqKind) -> Result<(), FSETableError> {
         let (acc_log, distribution): (u8, &[i32]) = match kind {
             SeqKind::LiteralLength => (LL_DEFAULT_ACC_LOG, &LL_DEFAULT_DISTRIBUTION),
             SeqKind::MatchLength => (ML_DEFAULT_ACC_LOG, &ML_DEFAULT_DISTRIBUTION),
             SeqKind::Offset => (OF_DEFAULT_ACC_LOG, &OF_DEFAULT_DISTRIBUTION),
         };
-        if self.holds_predefined {
-            self.select(Slot::Predefined);
+        let table = &mut self.kinds[kind as usize];
+        if table.holds_predefined {
+            table.slot = Slot::Predefined;
         } else {
             self.build(Slot::Predefined, acc_log, distribution, kind)?;
-            self.holds_predefined = true;
+            self.kinds[kind as usize].holds_predefined = true;
         }
-        self.accuracy_log = Some(acc_log);
+        self.kinds[kind as usize].accuracy_log = Some(acc_log);
         Ok(())
     }
 
-    /// The states of a distribution of `kind`'s codes in the entries of `slot`, each with its
+    /// The states of a distribution of `kind`'s codes in its table of `slot`, each with its
     /// code's value, built straight from the probabilities as libzstd builds them
     /// (`ZSTD_buildFSETable`).
     fn build(
@@ -196,63 +226,77 @@ impl SeqTable {
         probabilities: &[i32],
         kind: SeqKind,
     ) -> Result<(), FSETableError> {
-        self.accuracy_log = None;
+        let table = &mut self.kinds[kind as usize];
+        table.accuracy_log = None;
+        table.slot = slot;
         if probabilities.len() > kind.codes() {
             return Err(FSETableError::TooManySymbols {
                 got: probabilities.len(),
             });
         }
         let (base, bits) = kind.values();
-        let entries = self.take(slot);
+        let start = slot.start(kind);
+        let entries = self.entries_mut();
         build_states(
             acc_log,
             probabilities,
             |state, code, nb_bits, next_state| {
                 let code = code as usize & (CODES - 1);
-                entries[state & (SIZE - 1)] = SeqEntry {
+                entries[(start + state) & (ALL - 1)] = SeqEntry {
                     base_value: base[code],
-                    next_state: next_state as u16,
+                    next_state: (start + next_state as usize) as u16,
                     nb_add_bits: bits[code],
                     nb_bits,
                 };
             },
         )?;
-        self.accuracy_log = Some(acc_log);
+        self.kinds[kind as usize].accuracy_log = Some(acc_log);
         Ok(())
     }
 
-    /// Every state is `code`, and no bits are read for the next one.
+    /// Every state of `kind`'s is `code`, and no bits are read for the next one.
     pub fn build_rle(&mut self, code: u8, kind: SeqKind) {
         let (base_value, nb_add_bits) = kind.code_value(code);
-        self.take(Slot::Rle)[0] = SeqEntry {
+        let start = Slot::Rle.start(kind);
+        self.entries_mut()[start] = SeqEntry {
             base_value,
-            next_state: 0,
+            next_state: start as u16,
             nb_add_bits,
             nb_bits: 0,
         };
-        self.accuracy_log = Some(0);
+        let table = &mut self.kinds[kind as usize];
+        table.slot = Slot::Rle;
+        table.accuracy_log = Some(0);
     }
 
-    /// How many bits the first state is read from, and the states, as an array: a state masked
-    /// by `SIZE - 1` indexes it with no bounds check (see [`at`]).
-    pub fn states(&self) -> Result<(u8, &[SeqEntry; SIZE]), DecodeSequenceError> {
-        let uninitialized =
-            DecodeSequenceError::FSEDecoderError(FSEDecoderError::TableIsUninitialized);
-        let accuracy_log = self.accuracy_log.ok_or(uninitialized)?;
-        let states = self.entries.as_slice().try_into().map_err(|_| {
+    /// How many bits `kind`'s first state is read from, and where its table in use starts: the
+    /// first state is that start plus the bits read.
+    pub fn first_state(&self, kind: SeqKind) -> Result<(u8, usize), DecodeSequenceError> {
+        let table = &self.kinds[kind as usize];
+        let accuracy_log = table
+            .accuracy_log
+            .ok_or(DecodeSequenceError::FSEDecoderError(
+                FSEDecoderError::TableIsUninitialized,
+            ))?;
+        Ok((accuracy_log, table.slot.start(kind)))
+    }
+
+    /// The entries, as an array: a state masked by `ALL - 1` indexes it with no bounds check
+    /// (see [`at`]).
+    pub fn entries(&self) -> Result<&[SeqEntry; ALL], DecodeSequenceError> {
+        self.entries.as_slice().try_into().map_err(|_| {
             DecodeSequenceError::FSEDecoderError(FSEDecoderError::TableIsUninitialized)
-        })?;
-        Ok((accuracy_log, states))
+        })
     }
 }
 
-/// The entry of `state` in a table's states (see [`SeqTable::states`]).
+/// The entry of `state` in the tables' entries (see [`SeqTables::entries`]).
 #[inline(always)]
-pub fn at(states: &[SeqEntry; SIZE], state: usize) -> SeqEntry {
-    states[state & (SIZE - 1)]
+pub fn at(entries: &[SeqEntry; ALL], state: usize) -> SeqEntry {
+    entries[state & (ALL - 1)]
 }
 
-impl Default for SeqTable {
+impl Default for SeqTables {
     fn default() -> Self {
         Self::new()
     }
@@ -406,18 +450,20 @@ mod tests {
     }
 
     /// A table built from a distribution has the FSE table's states, in order, with each
-    /// code's value.
+    /// code's value, its next states indices into the shared entries.
     #[test]
     fn built_from_fse_states() {
+        const LL: SeqKind = SeqKind::LiteralLength;
         let mut fse = FSETable::new(crate::blocks::sequence_section::MAX_LITERAL_LENGTH_CODE);
         fse.accuracy_log = LL_DEFAULT_ACC_LOG;
         fse.symbol_probabilities = LL_DEFAULT_DISTRIBUTION.to_vec();
+        // The states as the FSE table has them, from 0, which `states` gives back.
         let mut expected = alloc::vec![SeqEntry::default(); 1 << LL_DEFAULT_ACC_LOG];
         build_states(
             LL_DEFAULT_ACC_LOG,
             &LL_DEFAULT_DISTRIBUTION,
             |state, symbol, num_bits, base_line| {
-                let (base_value, nb_add_bits) = SeqKind::LiteralLength.code_value(symbol);
+                let (base_value, nb_add_bits) = LL.code_value(symbol);
                 expected[state] = SeqEntry {
                     base_value,
                     next_state: base_line as u16,
@@ -427,67 +473,115 @@ mod tests {
             },
         )
         .unwrap();
-        let states = |table: &SeqTable| -> alloc::vec::Vec<SeqEntry> {
+        let states = |tables: &SeqTables| -> alloc::vec::Vec<SeqEntry> {
+            let (_, start) = tables.first_state(LL).unwrap();
+            let entries = tables.entries().unwrap();
             (0..64)
-                .map(|state| at(table.states().unwrap().1, state))
+                .map(|state| {
+                    let entry = at(entries, start + state);
+                    SeqEntry {
+                        next_state: entry.next_state - start as u16,
+                        ..entry
+                    }
+                })
                 .collect()
         };
 
-        let mut table = SeqTable::new();
-        assert!(table.states().is_err());
-        table.build_from_fse(&fse, SeqKind::LiteralLength).unwrap();
-        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
-        assert_eq!(states(&table), expected);
+        let mut tables = SeqTables::new();
+        assert!(tables.first_state(LL).is_err());
+        assert!(tables.entries().is_err());
+        tables.build_from_fse(&fse, LL).unwrap();
+        assert_eq!(tables.first_state(LL).unwrap(), (LL_DEFAULT_ACC_LOG, 0));
+        assert_eq!(states(&tables), expected);
+        // The other kinds' tables are their own.
+        assert!(tables.first_state(SeqKind::Offset).is_err());
+        tables.build_rle(3, SeqKind::Offset);
+        tables.build_predefined(SeqKind::MatchLength).unwrap();
+        assert_eq!(states(&tables), expected);
 
         // The predefined table is the same, kept across a reset, as a new frame does, and
         // taken again without a build.
-        let mut table = SeqTable::new();
-        table.build_predefined(SeqKind::LiteralLength).unwrap();
-        assert_eq!(states(&table), expected);
-        table.reset();
-        assert!(table.states().is_err());
-        table.entries[0] = SeqEntry::default();
-        table.build_predefined(SeqKind::LiteralLength).unwrap();
-        assert_eq!(table.states().unwrap().0, LL_DEFAULT_ACC_LOG);
-        assert_eq!(states(&table)[0], SeqEntry::default(), "not rebuilt");
-        table.entries[0] = expected[0];
-
-        table.build_rle(20, SeqKind::LiteralLength);
-        assert_eq!(table.states().unwrap().0, 0);
+        let mut tables = SeqTables::new();
+        tables.build_predefined(LL).unwrap();
+        let predefined = Slot::Predefined.start(LL);
         assert_eq!(
-            at(table.states().unwrap().1, 0),
+            tables.first_state(LL).unwrap(),
+            (LL_DEFAULT_ACC_LOG, predefined)
+        );
+        assert_eq!(states(&tables), expected);
+        tables.reset();
+        assert!(tables.first_state(LL).is_err());
+        tables.entries[predefined] = SeqEntry::default();
+        tables.build_predefined(LL).unwrap();
+        assert_eq!(tables.first_state(LL).unwrap().0, LL_DEFAULT_ACC_LOG);
+        assert_eq!(
+            tables.entries().unwrap()[predefined],
+            SeqEntry::default(),
+            "not rebuilt"
+        );
+        tables.entries[predefined] = SeqEntry {
+            next_state: expected[0].next_state + predefined as u16,
+            ..expected[0]
+        };
+
+        tables.build_rle(20, LL);
+        let (log, start) = tables.first_state(LL).unwrap();
+        assert_eq!(log, 0);
+        assert_eq!(
+            at(tables.entries().unwrap(), start),
             SeqEntry {
                 base_value: 24,
-                next_state: 0,
+                next_state: start as u16,
                 nb_add_bits: 2,
                 nb_bits: 0
             }
         );
         // An RLE table leaves the predefined one, and either leaves a dictionary's.
-        table.build_predefined(SeqKind::LiteralLength).unwrap();
-        assert_eq!(states(&table), expected);
+        tables.build_predefined(LL).unwrap();
+        assert_eq!(states(&tables), expected);
 
-        let mut dict = SeqTable::new();
+        let mut dict = SeqTables::new();
         let mut other = fse.clone();
         other.symbol_probabilities[0] += 1;
         other.symbol_probabilities[1] -= 1;
-        dict.build_from_fse(&other, SeqKind::LiteralLength).unwrap();
+        dict.build_from_fse(&other, LL).unwrap();
         let dict_states = states(&dict);
         assert_ne!(dict_states, expected);
-        table.reinit_from_dict(&dict, 7);
-        assert_eq!(states(&table), dict_states);
-        table.build_predefined(SeqKind::LiteralLength).unwrap();
-        assert_eq!(states(&table), expected);
-        table.build_rle(20, SeqKind::LiteralLength);
-        table.reset();
+        tables.reinit_from_dict(&dict, 7);
+        assert_eq!(states(&tables), dict_states);
+        tables.build_predefined(LL).unwrap();
+        assert_eq!(states(&tables), expected);
+        tables.build_rle(20, LL);
+        tables.reset();
         // The next frame takes the dictionary's again with no copy, and then one built from a
         // block's description replaces it.
-        table.others[Slot::Built as usize][0] = SeqEntry::default();
-        table.reinit_from_dict(&dict, 7);
-        assert_eq!(states(&table)[0], SeqEntry::default(), "not copied");
-        table.build_from_fse(&fse, SeqKind::LiteralLength).unwrap();
-        assert_eq!(states(&table), expected);
-        table.reinit_from_dict(&dict, 7);
-        assert_eq!(states(&table), dict_states);
+        tables.entries[Slot::Built.start(LL)] = SeqEntry::default();
+        tables.reinit_from_dict(&dict, 7);
+        assert_eq!(states(&tables)[0], SeqEntry::default(), "not copied");
+        tables.build_from_fse(&fse, LL).unwrap();
+        assert_eq!(states(&tables), expected);
+        tables.reinit_from_dict(&dict, 7);
+        assert_eq!(states(&tables), dict_states);
+    }
+
+    /// Each kind's tables lie in their own part of the entries.
+    #[test]
+    fn regions_do_not_overlap() {
+        let mut taken = [false; ALL];
+        for kind in KINDS {
+            let sizes = [(Slot::Built, SIZE), (Slot::Rle, 1)];
+            let predefined = match kind {
+                SeqKind::Offset => 1 << OF_DEFAULT_ACC_LOG,
+                SeqKind::LiteralLength => 1 << LL_DEFAULT_ACC_LOG,
+                SeqKind::MatchLength => 1 << ML_DEFAULT_ACC_LOG,
+            };
+            for (slot, size) in sizes.into_iter().chain([(Slot::Predefined, predefined)]) {
+                let start = slot.start(kind);
+                for state in &mut taken[start..start + size] {
+                    assert!(!*state, "{kind:?} {slot:?}");
+                    *state = true;
+                }
+            }
+        }
     }
 }
