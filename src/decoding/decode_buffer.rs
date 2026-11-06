@@ -144,20 +144,24 @@ impl DecodeBuffer {
     #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn sequence_writer(&mut self) -> SequenceWriter<'_> {
-        // Matches may reach into the dictionary while the frame is within its window (see
-        // `repeat_from_dict`): for as many bytes more as are left of it.
-        let window_left = (self.window_size as u64).checked_sub(self.total_output_counter);
-        let (dict, dict_room): (&[u8], usize) = match window_left {
-            Some(left) if self.dict_active => (
-                &self.dict_content,
-                usize::try_from(left).unwrap_or(usize::MAX),
-            ),
-            _ => (&[], 0),
+        let (dict, dict_room): (&[u8], usize) = match self.dict_room() {
+            Some(room) => (&self.dict_content, room),
+            None => (&[], 0),
         };
         SequenceWriter {
             ring: self.buffer.seq_writer(dict, dict_room),
             total_output_counter: &mut self.total_output_counter,
         }
+    }
+
+    /// How many bytes more of the ring matches may reach past into the dictionary: while the
+    /// frame is within its window (see `repeat_from_dict`), as many as are left of it. `None`
+    /// where the frame uses no dictionary or is past its window.
+    #[inline(always)]
+    fn dict_room(&self) -> Option<usize> {
+        let window_left = (self.window_size as u64).checked_sub(self.total_output_counter)?;
+        self.dict_active
+            .then(|| usize::try_from(window_left).unwrap_or(usize::MAX))
     }
 
     /// A sequence's `ll` literals, from the start of `literals`, then its match, if the buffer
@@ -168,6 +172,29 @@ impl DecodeBuffer {
     #[inline(always)]
     pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
         let done = self.buffer.push_sequence(literals, ll, offset, ml);
+        if done {
+            self.total_output_counter += (ll + ml) as u64;
+        }
+        done
+    }
+
+    /// [`Self::push_sequence`] by the ring's writer, which natively takes every sequence, for
+    /// one the ring's fast copy has not taken: a match into the dictionary, as most of a small
+    /// frame's that uses one are, in its simple case. Returns `false`, having changed nothing,
+    /// otherwise. From the slow path, out of the fast loop: V8's code for the loop was 2–4%
+    /// slower on silesia with the check in it.
+    #[cfg(target_family = "wasm")]
+    #[inline(always)]
+    pub fn push_from_dict(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
+        if !self.dict_active {
+            return false;
+        }
+        let Some(room) = self.dict_room() else {
+            return false;
+        };
+        let mut writer = self.buffer.seq_writer(&self.dict_content, room);
+        let done = writer.push_sequence(literals, ll, offset, ml);
+        writer.finish();
         if done {
             self.total_output_counter += (ll + ml) as u64;
         }

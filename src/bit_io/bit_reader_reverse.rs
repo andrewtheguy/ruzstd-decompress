@@ -1,7 +1,9 @@
 use core::convert::TryInto;
 
-/// The zero bytes before a [`BitReaderReversed::padded`] copy of a source.
-pub const PADDING: usize = 16;
+/// The zero bytes before a [`BitReaderReversed::padded`] copy of a source: enough that
+/// [`BitReaderReversed::can_refill_fast_twice`] holds until the window is wholly before the
+/// source's start, so that a loop of fast refills on the copy reads all of the source.
+pub const PADDING: usize = 32;
 
 /// The most bytes of a source a [`BitReaderReversed::padded`] copy takes: those a reader has
 /// left when [`BitReaderReversed::can_refill_fast_twice`] stops holding, at most 14 before its
@@ -171,7 +173,7 @@ impl<'s> BitReaderReversed<'s> {
 
     /// The reader on a copy of what is left of its source, after [`PADDING`] zero bytes, in
     /// `buf`: it reads on as this one would, the zeros past the source's start included, but
-    /// [`Self::can_refill_fast_twice`] holds until its window starts a byte before the
+    /// [`Self::can_refill_fast_twice`] holds until its window starts 17 bytes before the
     /// source's start, so that fast refills reach that start and past it. Its
     /// [`Self::bits_remaining`] counts the zero bytes, `PADDING * 8` more than this one's.
     ///

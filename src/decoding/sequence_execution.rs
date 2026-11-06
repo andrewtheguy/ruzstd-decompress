@@ -14,7 +14,7 @@ use crate::decoding::errors::ExecuteSequencesError;
 pub struct SequenceExecutor<'a> {
     buffer: &'a mut DecodeBuffer,
     /// The block's literals, then [`LITERALS_PADDING`] bytes, which the buffer's fast copy
-    /// reads (the ring buffer's `copy_sequence`).
+    /// reads (the ring buffer's `copy_literals`).
     padded_literals: &'a [u8],
     literals_len: usize,
     offset_hist: &'a mut [u32; 3],
@@ -85,6 +85,17 @@ impl<'a> SequenceExecutor<'a> {
     /// closely, or the buffer needs room.
     #[inline(never)]
     pub fn execute_slow(&mut self, seq: SlowSequence) -> Result<(), ExecuteSequencesError> {
+        // In WebAssembly, the ring's fast copy takes no match into the dictionary; the
+        // writer that natively takes every sequence takes those here (see `DecodeBuffer`).
+        #[cfg(target_family = "wasm")]
+        if self.buffer.push_from_dict(
+            &self.padded_literals[seq.literals_start..],
+            seq.ll,
+            seq.offset,
+            seq.ml,
+        ) {
+            return Ok(());
+        }
         let literals: &[u8] = self.padded_literals;
         let literals = &literals[seq.literals_start..seq.literals_start + seq.ll];
         if !literals.is_empty() {
