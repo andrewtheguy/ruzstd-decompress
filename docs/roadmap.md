@@ -132,6 +132,15 @@ streams' loop alone, silesia `-3` took 3.5% more and terminal's tiles 4.2%,
 mixed's 1% fewer. V8 ran about as many instructions as with the shift. Entries
 of 4 bytes, holding the multiplier, would save only that table's load.
 
+Since run 25 the table of pairs' round checks each stream's output room with one compare,
+and refills from the source up to the container's end with no bounds checks: in wasm 10.7%
+fewer instructions on `x-ray` and 4% on mixed's tiles, `x-ray` 7% faster over 16 rounds,
+mixed's tiles no clearer than ±2%. The loop waits on each stream's chain from one lookup
+to the next (the window's shift, the index, the entry's load, its multiplier, the
+multiplication): fewer instructions off that chain save little. The four output positions
+in a vector (LLVM's SLP vectorizer) are faster in V8 than without (run 25). Refilling the
+sequences' fast loop the same way put the tail's length on its chain, and was slower.
+
 ## 4. Smaller
 
 - The frame checksum (XXH64, the `twox-hash` crate) is made only for frames
