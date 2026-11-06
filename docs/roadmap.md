@@ -13,9 +13,10 @@ processor has it. WebAssembly keeps the safe loops.
 Natively, by geomean over the 10 workloads (run 26), ruzstd-decompress takes 0.97 times
 libzstd's time: 1.10–1.16 times on Silesia, `x-ray` included, 1.12 on the GitHub frames
 with their dictionary, 1.14 on mixed's tiles; 0.90 on the GitHub frames without it, and
-less on the raw blocks of the video clip (0.76) and terminal's tiles (0.48). In wasm the
-workloads take 1.24–1.48 times their native time before run 26 (the dictionary frames 1.9,
-the video clip's raw blocks the same): on Silesia 1.44–1.87 times native libzstd's (run 26).
+less on the raw blocks of the video clip (0.76) and terminal's tiles (0.48). In wasm, which
+libzstd is not built for here, the workloads take 1.26–1.65 times their native time (run
+26), 1.50 by geomean, the dictionary frames 2.14, the video clip's raw blocks the same; 1.24–
+1.48 before run 26, whose native loops wasm does not have.
 
 ## 1. The sequences, again
 
