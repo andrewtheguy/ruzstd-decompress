@@ -33,9 +33,12 @@ more than x86-64's registers. What is left:
   faster: the states stored on an error so that they are computed before the copies, the
   short matches' copy inline, and 8 sequences decoded ahead with their matches' sources
   prefetched (run 26).
-- **WebAssembly** runs the same loop since run 27, 10.8% faster than its safe loop by
-  geomean. What V8's code for it spends is not yet profiled; the dictionary frames take 1.71
-  times their native time there, the most of the workloads.
+- **WebAssembly** runs the same loop since run 27, with the Huffman streams' raw loops: both
+  together 10.8% faster than wasm's safe loops by geomean. With the sequences' raw loop alone
+  (three rounds), silesia `-3` was 15% faster, the GitHub frames with their dictionary 15%
+  and terminal's tiles 12%, nearly all of what both gave there. What V8's code for it spends
+  is not yet profiled; the dictionary frames take 1.71 times their native time there, the
+  most of the workloads.
 
 ## 2. What is left of the table builds
 
@@ -80,6 +83,9 @@ every stream has left of its source and output, in a BMI2 build. On `x-ray` a pa
 literals, 1.14. The loop waits on each stream's chain from one lookup to the next, as
 libzstd's does.
 
-In wasm the same loops run since run 27: `x-ray` 9% faster than with wasm's safe loops,
-mixed's tiles 12%, in 1.19 and 1.27 times their native time. The table of pairs' shift by a
-multiplication, which made the safe loop faster in V8, made the raw one slower (`x-ray` 4%).
+In wasm the same loops run since run 27, with the sequences' raw loop: both together made
+`x-ray` 9% faster than wasm's safe loops, mixed's tiles 12%, which now take 1.19 and 1.27
+times their native time. With the Huffman streams' raw loops alone (three rounds), `x-ray`
+was 19% faster and mixed's tiles 3%, the sequences' alone 9% and 3%. The table of pairs'
+shift by a multiplication, which made the safe loop faster in V8, made the raw one slower
+(`x-ray` 4%).
