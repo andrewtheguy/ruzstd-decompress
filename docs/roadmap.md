@@ -27,7 +27,15 @@ tried). What is left:
 - **WebAssembly**: V8's code for the loop spills either way. A form of the loop it
   takes better is not known; the forms tried are in run 18. Since #23 it runs 1.4% more
   instructions on silesia `-3` than before (75 M a pass, about 5 a sequence), not more of
-  the stack's loads and stores: V8's code for the loop as #23 wrote it (run 23).
+  the stack's loads and stores: V8's code for the loop as #23 wrote it (run 23). Each of a
+  sequence's six takes is two variable shifts, and V8 moves each shift's count into `cl`
+  and masks it, about 12 instructions a take. Taking each by one shift and a mask from a
+  table of 32, the window shifted once after each group of takes (8 variable shifts a
+  sequence, not 12), was slower (lab2, 2026-11-06, a pass's instructions and cycles):
+  silesia `-3` 4.0% more instructions and 7.7% more cycles, nci 3.8% and 6.5%, the GitHub
+  frames 1.5% more instructions, `x-ray` and terminal's tiles the same. V8 takes four
+  instructions to load a mask (no scaled index for a wasm load) and spills more of the
+  loop's values. Natively it ran 4% more cycles on silesia `-3` and nci.
 - **The registers**: the loop's 44 loads and stores of the stack a sequence. Decoding a
   batch into an array before executing it, by a function each, and a table's entry
   packed into a `u64`, were both slower (run 21): the decoding alone took 117–119
@@ -82,7 +90,15 @@ On uncover (lab1), which builds 847 sequence tables and 88 Huffman tables a pass
 - The Huffman tables' build was rewritten in run 19 (the GitHub frames 24%
   faster natively); on those frames it is now a third of the pass, over a third of that
   reading the FSE-coded weights, a chain from one state to the next as in
-  libzstd.
+  libzstd. In wasm (lab2, 2026-11-06, V8's code, instructions sampled) it is 32% of
+  those frames, 7.7% of terminal's tiles and 1.7% of mixed's, where the sequence tables'
+  build is 2.0%, 4.4% and 1.7% (2.3% of silesia `-3`). Of the Huffman build there, about
+  35% is the weights' FSE loop, waiting on each state's load; 16% the pass over all the
+  weights that lists the symbols with a code and the highest weight; 10% placing the
+  symbols by weight, a count through memory; 8% the table's fill and 5% the counts by
+  weight. Listing the symbols in the weights' loop, which has room for it, was no clear
+  gain (harness medians, five rounds): the GitHub frames 1.8% faster natively and 1.0% in
+  wasm, terminal's tiles 1.1% slower both ways, all within the spread.
 - Not keeping a table that is the same as the last: no FSE-compressed
   description in terminal's, uncover's or browser's tiles is the same as the
   one before it of its kind (counted 2026-11-05, with each table keeping the
