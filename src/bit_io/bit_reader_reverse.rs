@@ -76,21 +76,6 @@ impl<'s> BitReaderReversed<'s> {
         self.index >= 8
     }
 
-    /// Whether two refills in a row can be fast: a refill moves by at most 7 bytes, after which
-    /// [`Self::can_refill_fast`] still holds.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn can_refill_fast_twice(&self) -> bool {
-        self.index >= 15
-    }
-
-    /// Whether `n` refills in a row can be fast, `n` at least 1: each moves by at most 7 bytes.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn can_refill_fast_times(&self, n: usize) -> bool {
-        self.index >= 8 + 7 * (n - 1)
-    }
-
     /// [`Self::ensure_bits`] while [`Self::can_refill_fast`]: the refill never reaches the
     /// source's end, so a loop of these has no call to `refill_slow`, which, taking the reader
     /// by reference, would keep it in memory instead of registers.
@@ -179,53 +164,9 @@ impl<'s> BitReaderReversed<'s> {
         (self.bit_container | 1) << self.bits_consumed
     }
 
-    /// The source up to the container's last byte, `source[..index + 8]`, for a loop of
-    /// [`Self::refill_tail`]: the refills are checked against its length, which the loop's own
-    /// check can bound, so that they need no bounds checks of their own. Only while the
-    /// container holds the 8 bytes from `index`, as after [`Self::ensure_bits_fast`]; `None`
-    /// otherwise.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn tail(&self) -> Option<&'s [u8]> {
-        if self.extra_bits != 0 {
-            return None;
-        }
-        self.source.get(..self.index.checked_add(8)?)
-    }
-
-    /// [`Self::refill_window_fast`] on `tail`, from [`Self::tail`]: the window after the bits
-    /// taken off the top of `window`, and `tail` moved down by the whole bytes taken. Only while
-    /// `tail` is at least 16 bytes long; the reader is set from it by [`Self::resume_tail`].
-    ///
-    /// The bytes taken are at most 8 to the compiler (`trailing_zeros` is at most 64), so that a
-    /// check of `8 + 8 * n` bytes before `n` refills spares them any of their own, and nothing
-    /// is masked on the way from the window to the load.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn refill_tail(tail: &mut &'s [u8], window: u64) -> u64 {
-        let consumed = window.trailing_zeros() as usize;
-        let rest = &tail[..tail.len() - consumed / 8];
-        let bytes = rest.last_chunk::<8>().expect("a tail of 16 bytes or more");
-        *tail = rest;
-        (u64::from_le_bytes(*bytes) | 1) << (consumed % 8)
-    }
-
-    /// The reader where a loop of [`Self::refill_tail`] on its [`Self::tail`] left `tail` and
-    /// `window`.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn resume_tail(&mut self, tail: &'s [u8], window: u64) {
-        debug_assert!(tail.as_ptr() == self.source.as_ptr() && tail.len() <= self.source.len());
-        let bytes = tail.last_chunk::<8>().expect("a tail of 8 bytes or more");
-        self.index = tail.len() - 8;
-        self.bit_container = u64::from_le_bytes(*bytes);
-        self.consume_to_sentinel(window);
-    }
-
     /// The source's start and the index of the container's first byte, for a loop of
     /// [`refill_raw`] while [`Self::can_refill_fast`] holds of the index; the reader is set
     /// from where it leaves them by [`Self::resume_index`].
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn raw_index(&self) -> (*const u8, usize) {
         (self.source.as_ptr(), self.index)
@@ -233,7 +174,6 @@ impl<'s> BitReaderReversed<'s> {
 
     /// The reader where a loop of [`refill_raw`] from [`Self::raw_index`] left the index of
     /// its container and its `window`.
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn resume_index(&mut self, index: usize, window: u64) {
         let bytes = self.source[index..]
@@ -364,7 +304,6 @@ impl<'s> BitReaderReversed<'s> {
 /// # Safety
 ///
 /// `ip` must be at least 7 bytes after the source's start, and the source hold 8 bytes from it.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 pub unsafe fn refill_raw(ip: &mut *const u8, window: u64) -> u64 {
     let consumed = window.trailing_zeros();

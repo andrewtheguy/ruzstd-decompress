@@ -6,7 +6,6 @@ use super::scratch::FSEScratch;
 use super::sequence_table::{LL_DEFAULT_ACC_LOG, LL_DEFAULT_DISTRIBUTION};
 use super::sequence_table::{SIZE, SeqEntry, SeqKind, at};
 use crate::bit_io::BitReaderReversed;
-#[cfg(not(target_family = "wasm"))]
 use crate::bit_io::refill_raw;
 use crate::bit_io::{PADDED_LEFT, PADDING};
 use crate::blocks::sequence_section::{
@@ -68,8 +67,7 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
     let mut seq_idx = 0;
     let tables = [ll_table, ml_table, of_table];
     let mut states = [ll_state, ml_state, of_state];
-    // Natively, one call for both, so that a small block pays for the loop's setup once.
-    #[cfg(not(target_family = "wasm"))]
+    // One call for both, so that a small block pays for the loop's setup once.
     if fast_sequences::<E>(
         &mut br,
         &mut padded,
@@ -80,32 +78,6 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
         section.num_sequences,
     )? {
         padding_bits = PADDING as isize * 8;
-    }
-    #[cfg(target_family = "wasm")]
-    if section.num_sequences > 1 && br.can_refill_fast() {
-        fast_sequences::<E>(
-            &mut br,
-            tables,
-            &mut states,
-            executor,
-            &mut seq_idx,
-            section.num_sequences,
-        )?;
-    }
-    #[cfg(target_family = "wasm")]
-    if seq_idx + 1 < section.num_sequences
-        && let Some(copy) = br.padded(&mut padded)
-    {
-        br = copy;
-        padding_bits = PADDING as isize * 8;
-        fast_sequences::<E>(
-            &mut br,
-            tables,
-            &mut states,
-            executor,
-            &mut seq_idx,
-            section.num_sequences,
-        )?;
     }
     let [mut ll_state, mut ml_state, mut of_state] = states;
 
@@ -152,15 +124,14 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
 /// The fast loop of [`decode_sequences`]: sequences while `br` can refill twice and one is
 /// left after them, the states and the count moved on.
 ///
-/// Natively, as libzstd's loop: the reader's position a raw pointer and the executor's state
-/// in a [`RawRun`] of locals, so that the loop keeps them in registers and checks no bounds
-/// but its own.
+/// As libzstd's loop: the reader's position a raw pointer and the executor's state in a
+/// [`RawRun`] of locals, so that the loop keeps them in registers and checks no bounds but its
+/// own.
 ///
 /// [`RawRun`]: crate::decoding::sequence_execution::RawRun
 ///
 /// On x86-64 it runs in a build with BMI2 where the processor has it, as libzstd's does: its
 /// shifts take their count from any register, where the others' take it only from `cl`.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 fn fast_sequences<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
     br: &mut BitReaderReversed<'x>,
@@ -196,9 +167,8 @@ fn fast_sequences_bmi2<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
     fast_sequences_body(br, padded, tables, states, executor, seq_idx, num_sequences)
 }
 
-/// The native [`fast_sequences`]: on `br` while it can refill fast, then on its padded copy in
+/// The body of [`fast_sequences`]: on `br` while it can refill fast, then on its padded copy in
 /// `padded` (see [`BitReaderReversed::padded`]), to which it sets `br`, returning `true`.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
     br: &mut BitReaderReversed<'x>,
@@ -335,66 +305,13 @@ fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
     Ok(on_padded)
 }
 
-/// The fast loop of [`decode_sequences`]: sequences while `br` can refill twice and one is
-/// left after them, the states and the count moved on.
-#[cfg(target_family = "wasm")]
-#[inline(always)]
-fn fast_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
-    br: &mut BitReaderReversed<'_>,
-    [ll_table, ml_table, of_table]: [&[SeqEntry; SIZE]; 3],
-    states: &mut [usize; 3],
-    executor: &mut SequenceExecutor<'_>,
-    seq_idx: &mut u32,
-    num_sequences: u32,
-) -> Result<(), E> {
-    let [mut ll_state, mut ml_state, mut of_state] = *states;
-    let mut b = br.clone();
-    b.ensure_bits_fast(57);
-    let mut window = b.sentinel_window();
-    let mut run = executor.run();
-    while *seq_idx + 1 < num_sequences && b.can_refill_fast_twice() {
-        window = b.refill_window_fast(window);
-        let ll = at(ll_table, ll_state);
-        let ml = at(ml_table, ml_state);
-        let of = at(of_table, of_state);
-        let of_add = take_bits(&mut window, of.nb_add_bits);
-        let ml_add = take_bits(&mut window, ml.nb_add_bits);
-        if of.nb_add_bits + ml.nb_add_bits + ll.nb_add_bits > 56 - 26 {
-            window = b.refill_window_fast(window);
-        }
-        let ll_add = take_bits(&mut window, ll.nb_add_bits);
-        ll_state = usize::from(ll.next_state) + take_bits(&mut window, ll.nb_bits) as usize;
-        ml_state = usize::from(ml.next_state) + take_bits(&mut window, ml.nb_bits) as usize;
-        of_state = usize::from(of.next_state) + take_bits(&mut window, of.nb_bits) as usize;
-        let slow = run.execute(Sequence {
-            ll: ll.base_value + ll_add as u32,
-            ml: ml.base_value + ml_add as u32,
-            of: of.base_value + of_add as u32,
-        })?;
-        if let Some(slow) = slow {
-            run.finish();
-            executor.execute_slow(slow)?;
-            run = executor.run();
-        }
-        *seq_idx += 1;
-    }
-    run.finish();
-    b.consume_to_sentinel(window);
-    *br = b;
-    *states = [ll_state, ml_state, of_state];
-    Ok(())
-}
-
 /// The next `n` bits of `window`, a reader's bits left aligned, taken off its top; `n` may be
 /// 0, as the first shift keeps the second under 64.
 #[inline(always)]
 fn take_bits(window: &mut u64, n: u8) -> u64 {
-    // Natively, `!n` is `63 - n` in the shift's six bits, which x86's shifts mask the count to:
-    // no masking of their own. In wasm, as before, the native form being no faster in V8.
-    #[cfg(not(target_family = "wasm"))]
+    // `!n` is `63 - n` in the shift's six bits, which the shifts of x86 and of wasm mask the
+    // count to: no masking of their own.
     let bits = (*window >> 1).wrapping_shr(!u32::from(n));
-    #[cfg(target_family = "wasm")]
-    let bits = (*window >> 1) >> (63 - n);
     *window <<= n;
     bits
 }
