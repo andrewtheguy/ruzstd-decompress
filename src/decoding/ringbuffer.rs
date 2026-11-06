@@ -755,7 +755,7 @@ impl RawWriter {
         // The data before the match, its literals included.
         let data = dst as usize - self.data_start as usize;
         if offset > data {
-            // SAFETY: as for this function, with the room checked.
+            // SAFETY: as for this function, with the room checked and `offset` past `data`.
             return unsafe { self.push_from_dict(lit, ll, offset, ml, data) };
         }
         // SAFETY: the room checked covers each copy rounded up and past by `WILD`; the match's
@@ -769,7 +769,17 @@ impl RawWriter {
     }
 
     /// [`Self::push_sequence`] for a match whose source starts `offset - data` bytes before
-    /// the data, in the dictionary.
+    /// the data, in the dictionary: the frame's, or where the data wraps, the ring's part from
+    /// the head to its end (see [`RingBuffer::raw_writer`]). Returns `false`, having changed
+    /// nothing, where the dictionary does not reach that far or the frame is past its window.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::push_sequence`]: `lit` valid for reads of `ll + WILD` bytes, outside the ring,
+    /// and the ring and the dictionary untouched since the writer was made. Besides, the room
+    /// for the sequence must have been checked, `op + ll + ml` at most `wild_end`, so that the
+    /// copies may write up to `WILD` bytes past it; and `data` must be the bytes from
+    /// `data_start` to `op + ll`, with `offset` more than `data`.
     #[inline(always)]
     unsafe fn push_from_dict(
         &mut self,
