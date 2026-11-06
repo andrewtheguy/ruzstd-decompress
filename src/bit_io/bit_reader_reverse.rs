@@ -83,6 +83,12 @@ impl<'s> BitReaderReversed<'s> {
         self.index >= 15
     }
 
+    /// Whether `n` refills in a row can be fast, `n` at least 1: each moves by at most 7 bytes.
+    #[inline(always)]
+    pub fn can_refill_fast_times(&self, n: usize) -> bool {
+        self.index >= 8 + 7 * (n - 1)
+    }
+
     /// [`Self::ensure_bits`] while [`Self::can_refill_fast`]: the refill never reaches the
     /// source's end, so a loop of these has no call to `refill_slow`, which, taking the reader
     /// by reference, would keep it in memory instead of registers.
