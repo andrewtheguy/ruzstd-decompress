@@ -10,12 +10,12 @@ Unsafe code is allowed since run 26, kept to the hot loops: the sequences' and t
 Huffman streams' loops run by raw pointers, as libzstd's, natively in a BMI2 build where the
 processor has it, and since run 27 in WebAssembly too, which had kept safe loops of its own.
 
-Natively, by geomean over the 10 workloads (run 27), ruzstd-decompress takes 0.96 times
-libzstd's time: 1.08–1.17 times on Silesia, `x-ray` included, 1.14 on the GitHub frames
-with their dictionary, 1.08 on mixed's tiles; 0.92 on the GitHub frames without it, and
-less on the raw blocks of the video clip (0.74) and terminal's tiles (0.44). In wasm, which
-libzstd is not built for here, the workloads take 1.19–1.71 times their native time (run
-27), 1.33 by geomean, the dictionary frames most, the video clip's raw blocks about the
+Natively, by geomean over the 10 workloads (run 28), ruzstd-decompress takes 0.97 times
+libzstd's time: 1.09–1.14 times on Silesia, `x-ray` included, 1.09 on the GitHub frames
+with their dictionary, 1.11 on mixed's tiles; 0.95 on the GitHub frames without it, and
+less on the raw blocks of the video clip (0.75) and terminal's tiles (0.48). In wasm, which
+libzstd is not built for here, the workloads take 1.18–1.63 times their native time (run
+28), 1.33 by geomean, the dictionary frames most, the video clip's raw blocks about the
 same; 1.50 by geomean with the safe loops (run 26).
 
 ## 1. The sequences, again
