@@ -334,7 +334,7 @@ impl RingBuffer {
     pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
         let (limit, data_start) = self.sequence_bounds();
         match copy_sequence(
-            &mut self.buf,
+            &mut self.buf[..limit],
             limit,
             data_start,
             self.tail,
@@ -505,28 +505,29 @@ impl SeqWriter<'_> {
 }
 
 /// A sequence's literals and then its match, in one go, from `tail` in `buf`, the ring's
-/// buffer, where it is simple: the free space from the tail, up to `limit`, has room for both
-/// rounded up to whole chunks, and the match's source is at least [`CHUNK`] back, in the data
-/// that runs on from `data_start` to where it is written without wrapping. Returns the tail
-/// after them, or `None`, having changed nothing.
+/// buffer up to where the free space from the tail ends, where it is simple: the free space
+/// has room for both rounded up to whole chunks, and the match's source is at least [`CHUNK`]
+/// back, in the data that runs on from `data_start` to where it is written without wrapping.
+/// Returns the tail after them, or `None`, having changed nothing.
 ///
-/// `limit` is where the free space from the tail ends, within what is initialised: all of the
-/// ring that is initialised when the data does not wrap, else the head, the tail being in the
-/// part from the start of the ring. `data_start` is then the head, else the start of the
-/// ring. `buf` is a slice or the ring's `Vec`, taken as a slice at each use: for the `Vec`,
-/// its pointer and length are read from it each time (see [`SequenceExecutor`]).
+/// `buf` ends within what is initialised: at all of the ring that is initialised when the data
+/// does not wrap, else at the head, the tail being in the part from the start of the ring.
+/// `data_start` is then the head, else the start of the ring. `limit` is `buf`'s length.
+///
+/// `buf` is a slice, not the ring's `Vec`, whose pointer and length LLVM read from memory for
+/// each chunk, as the chunks stored before might have changed them: 0.6% more instructions on
+/// silesia in V8. `limit` is passed on its own: checked against `buf.len()` instead, the loop
+/// ran most of them again.
 ///
 /// `literals` must hold the `ll` literals and then at least `CHUNK - 1` bytes more (see
 /// [`copy_literals`]). The copies are those of [`copy_literals`] and [`copy_match`], written
 /// out here with the match's chunks by `copy_within`: V8's code for the loop was 2–4% slower
 /// on silesia with the two functions in it.
-///
-/// [`SequenceExecutor`]: super::sequence_execution::SequenceExecutor
 #[cfg(target_family = "wasm")]
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn copy_sequence<B: AsMut<[u8]> + ?Sized>(
-    buf: &mut B,
+fn copy_sequence(
+    buf: &mut [u8],
     limit: usize,
     data_start: usize,
     tail: usize,
@@ -548,23 +549,22 @@ fn copy_sequence<B: AsMut<[u8]> + ?Sized>(
     if ll <= SHORT_COPY {
         let mut at = 0;
         while at < ll {
-            buf.as_mut()[tail + at..tail + at + CHUNK].copy_from_slice(&literals[at..at + CHUNK]);
+            buf[tail + at..tail + at + CHUNK].copy_from_slice(&literals[at..at + CHUNK]);
             at += CHUNK;
         }
     } else {
-        buf.as_mut()[tail..tail + ll].copy_from_slice(&literals[..ll]);
+        buf[tail..tail + ll].copy_from_slice(&literals[..ll]);
     }
     let dst = tail + ll;
     let src = dst - offset;
     if ml <= SHORT_COPY || offset < ml {
         let mut at = 0;
         while at < ml {
-            buf.as_mut()
-                .copy_within(src + at..src + at + CHUNK, dst + at);
+            buf.copy_within(src + at..src + at + CHUNK, dst + at);
             at += CHUNK;
         }
     } else {
-        buf.as_mut().copy_within(src..src + ml, dst);
+        buf.copy_within(src..src + ml, dst);
     }
     Some(dst + ml)
 }
