@@ -1,7 +1,6 @@
 //! Utilities for decoding Huff0 encoded huffman data.
 
 use crate::bit_io::BitReaderReversed;
-#[cfg(not(target_family = "wasm"))]
 use crate::bit_io::refill_raw;
 use crate::decoding::errors::HuffmanTableError;
 use crate::fse::{FSETable, build_states};
@@ -116,7 +115,7 @@ impl HuffmanTable {
     ///
     /// The index is a fixed shift of `window`, and the next window one shift by the entry's
     /// length. The window is all a stream needs in the loop: the bits used are counted by the
-    /// sentinel, so the four streams' state fits in registers, wasm's included.
+    /// sentinel, so the four streams' state fits in registers.
     #[inline(always)]
     fn decode_aligned(table: &[Entry; TABLE_SIZE], window: &mut u64) -> u8 {
         let entry = table[(*window >> (64 - MAX_MAX_NUM_BITS)) as usize];
@@ -176,10 +175,9 @@ impl HuffmanTable {
     }
 
     /// [`Self::decode_4_streams`], `N` symbols a stream a refill: `N * max_num_bits` must be at
-    /// most 56. Natively, as libzstd's loop, by raw pointers, in steps of a refill and `N`
-    /// lookups a stream, as many at a time as every stream has the output and the source for;
-    /// then each stream on its own.
-    #[cfg(not(target_family = "wasm"))]
+    /// most 56. As libzstd's loop, by raw pointers, in steps of a refill and `N` lookups a
+    /// stream, as many at a time as every stream has the output and the source for; then each
+    /// stream on its own.
     #[inline(always)]
     fn decode_4_streams_n<const N: usize>(
         &self,
@@ -235,73 +233,6 @@ impl HuffmanTable {
         self.decode_stream_n::<N>(br1, &mut out1[at[1]..]);
         self.decode_stream_n::<N>(br2, &mut out2[at[2]..]);
         self.decode_stream_n::<N>(br3, &mut out3[at[3]..]);
-    }
-
-    /// [`Self::decode_4_streams`], `N` symbols a stream a refill: `N * max_num_bits` must be at
-    /// most 56. The readers are copied into locals for the loop, so that their state can stay in
-    /// registers, and the output is taken `N` bytes at a time, so its stores need no checks.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    fn decode_4_streams_n<const N: usize>(
-        &self,
-        brs: &mut [BitReaderReversed<'_>; 4],
-        outs: [&mut [u8]; 4],
-    ) {
-        let max_bits = self.max_num_bits;
-        debug_assert!(N * max_bits as usize <= 56);
-        let table = self.table();
-        let [out0, out1, out2, out3] = outs;
-        let common = out0.len().min(out1.len()).min(out2.len()).min(out3.len());
-        let whole = common - common % N;
-        let [mut b0, mut b1, mut b2, mut b3] = brs.clone();
-
-        let chunks = out0[..whole]
-            .as_chunks_mut::<N>()
-            .0
-            .iter_mut()
-            .zip(out1[..whole].as_chunks_mut::<N>().0)
-            .zip(out2[..whole].as_chunks_mut::<N>().0)
-            .zip(out3[..whole].as_chunks_mut::<N>().0);
-        // While no stream's refill can reach its source's end: so the loop has no call to the slow
-        // refill, which would keep the readers in memory (see `ensure_bits_fast`).
-        let mut done = 0;
-        for (((c0, c1), c2), c3) in chunks {
-            if !(b0.can_refill_fast()
-                && b1.can_refill_fast()
-                && b2.can_refill_fast()
-                && b3.can_refill_fast())
-            {
-                break;
-            }
-            b0.ensure_bits_fast(57);
-            b1.ensure_bits_fast(57);
-            b2.ensure_bits_fast(57);
-            b3.ensure_bits_fast(57);
-            let (mut w0, mut w1, mut w2, mut w3) = (
-                b0.sentinel_window(),
-                b1.sentinel_window(),
-                b2.sentinel_window(),
-                b3.sentinel_window(),
-            );
-            for k in 0..N {
-                c0[k] = Self::decode_aligned(table, &mut w0);
-                c1[k] = Self::decode_aligned(table, &mut w1);
-                c2[k] = Self::decode_aligned(table, &mut w2);
-                c3[k] = Self::decode_aligned(table, &mut w3);
-            }
-            b0.consume_to_sentinel(w0);
-            b1.consume_to_sentinel(w1);
-            b2.consume_to_sentinel(w2);
-            b3.consume_to_sentinel(w3);
-            done += N;
-        }
-
-        *brs = [b0, b1, b2, b3];
-        let [br0, br1, br2, br3] = brs;
-        self.decode_stream_n::<N>(br0, &mut out0[done..]);
-        self.decode_stream_n::<N>(br1, &mut out1[done..]);
-        self.decode_stream_n::<N>(br2, &mut out2[done..]);
-        self.decode_stream_n::<N>(br3, &mut out3[done..]);
     }
 
     /// [`Self::decode_4_streams`], from the table of pairs when [`choose_pairs`] says it pays for
@@ -420,11 +351,10 @@ impl HuffmanTable {
         *at += entry.len();
     }
 
-    /// [`Self::decode_4_streams`] from the table of pairs: natively, as libzstd's loop, by raw
-    /// pointers, in steps of a refill and [`PAIRS_A_REFILL`] lookups a stream, as many at a time as
-    /// every stream has the output and the source for; then each stream on its own (see
+    /// [`Self::decode_4_streams`] from the table of pairs: as libzstd's loop, by raw pointers, in
+    /// steps of a refill and [`PAIRS_A_REFILL`] lookups a stream, as many at a time as every
+    /// stream has the output and the source for; then each stream on its own (see
     /// [`Self::decode_stream_pairs`]).
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     fn decode_4_streams_pairs(&self, brs: &mut [BitReaderReversed<'_>; 4], outs: [&mut [u8]; 4]) {
         let pairs = self.pairs();
@@ -474,105 +404,6 @@ impl HuffmanTable {
         self.decode_stream_pairs(br1, &mut out1[at[1]..]);
         self.decode_stream_pairs(br2, &mut out2[at[2]..]);
         self.decode_stream_pairs(br3, &mut out3[at[3]..]);
-    }
-
-    /// [`Self::decode_4_streams`] from the table of pairs, in rounds of [`PAIRS_ROUND`] refills
-    /// and [`PAIRS_A_REFILL`] lookups a stream after each, while every stream has the output a
-    /// round's lookups may write to and can refill fast that many times; then each stream on its
-    /// own (see [`Self::decode_stream_pairs`]).
-    #[cfg(target_family = "wasm")]
-    fn decode_4_streams_pairs(&self, brs: &mut [BitReaderReversed<'_>; 4], outs: [&mut [u8]; 4]) {
-        let pairs = self.pairs();
-        let [out0, out1, out2, out3] = outs;
-        let [mut b0, mut b1, mut b2, mut b3] = brs.clone();
-        let (mut at0, mut at1, mut at2, mut at3) = (0, 0, 0, 0);
-        let can_refill =
-            |b: [&BitReaderReversed<'_>; 4]| b.iter().all(|b| b.can_refill_fast_times(PAIRS_ROUND));
-        // The last offset of each stream's output from which a round's lookups have the room
-        // they may write to: one compare a stream a round, from which the compiler also knows
-        // the round's slice of the output is in bounds.
-        const ROUND_OUT: usize = PAIRS_ROUND * PAIRS_OUT;
-        // The tail a stream needs for a round's refills, as `refill_tail` counts them.
-        const ROUND_TAIL: usize = 8 + 8 * PAIRS_ROUND;
-        let limits = (
-            out0.len().checked_sub(ROUND_OUT),
-            out1.len().checked_sub(ROUND_OUT),
-            out2.len().checked_sub(ROUND_OUT),
-            out3.len().checked_sub(ROUND_OUT),
-        );
-        if let (Some(l0), Some(l1), Some(l2), Some(l3)) = limits
-            && can_refill([&b0, &b1, &b2, &b3])
-        {
-            b0.ensure_bits_fast(57);
-            b1.ensure_bits_fast(57);
-            b2.ensure_bits_fast(57);
-            b3.ensure_bits_fast(57);
-            let (mut w0, mut w1, mut w2, mut w3) = (
-                b0.sentinel_window(),
-                b1.sentinel_window(),
-                b2.sentinel_window(),
-                b3.sentinel_window(),
-            );
-            // The refills from each source's tail, checked against its length once a round.
-            let (Some(mut t0), Some(mut t1), Some(mut t2), Some(mut t3)) =
-                (b0.tail(), b1.tail(), b2.tail(), b3.tail())
-            else {
-                unreachable!("each container holds its 8 bytes after a fast refill")
-            };
-            // While every stream has the output a round's lookups may write to.
-            while at0 <= l0 && at1 <= l1 && at2 <= l2 && at3 <= l3 {
-                let (Some(c0), Some(c1), Some(c2), Some(c3)) = (
-                    room::<ROUND_OUT>(out0, at0),
-                    room::<ROUND_OUT>(out1, at1),
-                    room::<ROUND_OUT>(out2, at2),
-                    room::<ROUND_OUT>(out3, at3),
-                ) else {
-                    unreachable!("each offset is at most its limit")
-                };
-                let (mut d0, mut d1, mut d2, mut d3) = (0, 0, 0, 0);
-                for refill in 0..PAIRS_ROUND {
-                    // The check before the round's first refill was for all of its refills.
-                    if refill > 0 {
-                        w0 = BitReaderReversed::refill_tail(&mut t0, w0);
-                        w1 = BitReaderReversed::refill_tail(&mut t1, w1);
-                        w2 = BitReaderReversed::refill_tail(&mut t2, w2);
-                        w3 = BitReaderReversed::refill_tail(&mut t3, w3);
-                    }
-                    for _ in 0..PAIRS_A_REFILL {
-                        Self::decode_pair_aligned(pairs, &mut w0, c0, &mut d0);
-                        Self::decode_pair_aligned(pairs, &mut w1, c1, &mut d1);
-                        Self::decode_pair_aligned(pairs, &mut w2, c2, &mut d2);
-                        Self::decode_pair_aligned(pairs, &mut w3, c3, &mut d3);
-                    }
-                }
-                at0 += d0;
-                at1 += d1;
-                at2 += d2;
-                at3 += d3;
-                if !(t0.len() >= ROUND_TAIL
-                    && t1.len() >= ROUND_TAIL
-                    && t2.len() >= ROUND_TAIL
-                    && t3.len() >= ROUND_TAIL)
-                {
-                    break;
-                }
-                w0 = BitReaderReversed::refill_tail(&mut t0, w0);
-                w1 = BitReaderReversed::refill_tail(&mut t1, w1);
-                w2 = BitReaderReversed::refill_tail(&mut t2, w2);
-                w3 = BitReaderReversed::refill_tail(&mut t3, w3);
-            }
-            b0.resume_tail(t0, w0);
-            b1.resume_tail(t1, w1);
-            b2.resume_tail(t2, w2);
-            b3.resume_tail(t3, w3);
-        }
-
-        *brs = [b0, b1, b2, b3];
-        let [br0, br1, br2, br3] = brs;
-        self.decode_stream_pairs(br0, &mut out0[at0..]);
-        self.decode_stream_pairs(br1, &mut out1[at1..]);
-        self.decode_stream_pairs(br2, &mut out2[at2..]);
-        self.decode_stream_pairs(br3, &mut out3[at3..]);
     }
 
     /// The rest of one stream after the four together, which stop at the first to near its
@@ -909,10 +740,9 @@ fn fill_rank<const L: usize>(entries: &mut [Entry], symbols: &[u8], num_bits: u8
     }
 }
 
-/// One of the four streams in the native loops, as libzstd's: where its reader's container
+/// One of the four streams in the raw loops, as libzstd's: where its reader's container
 /// starts, its window (see [`BitReaderReversed::sentinel_window`]), and the next byte of its
 /// output, by raw pointers, with the bounds a run of steps is counted from.
-#[cfg(not(target_family = "wasm"))]
 struct RawStream {
     ip: *const u8,
     src: usize,
@@ -921,7 +751,6 @@ struct RawStream {
     out_end: usize,
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl RawStream {
     /// The stream of `br`, which must be able to refill fast, writing to `out`.
     #[inline(always)]
@@ -1013,17 +842,13 @@ type Entry = [u8; 2];
 /// bits together, in one `u32`, so that the table's build writes it in one store and a lookup
 /// takes each part with one or two operations. From the lowest bit: the first symbol and the
 /// second (or anything when there is none), 8 bits each; at bit 16, 1 when there is a second;
-/// and from bit 20, the bits, or in wasm two to their power (see [`Self::shift`]).
+/// and from bit 20, the bits.
 #[derive(Copy, Clone, Debug, Default)]
 struct PairEntry(u32);
 
 impl PairEntry {
     fn new(first: u8, second: u8, num_bits: u8, len: u8) -> PairEntry {
-        let bits = if cfg!(target_family = "wasm") {
-            1 << num_bits
-        } else {
-            u32::from(num_bits)
-        };
+        let bits = u32::from(num_bits);
         PairEntry(u32::from(first) | u32::from(second) << 8 | u32::from(len - 1) << 16 | bits << 20)
     }
 
@@ -1033,16 +858,10 @@ impl PairEntry {
         (self.0 as u16).to_le_bytes()
     }
 
-    /// `window` with the entry's bits shifted out. In wasm by a multiplication: V8's code for
-    /// x86-64 puts a variable shift's count in `cl`, moving registers around for each, and a
-    /// multiplication can take any of them.
+    /// `window` with the entry's bits shifted out.
     #[inline(always)]
     fn shift(self, window: u64) -> u64 {
-        if cfg!(target_family = "wasm") {
-            window.wrapping_mul(u64::from(self.0 >> 20))
-        } else {
-            window << (self.0 >> 20 & 63)
-        }
+        window << (self.0 >> 20 & 63)
     }
 
     /// How many symbols the entry holds, 1 or 2; masked so that the compiler knows, and the
@@ -1056,12 +875,6 @@ impl PairEntry {
 /// Lookups a stream from the table of pairs between refills: each takes at most
 /// `MAX_MAX_NUM_BITS` bits, of the 56 a refill leaves.
 const PAIRS_A_REFILL: usize = 56 / MAX_MAX_NUM_BITS as usize;
-
-/// The refills of a round of wasm's four streams' loop from the table of pairs, which checks
-/// the output's room and the sources' bytes left once a round: V8's code for 2 or more was
-/// 10–17% slower.
-#[cfg(target_family = "wasm")]
-const PAIRS_ROUND: usize = 1;
 
 /// The output a stream needs left for a refill's lookups from the table of pairs: two bytes
 /// each, and every one written at most two past the last.

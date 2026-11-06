@@ -1,4 +1,4 @@
 # `cargo test --target wasm32-wasip1` runs the tests under Node's V8, as zDesk's page decodes:
-# the WebAssembly build executes sequences its own way (see `SequenceExecutor`).
+# the raw loops with 32-bit addresses.
 [target.wasm32-wasip1]
 runner = ["node", "--no-warnings", ".cargo/wasi-runner.mjs"]

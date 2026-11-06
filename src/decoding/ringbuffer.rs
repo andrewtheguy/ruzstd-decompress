@@ -328,7 +328,6 @@ impl RingBuffer {
     /// [`RawWriter`]), whose matches may reach into `dict`, the dictionary's content, for
     /// `dict_room` bytes more of the ring. It takes no sequence that would take it past `most`
     /// bytes. Nothing else may touch the ring until [`Self::finish_raw`] takes it back.
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn raw_writer(&mut self, dict: &[u8], dict_room: usize, most: usize) -> RawWriter {
         let (limit, data_start) = self.sequence_bounds();
@@ -371,7 +370,6 @@ impl RingBuffer {
 
     /// The tail moved on to where `writer`, from [`Self::raw_writer`], left it; the bytes
     /// written.
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn finish_raw(&mut self, writer: RawWriter) -> usize {
         let tail = writer.op as usize - writer.base as usize;
@@ -379,33 +377,6 @@ impl RingBuffer {
         let written = tail - self.tail;
         self.tail = tail;
         written
-    }
-
-    /// A sequence's literals and then its match, by [`copy_sequence`], the ring's state read
-    /// from it as it is needed (see [`SequenceExecutor`]). Returns `false`, having changed
-    /// nothing, where that does not take it.
-    ///
-    /// [`SequenceExecutor`]: super::sequence_execution::SequenceExecutor
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
-        let (limit, data_start) = self.sequence_bounds();
-        match copy_sequence(
-            &mut self.buf[..limit],
-            limit,
-            data_start,
-            self.tail,
-            literals,
-            ll,
-            offset,
-            ml,
-        ) {
-            Some(tail) => {
-                self.tail = tail;
-                true
-            }
-            None => false,
-        }
     }
 
     /// `len` bytes from `src` to the tail, either side wrapping at the end of
@@ -481,9 +452,7 @@ impl RingBuffer {
 /// dictionary's content, which matches may reach into while their literals end by
 /// `dict_until`: empty if none, or where the data wraps.
 ///
-/// Natively, the fast loop executes every sequence by one; in WebAssembly, the slow path
-/// takes the matches into the dictionary by one, which the ring's fast copy does not take
-/// (see `DecodeBuffer::push_from_dict`).
+/// It writes the sequences decoded outside the fast loop, which writes by a [`RawWriter`].
 pub struct SeqWriter<'a> {
     buf: &'a mut [u8],
     tail_slot: &'a mut usize,
@@ -559,71 +528,6 @@ impl SeqWriter<'_> {
         *self.tail_slot = self.tail;
         written
     }
-}
-
-/// A sequence's literals and then its match, in one go, from `tail` in `buf`, the ring's
-/// buffer up to where the free space from the tail ends, where it is simple: the free space
-/// has room for both rounded up to whole chunks, and the match's source is at least [`CHUNK`]
-/// back, in the data that runs on from `data_start` to where it is written without wrapping.
-/// Returns the tail after them, or `None`, having changed nothing.
-///
-/// `buf` ends within what is initialised: at all of the ring that is initialised when the data
-/// does not wrap, else at the head, the tail being in the part from the start of the ring.
-/// `data_start` is then the head, else the start of the ring. `limit` is `buf`'s length.
-///
-/// `buf` is a slice, not the ring's `Vec`, whose pointer and length LLVM read from memory for
-/// each chunk, as the chunks stored before might have changed them: 0.6% more instructions on
-/// silesia in V8. `limit` is passed on its own: checked against `buf.len()` instead, the loop
-/// ran most of them again.
-///
-/// `literals` must hold the `ll` literals and then at least `CHUNK - 1` bytes more (see
-/// [`copy_literals`]). The copies are those of [`copy_literals`] and [`copy_match`], written
-/// out here with the match's chunks by `copy_within`: V8's code for the loop was 2–4% slower
-/// on silesia with the two functions in it.
-#[cfg(target_family = "wasm")]
-#[allow(clippy::too_many_arguments)]
-#[inline(always)]
-fn copy_sequence(
-    buf: &mut [u8],
-    limit: usize,
-    data_start: usize,
-    tail: usize,
-    literals: &[u8],
-    ll: usize,
-    offset: usize,
-    ml: usize,
-) -> Option<usize> {
-    // Rounded up, each piece takes less than one chunk more. The room left keeps the tail
-    // short of `cap`, or of the head, so it needs no wrapping and the sentinel stays free.
-    if tail + ll + ml + 2 * CHUNK > limit {
-        return None;
-    }
-    if offset > tail - data_start + ll || offset < CHUNK {
-        return None;
-    }
-    // Short pieces in whole chunks; long ones in one copy each, which is faster than chunks
-    // once there are a few, where the match does not overlap itself.
-    if ll <= SHORT_COPY {
-        let mut at = 0;
-        while at < ll {
-            buf[tail + at..tail + at + CHUNK].copy_from_slice(&literals[at..at + CHUNK]);
-            at += CHUNK;
-        }
-    } else {
-        buf[tail..tail + ll].copy_from_slice(&literals[..ll]);
-    }
-    let dst = tail + ll;
-    let src = dst - offset;
-    if ml <= SHORT_COPY || offset < ml {
-        let mut at = 0;
-        while at < ml {
-            buf.copy_within(src + at..src + at + CHUNK, dst + at);
-            at += CHUNK;
-        }
-    } else {
-        buf.copy_within(src..src + ml, dst);
-    }
-    Some(dst + ml)
 }
 
 /// A sequence of at most a chunk of literals and a chunk of match: a chunk of each, without
@@ -710,7 +614,6 @@ pub(crate) const WILD: usize = 32;
 /// `wild_end` is [`WILD`] bytes before the address where the writes must stop, `data_start` where the data before the
 /// tail starts, and `dict_end` the end of the dictionary's content, which matches may reach
 /// into while their literals end by the address `dict_until`.
-#[cfg(not(target_family = "wasm"))]
 pub struct RawWriter {
     base: *mut u8,
     op: *mut u8,
@@ -721,7 +624,6 @@ pub struct RawWriter {
     dict_until: usize,
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl RawWriter {
     /// A sequence's `ll` literals from `lit`, then its match of `ml` bytes from `offset` back,
     /// where it is simple: the free space has room for both and [`WILD`] bytes more, and the
@@ -746,8 +648,9 @@ impl RawWriter {
     ) -> bool {
         debug_assert!(offset >= 1);
         let op = self.op;
-        // `ll` and `ml` are below 2^18.
-        if op as usize + ll + ml > self.wild_end {
+        // `ll` and `ml` are below 2^18; the sum is in 64 bits, so that it cannot wrap where
+        // addresses are 32 (wasm32), the ring then ending near the top of memory.
+        if op as u64 + (ll + ml) as u64 > self.wild_end as u64 {
             return false;
         }
         // SAFETY: within the room just checked.
@@ -826,7 +729,6 @@ impl RawWriter {
 /// # Safety
 ///
 /// Both valid for 16 bytes, not overlapping.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 unsafe fn copy16(dst: *mut u8, src: *const u8) {
     // SAFETY: the caller's.
@@ -838,7 +740,6 @@ unsafe fn copy16(dst: *mut u8, src: *const u8) {
 /// # Safety
 ///
 /// Both valid for 8 bytes, not overlapping.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 unsafe fn copy8(dst: *mut u8, src: *const u8) {
     // SAFETY: the caller's.
@@ -852,7 +753,6 @@ unsafe fn copy8(dst: *mut u8, src: *const u8) {
 ///
 /// `src` valid for reads and `dst` for writes of `len + WILD` bytes; `src` at least 16 bytes
 /// before `dst` or in another allocation, so that each chunk reads only bytes before it.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 unsafe fn wild_copy(dst: *mut u8, src: *const u8, len: usize) {
     // SAFETY: the caller's; every chunk ends before `len` rounded up past by `WILD`.
@@ -882,7 +782,6 @@ unsafe fn wild_copy(dst: *mut u8, src: *const u8, len: usize) {
 ///
 /// `offset` from 1, `src == dst - offset`; `dst` valid for writes of `len + WILD` bytes and
 /// `src` for reads to there.
-#[cfg(not(target_family = "wasm"))]
 #[inline(always)]
 unsafe fn copy_match_raw(dst: *mut u8, src: *const u8, offset: usize, len: usize) {
     if offset >= 16 {
@@ -899,7 +798,6 @@ unsafe fn copy_match_raw(dst: *mut u8, src: *const u8, offset: usize, len: usize
 /// # Safety
 ///
 /// As [`copy_match_raw`].
-#[cfg(not(target_family = "wasm"))]
 #[inline(never)]
 unsafe fn copy_overlapping(dst: *mut u8, src: *const u8, offset: usize, len: usize) {
     /// After 4 bytes copied one at a time, how far on the next 4 are read from, so that they
@@ -938,7 +836,6 @@ unsafe fn copy_overlapping(dst: *mut u8, src: *const u8, offset: usize, len: usi
 #[cfg(test)]
 mod tests {
     use super::RingBuffer;
-    #[cfg(not(target_family = "wasm"))]
     use super::WILD;
 
     #[test]
@@ -1119,11 +1016,10 @@ mod tests {
         for step in 0..200_000 {
             match next(6) {
                 // A few sequences in a run: when the fast copy takes one, the literals then the
-                // match, byte by byte; when it does not, nothing. Natively, they go through one
-                // writer, which is now and then dropped unfinished, leaving the ring as it was.
+                // match, byte by byte; when it does not, nothing. They go through one writer,
+                // which is now and then dropped unfinished, leaving the ring as it was.
                 3 if !model.is_empty() => {
                     let len_before = model.len();
-                    #[cfg(not(target_family = "wasm"))]
                     let mut writer = rb.seq_writer(&[], 0, usize::MAX);
                     for _ in 0..1 + next(4) {
                         let ll = next(40);
@@ -1131,10 +1027,7 @@ mod tests {
                             (0..ll + super::CHUNK).map(|_| next(256) as u8).collect();
                         let offset = 1 + next(model.len() + ll + 8);
                         let ml = 3 + next(60);
-                        #[cfg(not(target_family = "wasm"))]
                         let done = writer.push_sequence(&padded, ll, offset, ml);
-                        #[cfg(target_family = "wasm")]
-                        let done = rb.push_sequence(&padded, ll, offset, ml);
                         if done {
                             sequences += 1;
                             model.extend_from_slice(&padded[..ll]);
@@ -1143,14 +1036,11 @@ mod tests {
                             }
                         }
                     }
-                    #[cfg(not(target_family = "wasm"))]
                     if next(8) == 0 {
                         model.truncate(len_before);
                     } else {
                         assert_eq!(writer.finish(), model.len() - len_before);
                     }
-                    #[cfg(target_family = "wasm")]
-                    let _ = len_before;
                 }
                 0 => {
                     let data: alloc::vec::Vec<u8> =
@@ -1191,11 +1081,10 @@ mod tests {
         );
     }
 
-    /// Sequences through the raw writer, as the native fast loop writes them, checked against a
+    /// Sequences through the raw writer, as the fast loop writes them, checked against a
     /// byte at a time: from rings kept small, so that their data wraps and matches reach back
     /// across the wrap, with offsets below 16 and past the data, and dictionaries now and then.
     /// Few steps under Miri, which checks the writer's pointers.
-    #[cfg(not(target_family = "wasm"))]
     #[test]
     fn raw_writer_matches_a_vec() {
         let mut seed = 0x51af_d7ed_558c_cd1du64;
@@ -1288,7 +1177,7 @@ mod tests {
         );
     }
 
-    /// Sequences whose matches reach into a dictionary, through the native writer, checked
+    /// Sequences whose matches reach into a dictionary, through the raw writer, checked
     /// against a byte at a time from the dictionary's content then the data: from rings whose
     /// head has moved on, with the window's room for the dictionary now and then short.
     #[test]

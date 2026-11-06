@@ -4,7 +4,6 @@ use alloc::vec::Vec;
 use core::hash::Hasher;
 
 use super::ringbuffer::RingBuffer;
-#[cfg(not(target_family = "wasm"))]
 use super::ringbuffer::{RawWriter, SeqWriter};
 use crate::decoding::errors::DecodeBufferError;
 
@@ -41,13 +40,11 @@ pub struct DecodeBuffer {
 /// Sequences written to a [`DecodeBuffer`] in its simple case, the ring's state kept in
 /// locals over the run (see [`SeqWriter`]). [`SequenceWriter::finish`] writes it back; a
 /// writer dropped without it leaves the buffer as it was.
-#[cfg(not(target_family = "wasm"))]
 pub struct SequenceWriter<'a> {
     ring: SeqWriter<'a>,
     total_output_counter: &'a mut u64,
 }
 
-#[cfg(not(target_family = "wasm"))]
 impl SequenceWriter<'_> {
     /// A sequence's `ll` literals, from the start of `literals`, then its match, if the buffer
     /// can take them in its simple case (see [`SeqWriter::push_sequence`]): `literals` must
@@ -144,7 +141,6 @@ impl DecodeBuffer {
 
     /// A writer of sequences to the buffer, for a run of them (see [`SequenceWriter`]), of at
     /// most `most` bytes.
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn sequence_writer(&mut self, most: usize) -> SequenceWriter<'_> {
         let (dict, dict_room): (&[u8], usize) = match self.dict_room() {
@@ -160,7 +156,6 @@ impl DecodeBuffer {
     /// A raw writer of sequences to the buffer, for the fast loop (see [`RawWriter`]), of at
     /// most `most` bytes; nothing else may touch the buffer until [`Self::finish_raw_writer`]
     /// takes it back.
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn raw_writer(&mut self, most: usize) -> RawWriter {
         let (dict, dict_room): (&[u8], usize) = match self.dict_room() {
@@ -171,7 +166,6 @@ impl DecodeBuffer {
     }
 
     /// The bytes `writer`, from [`Self::raw_writer`], wrote, added to the buffer; how many.
-    #[cfg(not(target_family = "wasm"))]
     #[inline(always)]
     pub fn finish_raw_writer(&mut self, writer: RawWriter) -> usize {
         let written = self.buffer.finish_raw(writer);
@@ -187,43 +181,6 @@ impl DecodeBuffer {
         let window_left = (self.window_size as u64).checked_sub(self.total_output_counter)?;
         self.dict_active
             .then(|| usize::try_from(window_left).unwrap_or(usize::MAX))
-    }
-
-    /// A sequence's `ll` literals, from the start of `literals`, then its match, if the buffer
-    /// can take them in its simple case (see [`RingBuffer::push_sequence`]): `literals` must
-    /// have [`LITERALS_PADDING`] bytes after the `ll`. Returns `false`, having changed nothing,
-    /// otherwise.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn push_sequence(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
-        let done = self.buffer.push_sequence(literals, ll, offset, ml);
-        if done {
-            self.total_output_counter += (ll + ml) as u64;
-        }
-        done
-    }
-
-    /// [`Self::push_sequence`] by the ring's writer, which natively takes every sequence, for
-    /// one the ring's fast copy has not taken: a match into the dictionary, as most of a small
-    /// frame's that uses one are, in its simple case. Returns `false`, having changed nothing,
-    /// otherwise. From the slow path, out of the fast loop: V8's code for the loop was 2–4%
-    /// slower on silesia with the check in it.
-    #[cfg(target_family = "wasm")]
-    #[inline(always)]
-    pub fn push_from_dict(&mut self, literals: &[u8], ll: usize, offset: usize, ml: usize) -> bool {
-        if !self.dict_active {
-            return false;
-        }
-        let Some(room) = self.dict_room() else {
-            return false;
-        };
-        let mut writer = self.buffer.seq_writer(&self.dict_content, room, usize::MAX);
-        let done = writer.push_sequence(literals, ll, offset, ml);
-        writer.finish();
-        if done {
-            self.total_output_counter += (ll + ml) as u64;
-        }
-        done
     }
 
     pub fn push(&mut self, data: &[u8]) {
@@ -590,7 +547,7 @@ mod tests {
 
     /// Every byte a match takes from the dictionary counts towards the window, so that once the
     /// frame is past it, no match reaches into the dictionary: through the slow path's repeat,
-    /// and natively through the sequence writer's copy too, in turn.
+    /// and through the sequence writer's copy, in turn.
     #[test]
     fn dict_matches_count_towards_the_window() {
         use super::super::errors::DecodeBufferError;
@@ -608,7 +565,6 @@ mod tests {
         loop {
             let offset = buf.len() + 50;
             let fits = buf.total_output_counter <= window as u64;
-            #[cfg(not(target_family = "wasm"))]
             if matches % 2 == 1 {
                 let mut writer = buf.sequence_writer(usize::MAX);
                 let done = writer.push_sequence(&[0; super::LITERALS_PADDING], 0, offset, 8);

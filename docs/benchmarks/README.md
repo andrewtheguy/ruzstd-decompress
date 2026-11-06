@@ -1897,6 +1897,61 @@ shifts without masks, which wasm now takes as before: with that (R27, three roun
 alone) the geomean is −0.1% against M26, every workload within M26's spread
 ([`results/run26-wasm-r27.md`](results/run26-wasm-r27.md)).
 
+## 2026-11-06: the raw loops in wasm
+
+The question: run 26's raw loops, the sequences' and the four Huffman streams', ran only
+natively, wasm keeping its safe loops. How do they do in V8?
+
+The variants, wasm, harness medians of three rounds against XM, `main` at `b16f2f8`. Each
+is XM with the native code of some files compiled for wasm too:
+
+| | | silesia `-3` | `x-ray` | the GitHub frames with their dictionary | the GitHub frames | mixed's tiles | terminal's tiles |
+|---|---|---:|---:|---:|---:|---:|---:|
+| XM | `main` (ms a pass) | 375.24 | 14.14 | 8.27 | 25.09 | 658.04 | 1.22 |
+| XW1 | the raw loops, both | −16.6% | −21.2% | −15.3% | −1.8% | −7.9% | −12.6% |
+| XS | the sequences' raw loop alone | −15.1% | −8.6% | −15.3% | −2.9% | −3.0% | −11.8% |
+| XH | the Huffman streams' raw loops alone | −5.4% | −18.9% | +0.3% | +0.1% | −3.1% | −0.9% |
+| XW1m | XW1, the table of pairs' shift by a multiplication, as wasm's safe loop had it | −16.9% | −16.3% | −11.6% | −1.0% | −8.9% | −14.2% |
+
+XM's rounds on `x-ray` were 23.5% apart, the others' at most 12.4%, most under 6%. Each
+half gains where its loop runs, and the two add up. In eight rounds more of XW1 and XW1m in
+turn, XW1m was slower: `x-ray` 4.0%, mixed's tiles 1.6%, silesia `-3` 1.0%. The
+multiplication had made the safe loop faster in V8 (the video 5–6%, on lab1), which puts a
+variable shift's count in `cl`; in the raw loop the shift is faster.
+
+The commit (`8c37fd6`): the raw loops are the only loops. Wasm's safe loops are gone, and
+so are its own sequence run, its copy of a sequence and its multiplication. The ring
+writer's check for room now adds in 64 bits, so that with 32-bit addresses (wasm32) it
+cannot wrap for a ring ending near the top of memory. 676 lines less.
+
+The full run, on lab2 after a restart (run 27): M27 is `main` at `b16f2f8` (XM in the
+results), B27 the branch at `8c37fd6` (XB). Every build decoded every workload to the same
+output.
+
+| workload | native M27 | native B27 | wasm M27 | wasm B27 | libzstd |
+|---|---:|---:|---:|---:|---:|
+| silesia `-3` | 228.34 | 229.29 (+0.4%) | 379.15 | 313.47 (−17.3%) | 199.12 |
+| silesia `-19` | 237.52 | 239.23 (+0.7%) | 386.99 | 329.45 (−14.9%) | 203.66 |
+| silesia `--fast=4` | 143.15 | 143.73 (+0.4%) | 224.47 | 200.83 (−10.5%) | 127.08 |
+| `nci` | 20.92 | 20.88 (−0.2%) | 32.42 | 28.05 (−13.5%) | 18.19 |
+| `x-ray` | 9.56 | 9.57 (+0.1%) | 12.57 | 11.41 (−9.3%) | 8.85 |
+| the GitHub frames with their dictionary | 4.18 | 4.12 (−1.6%) | 8.46 | 7.03 (−16.9%) | 3.62 |
+| the GitHub frames | 17.85 | 17.82 (−0.2%) | 25.12 | 24.68 (−1.7%) | 19.40 |
+| mixed's tiles 2880x1800@2 | 467.62 | 460.39 (−1.5%) | 665.89 | 585.95 (−12.0%) | 426.35 |
+| the video clip | 15.14 | 15.09 (−0.3%) | 15.23 | 15.36 (+0.8%) | 20.45 |
+| terminal's tiles 2880x1800@2 | 0.80 | 0.80 (−0.2%) | 1.22 | 1.08 (−11.4%) | 1.82 |
+
+ms a pass, the median of three rounds; geomean against M27 natively −0.2%, in wasm
+**−10.8%**. Beyond M27's spread in wasm: every workload but the video clip's raw blocks
+(+0.8%, within 7.9%) and the GitHub frames (−1.7%, within 3.1%). Natively the code is the
+same, and every workload is within M27's spread. In wasm B27 takes 1.33 times its native
+time by geomean, where M27 took 1.50 in run 26. Every workload:
+[`results/run27-wasm-raw.md`](results/run27-wasm-raw.md).
+
+- The tests pass under Node (`wasm32-wasip1`) and on arm64 (`remote-lxc`). AddressSanitizer
+  under the fuzzers (`decode`, `decode_dict`, `interop`, three minutes each) and Miri over
+  AGENTS.md's tests found nothing. Both now check the loops wasm runs, on a 64-bit target.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under

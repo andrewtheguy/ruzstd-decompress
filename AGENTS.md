@@ -3,11 +3,10 @@
 
 - There is no CI. After Rust changes run `cargo fmt --all -- --check`, `cargo test`,
   `cargo test --no-default-features` and `cargo clippy --all-targets -- -D warnings`, on stable.
-  Then the same for WebAssembly, whose build executes sequences its own way (see
-  `SequenceExecutor`): `cargo test --target wasm32-wasip1`, with and without default features,
-  which runs under Node (`.cargo/config.toml`), and
-  `cargo clippy --target wasm32-wasip1 --lib --tests -- -D warnings`. Fuzzing never reaches
-  that path.
+  Then the same for WebAssembly, whose addresses are 32 bits:
+  `cargo test --target wasm32-wasip1`, with and without default features, which runs under
+  Node (`.cargo/config.toml`), and
+  `cargo clippy --target wasm32-wasip1 --lib --tests -- -D warnings`.
 - After changes to decoding, fuzz each target for three minutes, on nightly with
   AddressSanitizer (cargo-fuzz's default, whose `-Zsanitizer` needs nightly), every target even
   if one fails, naming the failed ones at the end and exiting nonzero:

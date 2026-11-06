@@ -1,22 +1,22 @@
 # Roadmap
 
 What to make faster next, most promising first, as of 2026-11-06 (after the
-unsafe native loops, run 26 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
+raw loops in wasm, run 27 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
 from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so. The
 decoder is a generic one, natively and in WebAssembly alike.
 
-Unsafe code is allowed since run 26, kept to the hot loops: natively, the sequences' and the
-four Huffman streams' loops run by raw pointers, as libzstd's, in a BMI2 build where the
-processor has it. WebAssembly keeps the safe loops.
+Unsafe code is allowed since run 26, kept to the hot loops: the sequences' and the four
+Huffman streams' loops run by raw pointers, as libzstd's, natively in a BMI2 build where the
+processor has it, and since run 27 in WebAssembly too, which had kept safe loops of its own.
 
-Natively, by geomean over the 10 workloads (run 26), ruzstd-decompress takes 0.97 times
-libzstd's time: 1.10–1.16 times on Silesia, `x-ray` included, 1.12 on the GitHub frames
-with their dictionary, 1.14 on mixed's tiles; 0.90 on the GitHub frames without it, and
-less on the raw blocks of the video clip (0.76) and terminal's tiles (0.48). In wasm, which
-libzstd is not built for here, the workloads take 1.26–1.65 times their native time (run
-26), 1.50 by geomean, the dictionary frames 2.14, the video clip's raw blocks the same; 1.24–
-1.48 before run 26, whose native loops wasm does not have.
+Natively, by geomean over the 10 workloads (run 27), ruzstd-decompress takes 0.96 times
+libzstd's time: 1.08–1.17 times on Silesia, `x-ray` included, 1.14 on the GitHub frames
+with their dictionary, 1.08 on mixed's tiles; 0.92 on the GitHub frames without it, and
+less on the raw blocks of the video clip (0.74) and terminal's tiles (0.44). In wasm, which
+libzstd is not built for here, the workloads take 1.19–1.71 times their native time (run
+27), 1.33 by geomean, the dictionary frames most, the video clip's raw blocks about the
+same; 1.50 by geomean with the safe loops (run 26).
 
 ## 1. The sequences, again
 
@@ -33,24 +33,12 @@ more than x86-64's registers. What is left:
   faster: the states stored on an error so that they are computed before the copies, the
   short matches' copy inline, and 8 sequences decoded ahead with their matches' sources
   prefetched (run 26).
-- **The raw loop in WebAssembly**: not tried. Its loops are still the safe ones. The raw
-  pointers would take Rust's bounds checks away there too; whether V8's code for the raw
-  loop spills less than for the safe one (below) is to be measured, on the same workloads.
-- **The safe loop in WebAssembly**: V8's code for the loop spills either way. A form of the loop it
-  takes better is not known; the forms tried are in run 18. Since #23 it runs 1.4% more
-  instructions on silesia `-3` than before (75 M a pass, about 5 a sequence), not more of
-  the stack's loads and stores: V8's code for the loop as #23 wrote it (run 23). Each of a
-  sequence's six takes is two variable shifts, and V8 moves each shift's count into `cl`
-  and masks it, about 12 instructions a take. Taking each by one shift and a mask from a
-  table of 32, the window shifted once after each group of takes (8 variable shifts a
-  sequence, not 12), was slower (lab2, 2026-11-06, a pass's instructions and cycles):
-  silesia `-3` 4.0% more instructions and 7.7% more cycles, nci 3.8% and 6.5%, the GitHub
-  frames 1.5% more instructions, `x-ray` and terminal's tiles the same. V8 takes four
-  instructions to load a mask (no scaled index for a wasm load) and spills more of the
-  loop's values. Natively it ran 4% more cycles on silesia `-3` and nci.
-- **The dictionary frames in wasm** take 1.8 times their native time: there the fast
-  copy takes no match into the dictionary, which the slow path takes (run 20; the check
-  for one in the loop made V8's code 2% slower on silesia).
+- **WebAssembly** runs the same loop since run 27, with the Huffman streams' raw loops: both
+  together 10.8% faster than wasm's safe loops by geomean. With the sequences' raw loop alone
+  (three rounds), silesia `-3` was 15% faster, the GitHub frames with their dictionary 15%
+  and terminal's tiles 12%, nearly all of what both gave there. What V8's code for it spends
+  is not yet profiled; the dictionary frames take 1.71 times their native time there, the
+  most of the workloads.
 
 ## 2. What is left of the table builds
 
@@ -95,27 +83,9 @@ every stream has left of its source and output, in a BMI2 build. On `x-ray` a pa
 literals, 1.14. The loop waits on each stream's chain from one lookup to the next, as
 libzstd's does.
 
-In wasm, the table of pairs' loop moves its windows on by a multiplication,
-and each stream finishes from the table of pairs: video 5–6% faster in
-wasm (lab1). Rounds of two refills or more were 10–17% slower in V8 (run 22). In V8's code for the loop, two of the four streams' windows are still
-in memory, and the four output positions still go through a vector each round
-of lookups (packing them into one `u32` avoided that, and was slower). Two
-streams to a loop, which fits in the registers, was much slower (video 15% in
-wasm). What is left: fewer lookups a refill. The single symbols' table, which
-the small tiles and silesia mostly use, is no faster with the multiplication
-(lab2, 2026-11-06, a pass's instructions and cycles in wasm). Its entries kept
-at 2 bytes, it took the multiplier from a table of 16 powers of two. In both
-loops, the GitHub frames took 18% more cycles: their one stream's loop waits
-on each lookup, and a multiplication takes longer than the shift. In the four
-streams' loop alone, silesia `-3` took 3.5% more and terminal's tiles 4.2%,
-mixed's 1% fewer. V8 ran about as many instructions as with the shift. Entries
-of 4 bytes, holding the multiplier, would save only that table's load.
-
-Since run 25 the table of pairs' round checks each stream's output room with one compare,
-and refills from the source up to the container's end with no bounds checks: in wasm 10.7%
-fewer instructions on `x-ray` and 4% on mixed's tiles, `x-ray` 7% faster over 16 rounds,
-mixed's tiles no clearer than ±2%. The loop waits on each stream's chain from one lookup
-to the next (the window's shift, the index, the entry's load, its multiplier, the
-multiplication): fewer instructions off that chain save little. The four output positions
-in a vector (LLVM's SLP vectorizer) are faster in V8 than without (run 25). Refilling the
-sequences' fast loop the same way put the tail's length on its chain, and was slower.
+In wasm the same loops run since run 27, with the sequences' raw loop: both together made
+`x-ray` 9% faster than wasm's safe loops, mixed's tiles 12%, which now take 1.19 and 1.27
+times their native time. With the Huffman streams' raw loops alone (three rounds), `x-ray`
+was 19% faster and mixed's tiles 3%, the sequences' alone 9% and 3%. The table of pairs'
+shift by a multiplication, which made the safe loop faster in V8, made the raw one slower
+(`x-ray` 4%).
