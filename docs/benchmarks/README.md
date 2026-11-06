@@ -1282,6 +1282,98 @@ ms a pass. Mixed, `nci` and `--fast=4` are within 1.5% both ways. Geomean agains
 - Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on stable) found
   nothing.
 
+## 2026-11-05: the matches into the dictionary
+
+The question: natively, ruzstd-decompress took 1.57 times libzstd's time on the GitHub
+frames with their dictionary (run 19), mostly in the sequences. Where does it go?
+
+Profiles on lab2 (perf, `github-dict.frames`, `main` at `627e0e1`, against libzstd 1.5.7):
+both ran at 3.7–3.9 instructions a cycle, and the difference was the instructions, about
+83 M a pass to libzstd's 52 M. 44% of the time was in `decode_sequences` and 14% in
+`copy_from_dict`, with its `memcpy` 6% more; 4% in `execute_out_of_line`. Counted over
+the frames (a pass: 9,114 frames, one block each, about 24 sequences a block):
+
+- **59% of the sequences** match into the dictionary, all of them wholly within it, about
+  50 bytes each, with less than one literal. Each one failed the fast copy's checks first,
+  then called `copy_from_dict` with arguments on the stack, which checked again and copied
+  by `memcpy`, and by `memmove` the empty rest from the data's start.
+- **The last 2.9 sequences of each block** went one at a time through
+  `execute_out_of_line`, about 146 instructions each: the padded loop stopped once its
+  window reached a byte before the stream's start, with up to 56 bits of the stream left.
+  The first loop took about 12 of a block's sequences, the padded one 9.
+- **The tables**: 92–97% of the blocks repeat the dictionary's, but 3–6% use the predefined
+  table and 2% (literal lengths) an RLE one. Each was built in the same entries as the
+  dictionary's, so that the next frame copied the dictionary's table back in, and the next
+  predefined block built that one again.
+
+The variants, natively (quick checks, five rounds; the dictionary frames' ms a pass):
+
+| | | `github-dict.frames` |
+|---|---|---:|
+| HT | `main` at `627e0e1` | 5.75 |
+| E1–E3 | HT, `copy_from_dict` still out of line, its piece of the dictionary in chunks (up to 2, 4 or 8), no `memmove` for the empty rest | 5.8 |
+| F1 | HT, the match into the dictionary taken in the writer inline, the room checked once, then whether the source is in the data or past it | 5.5 |
+| F2 | F1, the executor's literals position, offset history and sum in locals of the run | 5.75, silesia `-3` 3% slower |
+| F3 | F1, 32 zero bytes before the padded copy, not 16: the padded loop reads on to the block's last sequence | 5.17 |
+| F4 | F3, the last sequence in the fast loop too | 5.2, terminal 25% and silesia 5% slower |
+| W1 | F3, in wasm the dictionary's matches by the writer too (wasm: 9.3 to 8.46) | 5.16 |
+| F5a | W1, the piece of the dictionary in one or two copies of 32 bytes | 5.10 |
+| F5b | F5a, the literals and short matches in one or two copies of 16 bytes | 5.3, silesia 4% slower |
+| F6 | F5a, the predefined and RLE tables in entries of their own | 4.96, silesia 12% slower |
+| G4 | F6, the entries in use swapped in, and the match's chunks copied across a split | 4.75 |
+
+- **F6's silesia** ran 12% more instructions: LLVM no longer inlined `copy_within` into the
+  loop, whose 16-byte chunks of the match then called it, 6.7% of the instructions. Copied
+  through an array instead, the `try_into` kept a length check (F7, F8); copied across
+  `split_at_mut`, each chunk's source wholly before it since the offset is at least a
+  chunk, it inlines whatever LLVM's budget (G4). F5a with the array copy alone was 3.5%
+  slower on silesia: inlined, `copy_within` makes the better code.
+- **G4 in wasm** (DM) was 2–7% slower on silesia. Taking out its changes one at a time and
+  adding them to `main` one at a time (wasm, six rounds, silesia `-3` and `--fast=4`): the
+  tables' entries cost nothing, the padding up to 3% on `--fast=4`, and both the check for
+  the dictionary after the ring's fast copy failed and the fast copy written as the two
+  functions the writer uses cost about 2% each. **DN** is G4 with `copy_sequence`'s own body
+  in wasm, as before, and the dictionary's matches taken in the slow path, out of the loop.
+
+DN is the commit:
+
+- **Natively**, the writer takes a match into the dictionary inline (`SeqWriter`), its
+  piece of the dictionary in at most two copies of 32 bytes where the dictionary has them.
+  `copy_from_dict`'s call is gone. The match's chunks are copied across a split, not by
+  `copy_within`.
+- **In wasm**, the slow path (`execute_slow`) takes them by the same writer.
+- The padded copy of the stream's end has 32 zero bytes before it, so that the fast loop
+  takes every sequence but the block's last.
+- A sequence table keeps the table built from a description, the predefined one and the RLE
+  one in entries of their own, the one in use swapped in. A test checks that a predefined
+  or RLE block leaves the dictionary's table for the next frame.
+
+The full run, on lab2 after a restart (run 20). Every variant decoded every workload to the
+same output.
+
+| workload | native HT | native DN | wasm HT | wasm DN | libzstd |
+|---|---:|---:|---:|---:|---:|
+| GitHub, with the dictionary | 5.74 | **4.67 (−18.7%)** | 9.40 | **8.57 (−8.9%)** | 3.64 |
+| GitHub, small frames | 18.85 | 18.83 (−0.1%) | 25.64 | 25.80 (+0.7%) | 19.74 |
+| terminal 2880x1800@2 | 1.05 | 1.05 (+0.2%) | 1.33 | 1.31 (−1.4%) | 1.67 |
+| mixed 2880x1800@2 | 523.28 | 518.93 (−0.8%) | 671.92 | 666.59 (−0.8%) | 429.92 |
+| silesia `-3` | 276.93 | 286.96 (+3.6%) | 377.87 | 370.39 (−2.0%) | 204.80 |
+| silesia `-19` | 286.32 | 286.33 (+0.0%) | 372.33 | 380.64 (+2.2%) | 207.93 |
+| video clip, raw blocks | 15.39 | 15.15 (−1.6%) | 15.52 | 16.58 (+6.9%) | 19.97 |
+
+ms a pass. `nci`, `x-ray` and `--fast=4` are within 3% both ways. Geomean against HT:
+natively −1.7%, in wasm −0.6%. Every workload:
+[`results/run20-dict.md`](results/run20-dict.md).
+
+- Run again alone, HT and DN in turn six times each: natively silesia `-3` took 283.0 ms to
+  HT's 279.7 (1.2% slower, DN's runs over 3%), and in wasm silesia `-19` 390.6 to 381.6
+  (2.4%, each over 6–9%). These stay. The video clip's raw blocks reach none of the code
+  changed, and its spread in wasm was 5.7%.
+- Natively, ruzstd-decompress now takes 1.28 times libzstd's time on the dictionary frames,
+  from 1.57.
+- Fuzzing (`decode`, `decode_dict` and `interop`, three minutes each, on stable) found
+  nothing.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
