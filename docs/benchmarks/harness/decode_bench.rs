@@ -253,6 +253,9 @@ fn main() {
                 dec.add_dict(dict).unwrap();
             }
             let (n, out, hash) = frames(&data, &mut dec, true);
+            // Again by the same decoder, as the timed passes are: the same frames' content.
+            let again = frames(&data, &mut dec, true);
+            assert_eq!(again, (n, out, hash), "a reused decoder decoded differently");
             let times = time(|| {
                 black_box(frames(&data, &mut dec, false));
             });
