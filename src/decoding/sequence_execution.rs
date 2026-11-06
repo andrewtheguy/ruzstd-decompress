@@ -71,6 +71,37 @@ impl<'a> SequenceExecutor<'a> {
         SequenceRun { executor: self }
     }
 
+    /// A raw run of sequences, for the fast loop (see [`RawRun`]); nothing else may touch the
+    /// executor until [`Self::finish_raw`] takes it back.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn raw_run(&mut self) -> RawRun {
+        // The writer takes no sequence past the block's most, which the slow path reports.
+        let most = self
+            .max_block_decoded_len
+            .saturating_sub(self.seq_sum as usize);
+        let lits = self.padded_literals.as_ptr_range();
+        RawRun {
+            out: self.buffer.raw_writer(most),
+            // SAFETY: the counter is at most `literals_len`, within the literals.
+            lit: unsafe { lits.start.add(self.literals_copy_counter) },
+            lit_base: lits.start,
+            lit_end: lits.end as usize - LITERALS_PADDING,
+            rep0: self.offset_hist[0],
+            rep1: self.offset_hist[1],
+            rep2: self.offset_hist[2],
+        }
+    }
+
+    /// The executor's state where `run`, from [`Self::raw_run`], left it.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn finish_raw(&mut self, run: RawRun) {
+        self.seq_sum += self.buffer.finish_raw_writer(run.out) as u32;
+        self.literals_copy_counter = run.lit as usize - run.lit_base as usize;
+        *self.offset_hist = [run.rep0, run.rep1, run.rep2];
+    }
+
     /// One sequence, in a run of its own: for the few decoded outside the fast loop.
     #[inline(never)]
     pub fn execute_out_of_line(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError> {
@@ -146,6 +177,108 @@ pub struct SlowSequence {
     ll: usize,
     offset: usize,
     ml: usize,
+}
+
+/// Sequences executed by the native fast loop, as libzstd executes them: the literals' position,
+/// the offset history and the ring's writer in locals, the copies by raw pointers (see
+/// [`RawWriter`]). Made by [`SequenceExecutor::raw_run`] and handed back to
+/// [`SequenceExecutor::finish_raw`]; dropped without that, on an error, the buffer is left as
+/// it was when the run began, the block's undoing then setting it back further.
+///
+/// [`RawWriter`]: super::ringbuffer::RawWriter
+#[cfg(not(target_family = "wasm"))]
+pub struct RawRun {
+    out: super::ringbuffer::RawWriter,
+    lit: *const u8,
+    lit_base: *const u8,
+    /// The address where the literals end, [`LITERALS_PADDING`] bytes before their buffer's.
+    lit_end: usize,
+    /// The offset history, in three fields, not an array, which LLVM kept in memory.
+    rep0: u32,
+    rep1: u32,
+    rep2: u32,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl RawRun {
+    /// Copy the literals of a sequence and then its match to the end of the buffer, or return
+    /// what [`SequenceExecutor::execute_slow`] is to copy, once the run is finished.
+    #[inline(always)]
+    pub fn execute(
+        &mut self,
+        ll: u32,
+        ml: u32,
+        of: u32,
+    ) -> Result<Option<SlowSequence>, ExecuteSequencesError> {
+        let (ll_len, ml_len) = (ll as usize, ml as usize);
+        let left = self.lit_end - self.lit as usize;
+        if ll_len > left {
+            return Err(self.not_enough_literals(ll_len));
+        }
+        let offset = do_offset_history_local(of, ll, &mut self.rep0, &mut self.rep1, &mut self.rep2)
+            as usize;
+        if offset == 0 {
+            return Err(ExecuteSequencesError::ZeroOffset);
+        }
+        let lit = self.lit;
+        // SAFETY: `ll_len` literals are left, and `LITERALS_PADDING` bytes after them, which
+        // is `WILD`; the literals are not in the ring. The offset is at least 1.
+        let done = unsafe {
+            self.lit = lit.add(ll_len);
+            self.out.push_sequence(lit, ll_len, offset, ml_len)
+        };
+        if done {
+            Ok(None)
+        } else {
+            Ok(Some(SlowSequence {
+                literals_start: lit as usize - self.lit_base as usize,
+                ll: ll_len,
+                offset,
+                ml: ml_len,
+            }))
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn not_enough_literals(&self, ll: usize) -> ExecuteSequencesError {
+        let have = self.lit_end - self.lit_base as usize;
+        ExecuteSequencesError::NotEnoughBytesForSequence {
+            wanted: self.lit as usize - self.lit_base as usize + ll,
+            have,
+        }
+    }
+}
+
+/// [`do_offset_history`] with the pick by selects, not an index into an array, which would put
+/// the history through the stack.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+fn do_offset_history_local(
+    offset_value: u32,
+    lit_len: u32,
+    rep0: &mut u32,
+    rep1: &mut u32,
+    rep2: &mut u32,
+) -> u32 {
+    let (h0, h1, h2) = (*rep0, *rep1, *rep2);
+    if offset_value > 3 {
+        let actual = offset_value - 3;
+        (*rep0, *rep1, *rep2) = (actual, h0, h1);
+        return actual;
+    }
+    use core::hint::select_unpredictable as select;
+    let pick = (offset_value + u32::from(lit_len == 0) - 1) & 3;
+    let odd = pick & 1 != 0;
+    let low = select(odd, h1, h0);
+    let high = select(odd, h0.saturating_sub(1), h2);
+    let actual = select(pick & 2 != 0, high, low);
+    let third = select(pick == 1, h2, h1);
+    let moved = pick != 0;
+    *rep0 = select(moved, actual, h0);
+    *rep1 = select(moved, h0, h1);
+    *rep2 = select(moved, third, h2);
+    actual
 }
 
 /// Sequences executed in a run: natively, with the buffer's state in a [`SequenceWriter`],

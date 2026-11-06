@@ -78,6 +78,7 @@ impl<'s> BitReaderReversed<'s> {
 
     /// Whether two refills in a row can be fast: a refill moves by at most 7 bytes, after which
     /// [`Self::can_refill_fast`] still holds.
+    #[cfg(target_family = "wasm")]
     #[inline(always)]
     pub fn can_refill_fast_twice(&self) -> bool {
         self.index >= 15
@@ -217,6 +218,28 @@ impl<'s> BitReaderReversed<'s> {
         self.consume_to_sentinel(window);
     }
 
+    /// The source's start and the index of the container's first byte, for a loop of
+    /// [`refill_raw`] while [`Self::can_refill_fast`] holds of the index; the reader is set
+    /// from where it leaves them by [`Self::resume_index`].
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn raw_index(&self) -> (*const u8, usize) {
+        (self.source.as_ptr(), self.index)
+    }
+
+    /// The reader where a loop of [`refill_raw`] from [`Self::raw_index`] left the index of
+    /// its container and its `window`.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn resume_index(&mut self, index: usize, window: u64) {
+        let bytes = self.source[index..]
+            .first_chunk::<8>()
+            .expect("a container within the source");
+        self.index = index;
+        self.bit_container = u64::from_le_bytes(*bytes);
+        self.consume_to_sentinel(window);
+    }
+
     /// The reader on a copy of what is left of its source, after [`PADDING`] zero bytes, in
     /// `buf`: it reads on as this one would, the zeros past the source's start included, but
     /// [`Self::can_refill_fast_twice`] holds until its window starts 17 bytes before the
@@ -327,6 +350,24 @@ impl<'s> BitReaderReversed<'s> {
         }
 
         (self.get_bits(n1), self.get_bits(n2), self.get_bits(n3))
+    }
+}
+
+/// [`BitReaderReversed::refill_window_fast`] by a raw pointer to the container's first byte:
+/// the window after the bits taken off the top of `window`, and `ip` moved down by the whole
+/// bytes taken, at most 7.
+///
+/// # Safety
+///
+/// `ip` must be at least 7 bytes after the source's start, and the source hold 8 bytes from it.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+pub unsafe fn refill_raw(ip: &mut *const u8, window: u64) -> u64 {
+    let consumed = window.trailing_zeros();
+    // SAFETY: the caller's; `consumed / 8` is at most 7.
+    unsafe {
+        *ip = ip.sub(consumed as usize / 8);
+        (u64::from_le(core::ptr::read_unaligned(*ip as *const u64)) | 1) << (consumed % 8)
     }
 }
 

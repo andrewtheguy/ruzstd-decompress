@@ -324,6 +324,63 @@ impl RingBuffer {
         }
     }
 
+    /// A writer of sequences to the tail by raw pointers, for the fast loop (see
+    /// [`RawWriter`]), whose matches may reach into `dict`, the dictionary's content, for
+    /// `dict_room` bytes more of the ring. It takes no sequence that would take it past `most`
+    /// bytes. Nothing else may touch the ring until [`Self::finish_raw`] takes it back.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn raw_writer(&mut self, dict: &[u8], dict_room: usize, most: usize) -> RawWriter {
+        let (limit, data_start) = self.sequence_bounds();
+        // The room check keeps the sequences' bytes `WILD` short of the limit.
+        let limit = limit.min(self.tail.saturating_add(most).saturating_add(WILD));
+        let tail = self.tail;
+        assert!(data_start <= tail && tail <= limit && limit <= self.buf.len());
+        let base = self.buf.as_mut_ptr();
+        let base_addr = base as usize;
+        // Where the data wraps, a match reaching back past the ring's start reads from the
+        // data's first part, from the head to the end of the ring, as libzstd reads its
+        // window's older segment: the writer takes it as a dictionary, with no window to keep
+        // to, the data being all within it. That part is past `limit`, the head, so the
+        // sequences' bytes never overlap it. A match into the frame's own dictionary, past all
+        // of the data, is then left to the slow path.
+        let (dict_end, dict_len, dict_until) = if tail >= self.head {
+            (
+                dict.as_ptr_range().end,
+                dict.len(),
+                base_addr.saturating_add(tail.saturating_add(dict_room)),
+            )
+        } else {
+            assert!(self.head <= self.cap && self.cap <= self.buf.len());
+            // SAFETY: `cap <= buf.len()`, within the allocation.
+            let end = unsafe { base.add(self.cap) };
+            (end.cast_const(), self.cap - self.head, usize::MAX)
+        };
+        RawWriter {
+            base,
+            // SAFETY: `data_start <= tail <= limit <= buf.len()`, within the allocation.
+            op: unsafe { base.add(tail) },
+            wild_end: (base_addr + limit).saturating_sub(WILD),
+            // SAFETY: as for the tail.
+            data_start: unsafe { base.add(data_start) },
+            dict_end,
+            dict_len,
+            dict_until,
+        }
+    }
+
+    /// The tail moved on to where `writer`, from [`Self::raw_writer`], left it; the bytes
+    /// written.
+    #[cfg(not(target_family = "wasm"))]
+    #[inline(always)]
+    pub fn finish_raw(&mut self, writer: RawWriter) -> usize {
+        let tail = writer.op as usize - writer.base as usize;
+        debug_assert!(writer.base == self.buf.as_mut_ptr() && tail <= self.buf.len());
+        let written = tail - self.tail;
+        self.tail = tail;
+        written
+    }
+
     /// A sequence's literals and then its match, by [`copy_sequence`], the ring's state read
     /// from it as it is needed (see [`SequenceExecutor`]). Returns `false`, having changed
     /// nothing, where that does not take it.
@@ -638,9 +695,239 @@ fn copy_from_dict(buf: &mut [u8], dst: usize, dict: &[u8], from_dict: usize, in_
     }
 }
 
+/// How far past a sequence's last byte [`RawWriter`]'s copies may write, and past a block's
+/// literals they may read: a wild copy rounds up to whole chunks of 32 bytes after its first
+/// 16, as libzstd's `ZSTD_wildcopy`.
+pub(crate) const WILD: usize = 32;
+
+/// Sequences written to a ring's tail by raw pointers, as libzstd writes them: the literals
+/// and the match each copied in whole chunks past their end, into free space, with no checks
+/// but the one for room before the sequence. Made by [`RingBuffer::raw_writer`], which bounds
+/// it within the ring's initialised free space from the tail, and handed back to
+/// [`RingBuffer::finish_raw`]; dropped without that, the ring is left as it was, what it wrote
+/// being in the free space.
+///
+/// `wild_end` is [`WILD`] bytes before the address where the writes must stop, `data_start` where the data before the
+/// tail starts, and `dict_end` the end of the dictionary's content, which matches may reach
+/// into while their literals end by the address `dict_until`.
+#[cfg(not(target_family = "wasm"))]
+pub struct RawWriter {
+    base: *mut u8,
+    op: *mut u8,
+    wild_end: usize,
+    data_start: *const u8,
+    dict_end: *const u8,
+    dict_len: usize,
+    dict_until: usize,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl RawWriter {
+    /// A sequence's `ll` literals from `lit`, then its match of `ml` bytes from `offset` back,
+    /// where it is simple: the free space has room for both and [`WILD`] bytes more, and the
+    /// match's source is in the data, or past it in the dictionary, then from the data's
+    /// start, as `DecodeBuffer::repeat_from_dict` takes it. Returns `false`, having changed
+    /// nothing, otherwise; a match reaching past the dictionary's start included, which the
+    /// slow path reports.
+    ///
+    /// # Safety
+    ///
+    /// `lit` must be valid for reads of `ll + WILD` bytes, outside the ring, and `offset` at
+    /// least 1.
+    #[inline(always)]
+    pub unsafe fn push_sequence(
+        &mut self,
+        lit: *const u8,
+        ll: usize,
+        offset: usize,
+        ml: usize,
+    ) -> bool {
+        debug_assert!(offset >= 1);
+        let op = self.op;
+        // `ll` and `ml` are below 2^18.
+        if op as usize + ll + ml > self.wild_end {
+            return false;
+        }
+        // SAFETY: within the room just checked.
+        let dst = unsafe { op.add(ll) };
+        // The data before the match, its literals included.
+        let data = dst as usize - self.data_start as usize;
+        if offset > data {
+            // SAFETY: as for this function, with the room checked.
+            return unsafe { self.push_from_dict(lit, ll, offset, ml, data) };
+        }
+        // SAFETY: the room checked covers each copy rounded up and past by `WILD`; the match's
+        // source is in the data, `offset` back from where it is written.
+        unsafe {
+            wild_copy(op, lit, ll);
+            copy_match_raw(dst, dst.sub(offset), offset, ml);
+            self.op = dst.add(ml);
+        }
+        true
+    }
+
+    /// [`Self::push_sequence`] for a match whose source starts `offset - data` bytes before
+    /// the data, in the dictionary.
+    #[inline(always)]
+    unsafe fn push_from_dict(
+        &mut self,
+        lit: *const u8,
+        ll: usize,
+        offset: usize,
+        ml: usize,
+        data: usize,
+    ) -> bool {
+        let op = self.op;
+        let from_dict = offset - data;
+        // SAFETY: as in `push_sequence`, which checked the room.
+        let dst = unsafe { op.add(ll) };
+        // None where the frame has none, or where the data wraps, or once the frame is past its
+        // window.
+        if from_dict > self.dict_len || dst as usize > self.dict_until {
+            return false;
+        }
+        let in_dict = from_dict.min(ml);
+        // SAFETY: the dictionary holds `from_dict` bytes before its end; the ring's room was
+        // checked for `ll + ml + WILD` bytes. The rest of the match, from the data's start, is
+        // `offset` back from where it is written.
+        unsafe {
+            wild_copy(op, lit, ll);
+            let src = self.dict_end.sub(from_dict);
+            if in_dict <= WILD && from_dict >= WILD {
+                copy16(dst, src);
+                copy16(dst.add(16), src.add(16));
+            } else {
+                core::ptr::copy_nonoverlapping(src, dst, in_dict);
+            }
+            let rest = ml - in_dict;
+            if rest > 0 {
+                copy_match_raw(dst.add(in_dict), self.data_start, offset, rest);
+            }
+            self.op = dst.add(ml);
+        }
+        true
+    }
+}
+
+/// 16 bytes from `src` to `dst`.
+///
+/// # Safety
+///
+/// Both valid for 16 bytes, not overlapping.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+unsafe fn copy16(dst: *mut u8, src: *const u8) {
+    // SAFETY: the caller's.
+    unsafe { core::ptr::copy_nonoverlapping(src, dst, 16) }
+}
+
+/// 8 bytes from `src` to `dst`.
+///
+/// # Safety
+///
+/// Both valid for 8 bytes, not overlapping.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+unsafe fn copy8(dst: *mut u8, src: *const u8) {
+    // SAFETY: the caller's.
+    unsafe { core::ptr::copy_nonoverlapping(src, dst, 8) }
+}
+
+/// `len` bytes from `src` to `dst`, in a chunk of 16 and then chunks of 32, which may read and
+/// write up to [`WILD`] - 1 bytes past `len`.
+///
+/// # Safety
+///
+/// `src` valid for reads and `dst` for writes of `len + WILD` bytes; `src` at least 16 bytes
+/// before `dst` or in another allocation, so that each chunk reads only bytes before it.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+unsafe fn wild_copy(dst: *mut u8, src: *const u8, len: usize) {
+    // SAFETY: the caller's; every chunk ends before `len` rounded up past by `WILD`.
+    unsafe {
+        copy16(dst, src);
+        if len > 16 {
+            let end = dst.add(len);
+            let (mut d, mut s) = (dst.add(16), src.add(16));
+            loop {
+                copy16(d, s);
+                copy16(d.add(16), s.add(16));
+                d = d.add(32);
+                s = s.add(32);
+                if d >= end {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// A match of `len` bytes from `src`, `offset` bytes before `dst`, to `dst`, as a copy of a
+/// byte at a time would: in wild chunks of 16 where the offset is at least that, else 8 bytes
+/// spread from the first `offset`, as libzstd's `ZSTD_overlapCopy8`, then chunks of 8.
+///
+/// # Safety
+///
+/// `offset` from 1, `src == dst - offset`; `dst` valid for writes of `len + WILD` bytes and
+/// `src` for reads to there.
+#[cfg(not(target_family = "wasm"))]
+#[inline(always)]
+unsafe fn copy_match_raw(dst: *mut u8, src: *const u8, offset: usize, len: usize) {
+    if offset >= 16 {
+        // SAFETY: the caller's.
+        unsafe { wild_copy(dst, src, len) };
+        return;
+    }
+    // SAFETY: the caller's; each copy reads only bytes before it, already written.
+    unsafe { copy_overlapping(dst, src, offset, len) }
+}
+
+/// [`copy_match_raw`] for an offset below 16, out of the fast loop's code.
+///
+/// # Safety
+///
+/// As [`copy_match_raw`].
+#[cfg(not(target_family = "wasm"))]
+#[inline(never)]
+unsafe fn copy_overlapping(dst: *mut u8, src: *const u8, offset: usize, len: usize) {
+    /// After 4 bytes copied one at a time, how far on the next 4 are read from, so that they
+    /// are `offset` back (or a multiple of it) and wholly before where they go.
+    const DEC32: [usize; 8] = [0, 1, 2, 1, 4, 4, 4, 4];
+    /// Then how far back to step, from those 4 on, for a source a multiple of `offset` at
+    /// least 8 back.
+    const DEC64: [isize; 8] = [8, 8, 8, 7, 8, 9, 10, 11];
+    debug_assert!((1..16).contains(&offset));
+    // SAFETY: the caller's. The source is always a multiple of `offset` back from where it
+    // is written, at least 8 after the first 8 bytes, and never before `src`.
+    unsafe {
+        let end = dst.add(len);
+        let (mut d, mut s) = (dst, src);
+        if offset < 8 {
+            *d = *s;
+            *d.add(1) = *s.add(1);
+            *d.add(2) = *s.add(2);
+            *d.add(3) = *s.add(3);
+            s = s.add(DEC32[offset]);
+            core::ptr::copy_nonoverlapping(s, d.add(4), 4);
+            s = s.offset(8 - DEC64[offset]);
+        } else {
+            copy8(d, s);
+            s = s.add(8);
+        }
+        d = d.add(8);
+        while d < end {
+            copy8(d, s);
+            d = d.add(8);
+            s = s.add(8);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::RingBuffer;
+    #[cfg(not(target_family = "wasm"))]
+    use super::WILD;
 
     #[test]
     fn smoke() {
@@ -889,6 +1176,102 @@ mod tests {
         assert!(
             sequences > 5_000,
             "only {sequences} sequences took the fast copy"
+        );
+    }
+
+    /// Sequences through the raw writer, as the native fast loop writes them, checked against a
+    /// byte at a time: from rings kept small, so that their data wraps and matches reach back
+    /// across the wrap, with offsets below 16 and past the data, and dictionaries now and then.
+    /// Few steps under Miri, which checks the writer's pointers.
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn raw_writer_matches_a_vec() {
+        let mut seed = 0x51af_d7ed_558c_cd1du64;
+        let mut next = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        let steps = if cfg!(miri) { 3_000 } else { 100_000 };
+        let dict: alloc::vec::Vec<u8> = (0..300).map(|_| next(256) as u8).collect();
+        let mut rb = RingBuffer::new();
+        let mut model: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+        let (mut taken, mut across, mut short, mut from_dict) = (0, 0, 0, 0);
+        for step in 0..steps {
+            match next(4) {
+                0 | 1 if !model.is_empty() => {
+                    let wrapped = rb.tail < rb.head;
+                    // A dictionary only while the data does not wrap, as `DecodeBuffer` gives
+                    // it, with room for any match.
+                    let use_dict = !wrapped && next(4) == 0;
+                    let d: &[u8] = if use_dict { &dict } else { &[] };
+                    let len_before = model.len();
+                    let mut writer = rb.raw_writer(d, usize::MAX, usize::MAX);
+                    for _ in 0..1 + next(4) {
+                        let ll = next(40);
+                        let padded: alloc::vec::Vec<u8> =
+                            (0..ll + WILD).map(|_| next(256) as u8).collect();
+                        let offset = 1 + next(model.len() + ll + d.len() + 8);
+                        let ml = 3 + next(60);
+                        // SAFETY: `padded` holds `ll + WILD` bytes; the offset is at least 1.
+                        let done = unsafe { writer.push_sequence(padded.as_ptr(), ll, offset, ml) };
+                        if done {
+                            taken += 1;
+                            model.extend_from_slice(&padded[..ll]);
+                            if offset < 16 {
+                                short += 1;
+                            }
+                            if offset > model.len() {
+                                from_dict += 1;
+                            } else if wrapped && offset > rb.tail + (model.len() - len_before) {
+                                across += 1;
+                            }
+                            for _ in 0..ml {
+                                let at = d.len() + model.len() - offset;
+                                let byte = if at < d.len() {
+                                    d[at]
+                                } else {
+                                    model[at - d.len()]
+                                };
+                                model.push(byte);
+                            }
+                        }
+                    }
+                    if next(8) == 0 {
+                        // Dropped unfinished: the ring is as it was.
+                        let _ = writer;
+                        model.truncate(len_before);
+                    } else {
+                        assert_eq!(rb.finish_raw(writer), model.len() - len_before);
+                    }
+                }
+                2 => {
+                    let data: alloc::vec::Vec<u8> =
+                        (0..next(40)).map(|_| next(256) as u8).collect();
+                    rb.extend(&data);
+                    model.extend_from_slice(&data);
+                }
+                _ if !model.is_empty() => {
+                    let n = next(model.len() + 1);
+                    rb.drop_first_n(n);
+                    model.drain(..n);
+                }
+                _ => {}
+            }
+            // Keep it small, so it wraps often.
+            if model.len() > 300 {
+                let n = model.len() - 100;
+                rb.drop_first_n(n);
+                model.drain(..n);
+            }
+            let (a, b) = rb.as_slices();
+            assert_eq!([a, b].concat(), model, "step {step}");
+        }
+        let least = steps / 100;
+        assert!(
+            taken > 10 * least && across > least && short > least && from_dict > least,
+            "{taken} taken: {across} across the wrap, {short} short, {from_dict} from the dictionary"
         );
     }
 

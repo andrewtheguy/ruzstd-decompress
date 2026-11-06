@@ -16,6 +16,11 @@
   reference. Fuzz only on nightly, never without a sanitizer; install nightly where it is
   missing. A crash is saved under `fuzz/artifacts/`; commit it with the fix, and
   `cargo test artifacts` replays them all.
+- After changes to unsafe code, or to what calls it, run the tests that reach it under Miri, on
+  nightly (install it with `rustup +nightly component add miri` where it is missing), with
+  isolation off so that they read the corpus files:
+  `MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly miri test --lib -- raw_writer small_files_decode ringbuffer short_writer`.
+  Keep that set reaching every unsafe path, and small enough for Miri.
 - Unsafe code is allowed where it makes decoding measurably faster (natively, against libzstd),
   kept to the hot loops' loads and copies; the rest of the crate stays safe. Every `unsafe`
   block has a `// SAFETY:` comment saying why its pointers are in bounds
