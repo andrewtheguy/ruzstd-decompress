@@ -204,7 +204,14 @@ impl<'s> BitReaderReversed<'s> {
             return None;
         }
         buf[..PADDING].fill(0);
-        buf[PADDING..PADDING + left].copy_from_slice(&self.source[..left]);
+        // As many bytes as there may be left where the source has them, so that the copy's
+        // length is known (not a call to `memcpy`, in wasm out of the module); the reader then
+        // takes only `left` of them.
+        if let Some(head) = self.source.first_chunk::<PADDED_LEFT>() {
+            buf[PADDING..].copy_from_slice(head);
+        } else {
+            buf[PADDING..PADDING + left].copy_from_slice(&self.source[..left]);
+        }
         let buf: &'b [u8] = buf;
         Some(BitReaderReversed {
             index: self.index + PADDING,

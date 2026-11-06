@@ -711,6 +711,10 @@ impl RawWriter {
             if in_dict <= WILD && from_dict >= WILD {
                 copy16(dst, src);
                 copy16(dst.add(16), src.add(16));
+            } else if (8..=EXACT_COPY_MAX).contains(&in_dict) {
+                // Up to the dictionary's end, or a longer match: in chunks, not a call to
+                // `memcpy`, which in wasm is a call out of the module (V8's `memory.copy`).
+                copy_exact(dst, src, in_dict);
             } else {
                 core::ptr::copy_nonoverlapping(src, dst, in_dict);
             }
@@ -733,6 +737,34 @@ impl RawWriter {
 unsafe fn copy16(dst: *mut u8, src: *const u8) {
     // SAFETY: the caller's.
     unsafe { core::ptr::copy_nonoverlapping(src, dst, 16) }
+}
+
+/// The most bytes [`copy_exact`] is used for; longer copies are left to `memcpy`.
+const EXACT_COPY_MAX: usize = 256;
+
+/// `len` bytes, at least 8, from `src` to `dst`, in chunks of 16 (or two of 8 below 16), the
+/// last ending at `len`, so that nothing past `len` is read or written.
+///
+/// # Safety
+///
+/// Both valid for `len` bytes, not overlapping.
+#[inline(always)]
+unsafe fn copy_exact(dst: *mut u8, src: *const u8, len: usize) {
+    debug_assert!(len >= 8);
+    // SAFETY: the caller's; every chunk is within `len`, at least 16 (or 8) of which there are.
+    unsafe {
+        if len < 16 {
+            copy8(dst, src);
+            copy8(dst.add(len - 8), src.add(len - 8));
+            return;
+        }
+        let mut at = 0;
+        while at + 16 < len {
+            copy16(dst.add(at), src.add(at));
+            at += 16;
+        }
+        copy16(dst.add(len - 16), src.add(len - 16));
+    }
 }
 
 /// 8 bytes from `src` to `dst`.
@@ -1083,8 +1115,8 @@ mod tests {
 
     /// Sequences through the raw writer, as the fast loop writes them, checked against a
     /// byte at a time: from rings kept small, so that their data wraps and matches reach back
-    /// across the wrap, with offsets below 16 and past the data, and dictionaries now and then.
-    /// Few steps under Miri, which checks the writer's pointers.
+    /// across the wrap, with offsets below 16 and past the data, and dictionaries now and then,
+    /// from which a match may copy more than `WILD` bytes. Few steps under Miri, which checks the writer's pointers.
     #[test]
     fn raw_writer_matches_a_vec() {
         let mut seed = 0x51af_d7ed_558c_cd1du64;
@@ -1098,7 +1130,7 @@ mod tests {
         let dict: alloc::vec::Vec<u8> = (0..300).map(|_| next(256) as u8).collect();
         let mut rb = RingBuffer::new();
         let mut model: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-        let (mut taken, mut across, mut short, mut from_dict) = (0, 0, 0, 0);
+        let (mut taken, mut across, mut short, mut from_dict, mut long_from_dict) = (0, 0, 0, 0, 0);
         for step in 0..steps {
             match next(4) {
                 0 | 1 if !model.is_empty() => {
@@ -1114,7 +1146,7 @@ mod tests {
                         let padded: alloc::vec::Vec<u8> =
                             (0..ll + WILD).map(|_| next(256) as u8).collect();
                         let offset = 1 + next(model.len() + ll + d.len() + 8);
-                        let ml = 3 + next(60);
+                        let ml = 3 + if next(8) == 0 { next(300) } else { next(60) };
                         // SAFETY: `padded` holds `ll + WILD` bytes; the offset is at least 1;
                         // nothing touches `rb` or `dict` until the writer is finished.
                         let done = unsafe { writer.push_sequence(padded.as_ptr(), ll, offset, ml) };
@@ -1126,6 +1158,9 @@ mod tests {
                             }
                             if offset > model.len() {
                                 from_dict += 1;
+                                if (offset - model.len()).min(ml) > WILD {
+                                    long_from_dict += 1;
+                                }
                             } else if wrapped && offset > rb.tail + (model.len() - len_before) {
                                 across += 1;
                             }
@@ -1172,8 +1207,13 @@ mod tests {
         }
         let least = steps / 100;
         assert!(
-            taken > 10 * least && across > least && short > least && from_dict > least,
-            "{taken} taken: {across} across the wrap, {short} short, {from_dict} from the dictionary"
+            taken > 10 * least
+                && across > least
+                && short > least
+                && from_dict > least
+                && long_from_dict > least / 2,
+            "{taken} taken: {across} across the wrap, {short} short, {from_dict} from the \
+             dictionary, {long_from_dict} of them over {WILD} bytes from it"
         );
     }
 
