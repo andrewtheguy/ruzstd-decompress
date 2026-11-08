@@ -98,8 +98,10 @@ the raw lines in the `.jsonl` beside it.
 
 ## Running it again
 
-`harness/run.sh results/runN-NAME.jsonl VARIANT Z` on lab2 after a restart, a variant being
-a commit's tree built by `harness/build.sh`, then
-`uv run --python 3.13 python -I harness/summary.py results/runN-NAME.jsonl VARIANT`; the
-README's "Running it again" has the layout and the corpora. Then this page, from the run's
-`.jsonl`, with every full run.
+On any machine: "Running it again, on any machine" in the [README](README.md), which makes
+the corpora, builds a commit and libzstd, and runs them, with
+[`harness/env.sh`](harness/env.sh) for the settings; without the maintainer's files it runs 8
+of the 10 workloads, all but the video clip and the tiles. A figure compares only within its
+run, on its machine. This page follows the latest full run on lab2:
+`harness/run.sh results/runN-NAME.jsonl VARIANT Z` after a restart, then
+`harness/summary.py results/runN-NAME.jsonl VARIANT`.

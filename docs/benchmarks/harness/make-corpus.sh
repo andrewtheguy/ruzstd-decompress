@@ -3,7 +3,7 @@
 #
 # Writes SCRATCH/corpus/ (what run.sh reads) from SCRATCH/corpus-src/ (the sources, downloaded
 # into it if missing), then checks every output against corpus.sha256 beside this script.
-# SCRATCH defaults to ~/codes/staging-area/ruzstd-decompress-scratch.
+# SCRATCH defaults to env.sh's.
 #
 # Needs: curl, unzip, GNU tar (TAR=gtar on macOS), zstd 1.5.7 (another version compresses
 # differently), sha256sum (or shasum). And the video clip, which cannot be downloaded again: VIDEO,
@@ -20,7 +20,8 @@
 #   order is kept in github-dict-order.txt.
 set -euo pipefail
 H=$(cd "$(dirname "$0")" && pwd)
-SCRATCH=${1:-$HOME/codes/staging-area/ruzstd-decompress-scratch}
+. "$H/env.sh"
+SCRATCH=${1:-$SCRATCH}
 SRC=$SCRATCH/corpus-src
 OUT=$SCRATCH/corpus
 TAR=${TAR:-tar}

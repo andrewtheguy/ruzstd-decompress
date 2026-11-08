@@ -25,4 +25,5 @@
   block has a `// SAFETY:` comment saying why its pointers are in bounds
   (`clippy::undocumented_unsafe_blocks`), every `unsafe fn` a `# Safety` section, and
   `unsafe_op_in_unsafe_fn` is denied (`src/lib.rs`).
-- Decode performance is measured as `docs/benchmarks/README.md` describes.
+- Decode performance is measured as `docs/benchmarks/README.md` describes ("Running it again":
+  its scripts run on any machine, their settings in `docs/benchmarks/harness/env.sh`).
