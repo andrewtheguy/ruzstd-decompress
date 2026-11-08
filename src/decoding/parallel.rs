@@ -25,6 +25,7 @@ use super::errors::{
     DecodeBlockContentError, DecompressBlockError, FrameDecoderError, ReadFrameHeaderError,
 };
 use super::frame::{self, FrameHeader};
+use super::frame_decoder::check_window_size;
 use super::literals_section_decoder::{
     decode_literals_with, literals_need_prepare, prepare_literals,
 };
@@ -55,6 +56,15 @@ const BATCH_BYTES_PER_THREAD: usize = if cfg!(any(test, fuzzing)) {
     1 << 10
 } else {
     128 << 10
+};
+
+/// A batch's literals and sequences, decoded and held until they are executed, take at most
+/// about this many bytes to each of the pool's threads, however few bytes of input make them: a
+/// block of a few bytes can hold a block's worth of either.
+const BATCH_STORE_PER_THREAD: usize = if cfg!(any(test, fuzzing)) {
+    16 << 10
+} else {
+    2 << 20
 };
 
 /// A run of frames, decoded by one job, is at least this many bytes of them.
@@ -179,13 +189,7 @@ fn scan_frame<'a>(
         }
         Err(e) => return Err(err::ReadFrameHeaderError(e)),
     };
-    let window_size = header.window_size()?;
-    if window_size > max_window_size {
-        return Err(err::WindowSizeTooBig {
-            requested: window_size,
-            max: max_window_size,
-        });
-    }
+    let window_size = check_window_size(header.window_size()?, max_window_size)?;
     let body = src;
     walk_blocks(&mut src, |_| {})?;
     let checksum = if header.descriptor.content_checksum_flag() {
@@ -200,7 +204,7 @@ fn scan_frame<'a>(
     *input = src;
     Ok(Some(Frame {
         header,
-        window_size: window_size as usize,
+        window_size,
         body,
         checksum,
     }))
@@ -430,6 +434,14 @@ impl Tables {
             0
         };
         let seqs = &sections.sequences;
+        // Each sequence's match is 3 bytes at least: more of them than that makes no block, and
+        // would be stored before their execution found it.
+        if seqs.num_sequences as usize > max_block_len / 3 {
+            return Err(DecompressBlockError::DecompressedSizeTooLarge {
+                max: max_block_len,
+                at_least: 3 * seqs.num_sequences as usize,
+            });
+        }
         let bit_stream = if seqs.num_sequences == 0 {
             check_no_sequences(sections.sequences_source)?;
             sections.sequences_source
@@ -460,6 +472,12 @@ impl Tables {
 }
 
 impl Compressed<'_> {
+    /// How many bytes its literals and sequences take, once decoded.
+    fn store_len(&self) -> usize {
+        self.sections.literals.regenerated_size as usize
+            + self.sections.sequences.num_sequences as usize * size_of::<Sequence>()
+    }
+
     /// The second step: the block's literals and sequences, decoded into its buffers.
     fn decode(&mut self) {
         self.decoded = self.try_decode();
@@ -536,36 +554,25 @@ fn decode_blocks_split(
     // Block_Maximum_Size (RFC 8878 3.1.1.2.4): the smaller of the window and 128 KiB
     let max_block_len = frame.window_size.min(MAX_BLOCK_SIZE as usize);
     let threads = rayon::current_num_threads();
-    // Eight batches to the frame at least, for the pipeline to be full most of the frame.
-    let batch_bytes = (threads * BATCH_BYTES_PER_THREAD).min(frame.body.len() / 8);
+    let batch = Batch {
+        // Eight batches to the frame at least, for the pipeline to be full most of the frame.
+        bytes: (threads * BATCH_BYTES_PER_THREAD).min(frame.body.len() / 8),
+        store: threads * BATCH_STORE_PER_THREAD,
+        max_block_len,
+    };
     let mut tables = Tables::new(dict);
     let mut spare = Vec::new();
 
-    let mut blocks = Vec::new();
-    walk_blocks(&mut { frame.body }, |block| blocks.push(block))?;
-    let mut chunks = blocks.chunk_by({
-        let mut bytes = 0;
-        move |_, next: &Block<'_>| {
-            bytes += next.content.len();
-            if bytes < batch_bytes {
-                return true;
-            }
-            bytes = 0;
-            false
-        }
-    });
-    let mut works = first_two(
-        &mut tables,
-        &mut spare,
-        chunks.next().unwrap_or(&[]),
-        max_block_len,
-    );
+    let mut all_blocks = Vec::new();
+    walk_blocks(&mut { frame.body }, |block| all_blocks.push(block))?;
+    let mut blocks = &all_blocks[..];
+    let mut works = first_two(&mut tables, &mut spare, &mut blocks, &batch);
     loop {
         let failed = matches!(works.last(), Some(Work::Failed(_)));
-        let next = if failed { None } else { chunks.next() };
+        let more = !failed && !blocks.is_empty();
         let (executed, next_works) = rayon::join(
             || execute_works(works, scratch, max_block_len, output),
-            || next.map(|blocks| first_two(&mut tables, &mut spare, blocks, max_block_len)),
+            || more.then(|| first_two(&mut tables, &mut spare, &mut blocks, &batch)),
         );
         spare.extend(executed?);
         match next_works {
@@ -575,20 +582,39 @@ fn decode_blocks_split(
     }
 }
 
-/// The first two steps for a batch of blocks: their tables, in order, as far as they can be
-/// read, then their literals and sequences, side by side.
+/// How large a batch of blocks is.
+struct Batch {
+    /// Bytes of the blocks in the input.
+    bytes: usize,
+    /// Bytes of their literals and sequences, decoded.
+    store: usize,
+    max_block_len: usize,
+}
+
+/// The first two steps for a batch of the first `blocks`, which are moved past it: their tables,
+/// in order, as far as they can be read, then their literals and sequences, side by side.
 fn first_two<'a>(
     tables: &mut Tables,
     spare: &mut Spare,
-    blocks: &[Block<'a>],
-    max_block_len: usize,
+    blocks: &mut &[Block<'a>],
+    batch: &Batch,
 ) -> Vec<Work<'a>> {
-    let mut works = Vec::with_capacity(blocks.len());
-    for block in blocks {
-        let work = tables.prepare(block, max_block_len, spare);
-        let failed = matches!(work, Work::Failed(_));
+    let mut works = Vec::new();
+    let (mut bytes, mut store) = (0, 0);
+    while let Some((block, rest)) = blocks.split_first() {
+        *blocks = rest;
+        let work = tables.prepare(block, batch.max_block_len, spare);
+        bytes += block.content.len();
+        let done = match &work {
+            Work::Failed(_) => true,
+            Work::Compressed(c) => {
+                store += c.store_len();
+                store >= batch.store || bytes >= batch.bytes
+            }
+            Work::Raw(_) | Work::Rle(..) => bytes >= batch.bytes,
+        };
         works.push(work);
-        if failed {
+        if done {
             break;
         }
     }

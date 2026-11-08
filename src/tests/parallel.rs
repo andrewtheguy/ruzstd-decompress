@@ -306,3 +306,76 @@ fn split_small_frame() {
         assert!(got.unwrap() == expected, "{name}");
     }
 }
+
+/// A frame of a 1 KiB window: 8 raw blocks of 1 KiB, then `blocks` compressed blocks of 10 bytes,
+/// each `num_sequences` sequences of no literals and a match of 3 by RLE tables, which read no
+/// bits: a block's worth of sequences from a few bytes.
+fn frame_of_bitless_sequences(blocks: usize, num_sequences: u16) -> Vec<u8> {
+    // No content size, a window descriptor of 1 KiB.
+    let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x00];
+    let block_header = |len: u32, block_type: u32, last: bool| {
+        let header = (len << 3) | (block_type << 1) | u32::from(last);
+        [header as u8, (header >> 8) as u8, (header >> 16) as u8]
+    };
+    for i in 0..8u8 {
+        frame.extend_from_slice(&block_header(1024, 0, false));
+        frame.extend((0..1024u32).map(|j| (j as u8).wrapping_mul(i + 1)));
+    }
+    let n = num_sequences;
+    let content = [
+        0x00,                  // raw literals, none
+        0x80 | (n >> 8) as u8, // the number of sequences, in two bytes
+        n as u8,
+        0x54, // literal lengths, offsets and match lengths: RLE
+        0,    // literal length 0
+        0,    // offset code 0: a repeated offset
+        0,    // match length 3
+        0x01, // the bitstream: its end mark alone
+    ];
+    for i in 0..blocks {
+        frame.extend_from_slice(&block_header(content.len() as u32, 2, i + 1 == blocks));
+        frame.extend_from_slice(&content);
+    }
+    frame
+}
+
+/// Blocks a few bytes long that each decode to a block's worth of sequences, and one with more
+/// than its block can hold: the batches are cut by what they store, not by their input alone.
+#[test]
+fn blocks_of_many_bitless_sequences() {
+    let mut serial = FrameDecoder::new();
+    let decoder = FrameDecoder::new();
+    // 341 matches of 3 make 1023 bytes, as many as a block of a 1 KiB window holds.
+    let full = frame_of_bitless_sequences(2000, 341);
+    let expected = decode_serial(&mut serial, &full).unwrap();
+    assert_eq!(expected.len(), 8 * 1024 + 2000 * 1023);
+    let over = frame_of_bitless_sequences(2000, 342);
+    assert!(decode_serial(&mut serial, &over).is_err());
+    in_pools(|threads| {
+        let got = decode_parallel(&decoder, &full).unwrap();
+        assert!(got == expected, "on {threads} threads");
+        let err = decode_parallel(&decoder, &over).unwrap_err();
+        // Split, the block is refused before its sequences are stored.
+        let refused = if threads > 1 {
+            "DecompressedSizeTooLarge { max: 1024, at_least: 1026 }"
+        } else {
+            "1026"
+        };
+        assert!(err.contains(refused), "on {threads} threads: {err}");
+    });
+}
+
+/// A window of 4 GiB, allowed by the limit, is more than a 32-bit `usize` holds: refused, not
+/// truncated to nothing, by both decoders.
+#[test]
+#[cfg(target_pointer_width = "32")]
+fn window_past_usize() {
+    // No content size; window log 32; one empty raw block.
+    let frame = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 22 << 3, 0x01, 0x00, 0x00];
+    let mut decoder = FrameDecoder::new();
+    decoder.set_max_window_size(1 << 40);
+    let err = decode_parallel(&decoder, &frame).unwrap_err();
+    assert!(err.contains("4294967296"), "{err}");
+    let err = decode_serial(&mut decoder, &frame).unwrap_err();
+    assert!(err.contains("4294967296"), "{err}");
+}

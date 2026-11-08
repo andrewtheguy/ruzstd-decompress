@@ -2123,8 +2123,11 @@ and the JavaScript that runs it on a pool of workers, in a browser or in Node.
   2. a batch of blocks' literals and sequences into buffers of their own, side by side;
   3. those sequences executed in order on one thread, beside the next batch's first two steps.
 
-  A batch is about 128 KB of input to each thread, and an eighth of the frame at most. A frame
-  smaller than two batches is decoded as on one thread.
+  A batch is about 128 KB of input to each thread, and an eighth of the frame at most. Its
+  stored literals and sequences take at most about 2 MB to each thread, for a block of a few
+  bytes can hold a block's worth of either. That cap came after run 32. On the WSL
+  workstation, 6 threads, it moved `x-ray`, `nci`, silesia `-3` and `--fast=4` by no more
+  than their noise. A frame smaller than two batches is decoded as on one thread.
 - **For that split, the one-thread code was divided, not copied:**
   - The sequences' loop is generic over where each sequence goes: executed at once, as before,
     or stored (`SequenceSink`).

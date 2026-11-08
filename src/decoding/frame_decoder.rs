@@ -106,11 +106,9 @@ impl FrameDecoderState {
     ) -> Result<FrameDecoderState, FrameDecoderError> {
         let (frame, header_size) = frame::read_frame_header(source)?;
         let window_size = frame.window_size()?;
-        Self::check_window_size(window_size, max_window_size)?;
-        let mut decoder_scratch = DecoderScratch::new(
-            window_size as usize,
-            frame.descriptor.content_checksum_flag(),
-        );
+        let window_len = check_window_size(window_size, max_window_size)?;
+        let mut decoder_scratch =
+            DecoderScratch::new(window_len, frame.descriptor.content_checksum_flag());
         decoder_scratch
             .buffer
             .reserve(Self::initial_room(&frame, window_size));
@@ -128,13 +126,13 @@ impl FrameDecoderState {
     fn reset(&mut self, source: impl Read, max_window_size: u64) -> Result<(), FrameDecoderError> {
         let (frame_header, header_size) = frame::read_frame_header(source)?;
         let window_size = frame_header.window_size()?;
-        Self::check_window_size(window_size, max_window_size)?;
+        let window_len = check_window_size(window_size, max_window_size)?;
 
         self.frame_header = frame_header;
         self.frame_finished = false;
         self.block_counter = 0;
         self.decoder_scratch.reset(
-            window_size as usize,
+            window_len,
             self.frame_header.descriptor.content_checksum_flag(),
         );
         self.decoder_scratch
@@ -156,17 +154,22 @@ impl FrameDecoderState {
             .min(frame.frame_content_size())
             .min(u64::from(crate::common::MAX_BLOCK_SIZE)) as usize
     }
+}
 
-    /// Reject a frame whose declared window exceeds the limit, before allocation.
-    fn check_window_size(window_size: u64, max_window_size: u64) -> Result<(), FrameDecoderError> {
-        if window_size > max_window_size {
-            return Err(FrameDecoderError::WindowSizeTooBig {
-                requested: window_size,
-                max: max_window_size,
-            });
-        }
-        Ok(())
+/// A frame's declared window, as a length: rejected before allocation if it exceeds the limit,
+/// or what a `usize` holds (on 32-bit targets, a window of 4 GiB or more).
+pub(super) fn check_window_size(
+    window_size: u64,
+    max_window_size: u64,
+) -> Result<usize, FrameDecoderError> {
+    let max = max_window_size.min(usize::MAX as u64);
+    if window_size > max {
+        return Err(FrameDecoderError::WindowSizeTooBig {
+            requested: window_size,
+            max,
+        });
     }
+    Ok(window_size as usize)
 }
 
 impl Default for FrameDecoder {
