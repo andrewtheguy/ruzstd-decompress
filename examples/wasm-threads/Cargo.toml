@@ -1,0 +1,29 @@
+# ruzstd-decompress in WebAssembly on several threads: a module whose decoder runs on a rayon
+# pool of the page's (or Node's) workers, all on one shared memory, and the JavaScript that
+# starts them (js/). See README.md.
+#
+# Not part of the crate's package or of a workspace: it builds for `wasm32-unknown-unknown`
+# alone, on the nightly of rust-toolchain.toml, for the standard library built with atomics
+# (.cargo/config.toml).
+[package]
+name = "ruzstd-mt"
+version = "0.0.0"
+license = "MIT"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+ruzstd-decompress = { path = "../..", features = ["rayon"] }
+rayon = "1.10"
+wasm-bindgen = "=0.2.130"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[workspace]

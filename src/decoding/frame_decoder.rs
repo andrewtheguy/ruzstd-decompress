@@ -621,6 +621,40 @@ impl FrameDecoder {
     }
 }
 
+#[cfg(feature = "rayon")]
+impl FrameDecoder {
+    /// Decode every frame of `input`, appending what they decode to to `output`, on the threads
+    /// of the rayon pool this is called in (rayon's global pool outside one): the same bytes as
+    /// [`Self::decode_all_to_vec`], with each frame's checksum checked where it has one and the
+    /// `hash` feature is on. Skippable frames are skipped. `output` is left as it was on an
+    /// error.
+    ///
+    /// Frames are decoded side by side. So are the blocks of a frame, where there are fewer
+    /// frames than threads: each block's literals and sequences are decoded on a thread of their
+    /// own, and executed in order on one, beside the next blocks' decoding. On one thread this
+    /// decodes as [`Self::decode_all_to_vec`] does.
+    ///
+    /// The dictionaries given by [`Self::add_dict`] are used, and the window most of
+    /// [`Self::set_max_window_size`]; the decoder's state, the frame [`Self::reset`] set up, is
+    /// neither used nor changed.
+    ///
+    /// In WebAssembly a thread is a worker the page starts on the module's shared memory: see
+    /// `examples/wasm-threads` in the repository. As every rayon call, this waits for the
+    /// pool's threads, which a page's main thread may not: call it from a worker.
+    pub fn decode_all_parallel(
+        &self,
+        input: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<(), FrameDecoderError> {
+        let len = output.len();
+        let result = super::parallel::decode_all(input, &self.dicts, self.max_window_size, output);
+        if result.is_err() {
+            output.truncate(len);
+        }
+        result
+    }
+}
+
 /// Reads the bytes decoded and not yet collected, as [`FrameDecoder::collect`] gives them.
 impl Read for FrameDecoder {
     fn read(&mut self, target: &mut [u8]) -> Result<usize, Error> {

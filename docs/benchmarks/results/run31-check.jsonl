@@ -1,0 +1,80 @@
+{"variant":"A","platform":"native","round":1,"mode":"frame","file":"silesia-nci.l3.zst","reps":107,"median_ms":18.799,"min_ms":18.561,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":1,"mode":"frame","file":"silesia-nci.l3.zst","reps":78,"median_ms":25.377,"min_ms":25.024,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":1,"mode":"frame","file":"silesia-nci.l3.zst","reps":102,"median_ms":19.101,"min_ms":18.712,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":1,"mode":"frame","file":"silesia-nci.l3.zst","reps":79,"median_ms":25.120,"min_ms":24.681,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":1,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":226,"median_ms":8.790,"min_ms":8.661,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":1,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":194,"median_ms":10.000,"min_ms":9.817,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":1,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":222,"median_ms":9.009,"min_ms":8.912,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":1,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":190,"median_ms":10.306,"min_ms":9.922,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":1,"mode":"frames","file":"github-dict.frames","reps":549,"median_ms":3.553,"min_ms":3.474,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":1,"mode":"frames","file":"github-dict.frames","reps":368,"median_ms":5.420,"min_ms":5.335,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":1,"mode":"frames","file":"github-dict.frames","reps":557,"median_ms":3.524,"min_ms":3.449,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":1,"mode":"frames","file":"github-dict.frames","reps":364,"median_ms":5.452,"min_ms":5.328,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":1,"mode":"frames","file":"github.frames","reps":131,"median_ms":15.255,"min_ms":15.042,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":1,"mode":"frames","file":"github.frames","reps":92,"median_ms":21.688,"min_ms":21.442,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":1,"mode":"frames","file":"github.frames","reps":130,"median_ms":15.333,"min_ms":15.050,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":1,"mode":"frames","file":"github.frames","reps":91,"median_ms":21.672,"min_ms":21.364,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":2,"mode":"frame","file":"silesia-nci.l3.zst","reps":105,"median_ms":19.026,"min_ms":18.791,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":2,"mode":"frame","file":"silesia-nci.l3.zst","reps":79,"median_ms":25.254,"min_ms":24.936,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":2,"mode":"frame","file":"silesia-nci.l3.zst","reps":103,"median_ms":19.549,"min_ms":18.731,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":2,"mode":"frame","file":"silesia-nci.l3.zst","reps":78,"median_ms":25.488,"min_ms":25.028,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":2,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":226,"median_ms":8.789,"min_ms":8.652,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":2,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":195,"median_ms":10.085,"min_ms":9.873,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":2,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":220,"median_ms":9.056,"min_ms":8.900,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":2,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":196,"median_ms":10.054,"min_ms":9.927,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":2,"mode":"frames","file":"github-dict.frames","reps":550,"median_ms":3.562,"min_ms":3.466,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":2,"mode":"frames","file":"github-dict.frames","reps":354,"median_ms":5.611,"min_ms":5.442,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":2,"mode":"frames","file":"github-dict.frames","reps":565,"median_ms":3.493,"min_ms":3.417,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":2,"mode":"frames","file":"github-dict.frames","reps":366,"median_ms":5.388,"min_ms":5.282,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":2,"mode":"frames","file":"github.frames","reps":130,"median_ms":15.348,"min_ms":15.129,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":2,"mode":"frames","file":"github.frames","reps":91,"median_ms":21.796,"min_ms":21.494,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":2,"mode":"frames","file":"github.frames","reps":131,"median_ms":15.243,"min_ms":15.016,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":2,"mode":"frames","file":"github.frames","reps":89,"median_ms":22.129,"min_ms":21.671,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":3,"mode":"frame","file":"silesia-nci.l3.zst","reps":104,"median_ms":19.088,"min_ms":18.761,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":3,"mode":"frame","file":"silesia-nci.l3.zst","reps":78,"median_ms":25.285,"min_ms":24.815,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":3,"mode":"frame","file":"silesia-nci.l3.zst","reps":106,"median_ms":18.829,"min_ms":18.538,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":3,"mode":"frame","file":"silesia-nci.l3.zst","reps":77,"median_ms":25.488,"min_ms":24.870,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":3,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":228,"median_ms":8.754,"min_ms":8.617,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":3,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":191,"median_ms":10.114,"min_ms":9.844,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":3,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":221,"median_ms":9.018,"min_ms":8.891,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":3,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":191,"median_ms":10.268,"min_ms":9.925,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":3,"mode":"frames","file":"github-dict.frames","reps":568,"median_ms":3.474,"min_ms":3.411,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":3,"mode":"frames","file":"github-dict.frames","reps":355,"median_ms":5.444,"min_ms":5.330,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":3,"mode":"frames","file":"github-dict.frames","reps":545,"median_ms":3.560,"min_ms":3.481,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":3,"mode":"frames","file":"github-dict.frames","reps":361,"median_ms":5.418,"min_ms":5.302,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":3,"mode":"frames","file":"github.frames","reps":129,"median_ms":15.304,"min_ms":15.015,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":3,"mode":"frames","file":"github.frames","reps":91,"median_ms":21.682,"min_ms":21.437,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":3,"mode":"frames","file":"github.frames","reps":131,"median_ms":15.195,"min_ms":15.076,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":3,"mode":"frames","file":"github.frames","reps":91,"median_ms":21.882,"min_ms":21.702,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":4,"mode":"frame","file":"silesia-nci.l3.zst","reps":104,"median_ms":18.948,"min_ms":18.593,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":4,"mode":"frame","file":"silesia-nci.l3.zst","reps":78,"median_ms":25.497,"min_ms":25.004,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":4,"mode":"frame","file":"silesia-nci.l3.zst","reps":104,"median_ms":19.193,"min_ms":18.863,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":4,"mode":"frame","file":"silesia-nci.l3.zst","reps":78,"median_ms":25.403,"min_ms":24.947,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":4,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":227,"median_ms":8.806,"min_ms":8.657,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":4,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":194,"median_ms":10.062,"min_ms":9.859,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":4,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":218,"median_ms":9.100,"min_ms":8.926,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":4,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":194,"median_ms":10.134,"min_ms":9.937,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":4,"mode":"frames","file":"github-dict.frames","reps":563,"median_ms":3.515,"min_ms":3.409,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":4,"mode":"frames","file":"github-dict.frames","reps":364,"median_ms":5.470,"min_ms":5.361,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":4,"mode":"frames","file":"github-dict.frames","reps":562,"median_ms":3.546,"min_ms":3.465,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":4,"mode":"frames","file":"github-dict.frames","reps":361,"median_ms":5.500,"min_ms":5.383,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":4,"mode":"frames","file":"github.frames","reps":131,"median_ms":15.220,"min_ms":15.047,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":4,"mode":"frames","file":"github.frames","reps":90,"median_ms":21.886,"min_ms":21.384,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":4,"mode":"frames","file":"github.frames","reps":130,"median_ms":15.429,"min_ms":15.255,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":4,"mode":"frames","file":"github.frames","reps":92,"median_ms":21.650,"min_ms":21.397,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":5,"mode":"frame","file":"silesia-nci.l3.zst","reps":104,"median_ms":19.129,"min_ms":18.734,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":5,"mode":"frame","file":"silesia-nci.l3.zst","reps":78,"median_ms":25.505,"min_ms":24.945,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":5,"mode":"frame","file":"silesia-nci.l3.zst","reps":104,"median_ms":19.030,"min_ms":18.581,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":5,"mode":"frame","file":"silesia-nci.l3.zst","reps":77,"median_ms":25.492,"min_ms":25.003,"in":2835400,"out":33553445,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":5,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":218,"median_ms":9.136,"min_ms":8.917,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"wasm","round":5,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":194,"median_ms":10.092,"min_ms":9.901,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"native","round":5,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":223,"median_ms":8.871,"min_ms":8.708,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"A","platform":"wasm","round":5,"mode":"frame","file":"silesia-x-ray.l1.zst","reps":194,"median_ms":10.048,"min_ms":9.858,"in":6772240,"out":8474240,"check":"checksum ok"}
+{"variant":"B","platform":"native","round":5,"mode":"frames","file":"github-dict.frames","reps":559,"median_ms":3.553,"min_ms":3.419,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":5,"mode":"frames","file":"github-dict.frames","reps":346,"median_ms":5.640,"min_ms":5.522,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":5,"mode":"frames","file":"github-dict.frames","reps":571,"median_ms":3.494,"min_ms":3.416,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":5,"mode":"frames","file":"github-dict.frames","reps":353,"median_ms":5.441,"min_ms":5.309,"in":728099,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"native","round":5,"mode":"frames","file":"github.frames","reps":129,"median_ms":15.269,"min_ms":15.036,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"A","platform":"wasm","round":5,"mode":"frames","file":"github.frames","reps":93,"median_ms":21.531,"min_ms":21.367,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"native","round":5,"mode":"frames","file":"github.frames","reps":131,"median_ms":15.229,"min_ms":14.997,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}
+{"variant":"B","platform":"wasm","round":5,"mode":"frames","file":"github.frames","reps":92,"median_ms":21.843,"min_ms":21.469,"in":2530260,"out":7484607,"check":"9114 frames da987d8aee5430ac"}

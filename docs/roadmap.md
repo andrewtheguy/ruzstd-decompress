@@ -102,3 +102,19 @@ times their native time. With the Huffman streams' raw loops alone (three rounds
 was 19% faster and mixed's tiles 3%, the sequences' alone 9% and 3%. The table of pairs'
 shift by a multiplication, which made the safe loop faster in V8, made the raw one slower
 (`x-ray` 4%).
+
+## 4. One frame on several threads
+
+`decode_all_parallel` (run 32 of [`benchmarks/README.md`](benchmarks/README.md)) decodes a
+large frame's literals and sequences side by side, but executes its sequences on one thread.
+That execution is the critical path, about half of a decode on one thread. It also slows as
+the other threads work beside it (silesia `-3` on the WSL workstation: 177 ms alone, 230 ms
+beside 5 others). On 8 threads the Silesia tars get 1.5–1.7 times as fast.
+
+What could make it shorter:
+- **Execute into the output.** Copying the window out of the ring buffer into the output,
+  with the checksum's hash, is about a fifth of execution (40 of 186 ms). A decode of a whole
+  input into a `Vec` could execute into that `Vec` itself, the window being the output
+  before it, and hash the finished part on another thread.
+- **Less to carry from step to step.** Each sequence is written as 12 bytes by one thread
+  and read by another.

@@ -1,0 +1,23 @@
+# Threads: `atomics`, and a memory that is shared, imported so that each thread's instance is
+# given the one memory, with the maximum a shared memory must declare (4 GiB, all a 32-bit
+# memory has: a frame decodes into it whole). The thread-local exports are what wasm-bindgen
+# sets each thread's storage up with. SIMD and bulk memory, as the decoder's loops use them.
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+simd128,+atomics,+bulk-memory",
+  "-C", "link-arg=--shared-memory",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--max-memory=4294967296",
+  "-C", "link-arg=--export=__wasm_init_tls",
+  "-C", "link-arg=--export=__tls_size",
+  "-C", "link-arg=--export=__tls_align",
+  "-C", "link-arg=--export=__tls_base",
+]
+
+[build]
+target = "wasm32-unknown-unknown"
+
+# The standard library as shipped is built without `atomics`: its locks and its allocator are
+# one thread's. So it is built here, with the flags above.
+[unstable]
+build-std = ["std", "panic_abort"]

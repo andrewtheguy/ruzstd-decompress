@@ -102,7 +102,10 @@ impl BlockDecoder {
         }
     }
 
-    fn check_decompressed_size(at_least: usize, max: usize) -> Result<(), DecompressBlockError> {
+    pub(crate) fn check_decompressed_size(
+        at_least: usize,
+        max: usize,
+    ) -> Result<(), DecompressBlockError> {
         if at_least > max {
             return Err(DecompressBlockError::DecompressedSizeTooLarge { at_least, max });
         }
@@ -122,37 +125,12 @@ impl BlockDecoder {
 
         source.read_exact(workspace.block_content_buffer.as_mut_slice())?;
         let raw = workspace.block_content_buffer.as_slice();
-
-        let mut section = LiteralsSection::new();
-        let bytes_in_literals_header = section.parse_from_header(raw)?;
-        let raw = &raw[bytes_in_literals_header as usize..];
-        vprintln!(
-            "Found {} literalssection with regenerated size: {}, and compressed size: {:?}",
-            section.ls_type,
-            section.regenerated_size,
-            section.compressed_size
-        );
-        // every literal ends up in the output, so the literals alone must fit in the block
-        Self::check_decompressed_size(section.regenerated_size as usize, max_block_decoded_len)?;
-
-        let upper_limit_for_literals = match section.compressed_size {
-            Some(x) => x as usize,
-            None => match section.ls_type {
-                LiteralsSectionType::RLE => 1,
-                LiteralsSectionType::Raw => section.regenerated_size as usize,
-                _ => panic!("Bug in this library"),
-            },
-        };
-
-        if raw.len() < upper_limit_for_literals {
-            return Err(DecompressBlockError::MalformedSectionHeader {
-                expected_len: upper_limit_for_literals,
-                remaining_bytes: raw.len(),
-            });
-        }
-
-        let raw_literals = &raw[..upper_limit_for_literals];
-        vprintln!("Slice for literals: {}", raw_literals.len());
+        let BlockSections {
+            literals: section,
+            literals_source: raw_literals,
+            sequences: seq_section,
+            sequences_source: raw,
+        } = split_sections(raw, max_block_decoded_len)?;
 
         workspace.literals_buffer.clear(); //all literals of the previous block must have been used in the sequence execution anyways. just be defensive here
         let bytes_used_in_literals_section = decode_literals(
@@ -161,34 +139,12 @@ impl BlockDecoder {
             raw_literals,
             &mut workspace.literals_buffer,
         )?;
-        assert!(
-            section.regenerated_size == workspace.literals_buffer.len() as u32,
-            "Wrong number of literals: {}, Should have been: {}",
-            workspace.literals_buffer.len(),
-            section.regenerated_size
+        check_literals(
+            &section,
+            &workspace.literals_buffer,
+            raw_literals,
+            bytes_used_in_literals_section,
         );
-        assert!(bytes_used_in_literals_section == upper_limit_for_literals as u32);
-
-        let raw = &raw[upper_limit_for_literals..];
-        vprintln!("Slice for sequences with headers: {}", raw.len());
-
-        let mut seq_section = SequencesHeader::new();
-        let bytes_in_sequence_header = seq_section.parse_from_header(raw)?;
-        let raw = &raw[bytes_in_sequence_header as usize..];
-        vprintln!(
-            "Found sequencessection with sequences: {} and size: {}",
-            seq_section.num_sequences,
-            raw.len()
-        );
-
-        assert!(
-            u32::from(bytes_in_literals_header)
-                + bytes_used_in_literals_section
-                + u32::from(bytes_in_sequence_header)
-                + raw.len() as u32
-                == header.content_size
-        );
-        vprintln!("Slice for sequences: {}", raw.len());
 
         if seq_section.num_sequences != 0 {
             // Sequences are executed as they are decoded, so an error in a later one, or in
@@ -207,7 +163,7 @@ impl BlockDecoder {
                 &mut workspace.offset_hist,
                 max_block_decoded_len,
             );
-            let result = decode_sequences::<DecompressBlockError>(
+            let result = decode_sequences::<DecompressBlockError, _>(
                 &seq_section,
                 raw,
                 &mut workspace.fse,
@@ -220,13 +176,7 @@ impl BlockDecoder {
                 return Err(err);
             }
         } else {
-            if !raw.is_empty() {
-                return Err(DecompressBlockError::DecodeSequenceError(
-                    DecodeSequenceError::ExtraBits {
-                        bits_remaining: raw.len() as isize * 8,
-                    },
-                ));
-            }
+            check_no_sequences(raw)?;
             workspace.buffer.push(&workspace.literals_buffer);
         }
 
@@ -318,4 +268,98 @@ impl BlockDecoder {
             | (u32::from(self.header_buffer[1]) << 5)
             | (u32::from(self.header_buffer[2]) << 13)
     }
+}
+
+/// A compressed block's two sections: the literals section's header and its bytes, then the
+/// sequences section's header and the bytes after it.
+pub(crate) struct BlockSections<'a> {
+    pub literals: LiteralsSection,
+    pub literals_source: &'a [u8],
+    pub sequences: SequencesHeader,
+    pub sequences_source: &'a [u8],
+}
+
+/// Split a compressed block's content into its sections, checking what their headers say
+/// against the block: `max_block_decoded_len` is the most it may decode to.
+pub(crate) fn split_sections(
+    raw: &[u8],
+    max_block_decoded_len: usize,
+) -> Result<BlockSections<'_>, DecompressBlockError> {
+    let mut section = LiteralsSection::new();
+    let bytes_in_literals_header = section.parse_from_header(raw)?;
+    let raw = &raw[bytes_in_literals_header as usize..];
+    vprintln!(
+        "Found {} literalssection with regenerated size: {}, and compressed size: {:?}",
+        section.ls_type,
+        section.regenerated_size,
+        section.compressed_size
+    );
+    // every literal ends up in the output, so the literals alone must fit in the block
+    BlockDecoder::check_decompressed_size(
+        section.regenerated_size as usize,
+        max_block_decoded_len,
+    )?;
+
+    let upper_limit_for_literals = match section.compressed_size {
+        Some(x) => x as usize,
+        None => match section.ls_type {
+            LiteralsSectionType::RLE => 1,
+            LiteralsSectionType::Raw => section.regenerated_size as usize,
+            _ => panic!("Bug in this library"),
+        },
+    };
+
+    if raw.len() < upper_limit_for_literals {
+        return Err(DecompressBlockError::MalformedSectionHeader {
+            expected_len: upper_limit_for_literals,
+            remaining_bytes: raw.len(),
+        });
+    }
+
+    let (raw_literals, raw) = raw.split_at(upper_limit_for_literals);
+    vprintln!("Slice for literals: {}", raw_literals.len());
+    vprintln!("Slice for sequences with headers: {}", raw.len());
+
+    let mut seq_section = SequencesHeader::new();
+    let bytes_in_sequence_header = seq_section.parse_from_header(raw)?;
+    let raw = &raw[bytes_in_sequence_header as usize..];
+    vprintln!(
+        "Found sequencessection with sequences: {} and size: {}",
+        seq_section.num_sequences,
+        raw.len()
+    );
+    Ok(BlockSections {
+        literals: section,
+        literals_source: raw_literals,
+        sequences: seq_section,
+        sequences_source: raw,
+    })
+}
+
+/// What a literals section must have decoded to, from `raw_literals`, having read `bytes_used`.
+pub(crate) fn check_literals(
+    section: &LiteralsSection,
+    literals: &[u8],
+    raw_literals: &[u8],
+    bytes_used: u32,
+) {
+    assert!(
+        section.regenerated_size == literals.len() as u32,
+        "Wrong number of literals: {}, Should have been: {}",
+        literals.len(),
+        section.regenerated_size
+    );
+    assert!(bytes_used == raw_literals.len() as u32);
+}
+
+/// A block of no sequences has nothing after its sequences section's header.
+pub(crate) fn check_no_sequences(raw: &[u8]) -> Result<(), DecompressBlockError> {
+    if !raw.is_empty() {
+        return Err(DecompressBlockError::DecodeSequenceError(
+            DecodeSequenceError::ExtraBits {
+                bits_remaining: raw.len() as isize * 8,
+            },
+        ));
+    }
+    Ok(())
 }

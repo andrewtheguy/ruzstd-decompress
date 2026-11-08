@@ -5,12 +5,79 @@ use super::super::blocks::literals_section::{LiteralsSection, LiteralsSectionTyp
 use super::scratch::HuffmanScratch;
 use crate::bit_io::BitReaderReversed;
 use crate::decoding::errors::DecompressLiteralsError;
+use crate::huff0::HuffmanTable;
 use alloc::vec::Vec;
 
 /// Decode and decompress the provided literals section into `target`, returning the number of bytes read.
 pub fn decode_literals(
     section: &LiteralsSection,
     scratch: &mut HuffmanScratch,
+    source: &[u8],
+    target: &mut Vec<u8>,
+) -> Result<u32, DecompressLiteralsError> {
+    let tree_bytes = prepare_literals(section, &mut scratch.table, source)?;
+    decode_literals_with(section, &scratch.table, tree_bytes, source, target)
+}
+
+/// What a literals section needs of `table` before its literals decode from it: the table built
+/// from its description, if it has one, and whatever else it decodes from (see
+/// [`HuffmanTable::prepare_4_streams`]). Returns the description's bytes.
+pub fn prepare_literals(
+    section: &LiteralsSection,
+    table: &mut HuffmanTable,
+    source: &[u8],
+) -> Result<u32, DecompressLiteralsError> {
+    use DecompressLiteralsError as err;
+    let tree_bytes = match section.ls_type {
+        LiteralsSectionType::Raw | LiteralsSectionType::RLE => return Ok(0),
+        LiteralsSectionType::Compressed => {
+            let compressed_size =
+                section.compressed_size.ok_or(err::MissingCompressedSize)? as usize;
+            //read Huffman tree description
+            let bytes = table.build_decoder(&source[..compressed_size])?;
+            vprintln!("Built huffman table using {} bytes", bytes);
+            bytes
+        }
+        LiteralsSectionType::Treeless => 0,
+    };
+    if table.max_num_bits == 0 {
+        return Err(err::UninitializedHuffmanTable);
+    }
+    if let Some((regenerated, compressed)) = four_streams(section) {
+        table.prepare_4_streams(regenerated, compressed);
+    }
+    Ok(tree_bytes)
+}
+
+/// Whether [`prepare_literals`] would change `table` for this section, which has no tree
+/// description of its own.
+#[cfg(feature = "rayon")]
+pub fn literals_need_prepare(section: &LiteralsSection, table: &HuffmanTable) -> bool {
+    table.max_num_bits != 0
+        && four_streams(section).is_some_and(|(r, c)| table.needs_prepare_4_streams(r, c))
+}
+
+/// A Huffman section's regenerated and compressed sizes, if it has four streams.
+fn four_streams(section: &LiteralsSection) -> Option<(usize, usize)> {
+    match section.ls_type {
+        LiteralsSectionType::Compressed | LiteralsSectionType::Treeless
+            if section.num_streams == Some(4) =>
+        {
+            Some((
+                section.regenerated_size as usize,
+                section.compressed_size? as usize,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Decode a literals section into `target` with `table`, which [`prepare_literals`] has made
+/// ready for it, `tree_bytes` the description it read: returns the number of bytes read.
+pub fn decode_literals_with(
+    section: &LiteralsSection,
+    table: &HuffmanTable,
+    tree_bytes: u32,
     source: &[u8],
     target: &mut Vec<u8>,
 ) -> Result<u32, DecompressLiteralsError> {
@@ -24,10 +91,7 @@ pub fn decode_literals(
             Ok(1)
         }
         LiteralsSectionType::Compressed | LiteralsSectionType::Treeless => {
-            let bytes_read = decompress_literals(section, scratch, source, target)?;
-
-            //return sum of used bytes
-            Ok(bytes_read)
+            decompress_literals(section, table, tree_bytes, source, target)
         }
     }
 }
@@ -38,7 +102,8 @@ pub fn decode_literals(
 /// Returns the number of bytes read.
 fn decompress_literals(
     section: &LiteralsSection,
-    scratch: &mut HuffmanScratch,
+    table: &HuffmanTable,
+    tree_bytes: u32,
     source: &[u8],
     target: &mut Vec<u8>,
 ) -> Result<u32, DecompressLiteralsError> {
@@ -49,24 +114,10 @@ fn decompress_literals(
 
     target.reserve(section.regenerated_size as usize);
     let source = &source[0..compressed_size];
-    let mut bytes_read = 0;
-
-    match section.ls_type {
-        LiteralsSectionType::Compressed => {
-            //read Huffman tree description
-            bytes_read += scratch.table.build_decoder(source)?;
-            vprintln!("Built huffman table using {} bytes", bytes_read);
-        }
-        LiteralsSectionType::Treeless if scratch.table.max_num_bits == 0 => {
-            return Err(err::UninitializedHuffmanTable);
-        }
-
-        _ => { /* nothing to do, huffman tree has been provided by previous block */ }
-    }
-
+    let mut bytes_read = tree_bytes;
     let source = &source[bytes_read as usize..];
 
-    let max_num_bits = scratch.table.max_num_bits;
+    let max_num_bits = table.max_num_bits;
     if max_num_bits == 0 {
         return Err(err::UninitializedHuffmanTable);
     }
@@ -114,9 +165,7 @@ fn decompress_literals(
             init_stream(&source[jump2..jump3])?,
             init_stream(&source[jump3..])?,
         ];
-        scratch
-            .table
-            .decode_4_streams_sized(&mut brs, [out0, out1, out2, out3], compressed_size);
+        table.decode_4_streams_sized(&mut brs, [out0, out1, out2, out3], compressed_size);
         for br in &brs {
             check_stream_end(br, max_num_bits)?;
         }
@@ -126,7 +175,7 @@ fn decompress_literals(
         //just decode the one stream
         assert!(num_streams == 1);
         let mut br = init_stream(source)?;
-        scratch.table.decode_stream(&mut br, out);
+        table.decode_stream(&mut br, out);
         check_stream_end(&br, max_num_bits)?;
         bytes_read += source.len() as u32;
     }

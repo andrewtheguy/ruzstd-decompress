@@ -2105,6 +2105,131 @@ ms a pass, the median of three rounds. Every workload:
   ruzstd-decompress more on the video clip (0.75 to 0.70). In wasm it went from 1.33 to 1.29
   times the native time.
 
+## 2026-11-08: decoding on several threads
+
+What is new: `FrameDecoder::decode_all_parallel`, behind the `rayon` feature, decodes a whole
+input on the threads of the rayon pool it is called in
+([`src/decoding/parallel.rs`](../../src/decoding/parallel.rs)). In WebAssembly a thread is a
+worker on a shared memory: [`examples/wasm-threads`](../../examples/wasm-threads) is a module
+and the JavaScript that runs it on a pool of workers, in a browser or in Node.
+
+- **Frames are independent**, so an input of several is decoded a run of frames to each job.
+- **A frame's blocks** depend on each other in two ways: a block may repeat the tables of the
+  one before it, and its matches copy from the blocks before it. Neither stops a block's
+  literals (its Huffman streams) and its sequences (its FSE streams) from being decoded apart,
+  once its tables are known. So a large frame, when there are fewer frames than threads, is
+  decoded in three steps:
+  1. the tables, block after block;
+  2. a batch of blocks' literals and sequences into buffers of their own, side by side;
+  3. those sequences executed in order on one thread, beside the next batch's first two steps.
+
+  A batch is about 128 KB of input to each thread, and an eighth of the frame at most. A frame
+  smaller than two batches is decoded as on one thread.
+- **For that split, the one-thread code was divided, not copied:**
+  - The sequences' loop is generic over where each sequence goes: executed at once, as before,
+    or stored (`SequenceSink`).
+  - The literals' table step (the Huffman table and its table of pairs) is apart from the
+    streams' decoding.
+  - A compressed block's sections are parsed by one function for both paths.
+
+### Variants and runs
+
+All on lab2 after a restart. **A** is `main` at `ad2f5ab`. **B** is the branch's first version.
+**C** is B with the table of pairs built in a BMI2 build again, as it was inside the streams'
+loop, and the batches capped at an eighth of the frame.
+
+- **Run 30**: A and B on one thread, all 10 workloads, three rounds
+  ([`results/run30-one-thread.md`](results/run30-one-thread.md)).
+- **Run 31**: A and B, five rounds, on the four smallest workloads
+  ([`results/run31-check.md`](results/run31-check.md)). Then B on several threads
+  ([`results/run31-threads.md`](results/run31-threads.md)).
+- **Run 32**: the same for C ([`results/run32-check.md`](results/run32-check.md),
+  [`results/run32-threads.md`](results/run32-threads.md)).
+
+### On one thread
+
+Every build decoded every workload to the same output.
+
+| | native | wasm |
+|---|---:|---:|
+| B, run 30, geomean of the 10 workloads | +0.4% | +0.2% |
+| B, run 31, `x-ray` | +3.0% | +0.7% |
+| C, run 32, `x-ray` | +2.8% | +0.9% |
+| C, run 32, the dictionary frames | +1.6% | +2.9% |
+
+Every other workload was within ±1.9% of A, inside or near its spread.
+
+`x-ray` is the one that moved beyond its spread natively. `perf stat` over its passes (lab2,
+vCPU 2) does not count more work:
+
+| | instructions a pass | cycles a pass |
+|---|---:|---:|
+| A | 104.9 M | 33.3–33.7 M |
+| C | 104.5 M | 34.1–34.3 M |
+
+C runs 0.4% fewer instructions in 2–3% more cycles: the hot loops sit elsewhere in the
+binary, not more work done. The table of pairs' build in a BMI2 build again (C) did not move
+it.
+
+### On several threads (run 32)
+
+[`harness/threads.sh`](harness/threads.sh) times `decode_all_parallel` on 1 to 8 threads:
+
+- **natively** by [`examples/decode_parallel.rs`](../../examples/decode_parallel.rs), built
+  with build.sh's profile;
+- **in wasm** by the example's `bench.mjs`, the module on a pool of Node 26's workers.
+
+A figure is the median of decodes repeated for 2 s and at least 3 times, unpinned. In wasm it
+is the decode alone, in the module, without the copies of the input in and the output out.
+
+It adds a workload: **Silesia in frames of 4 MiB**, `silesia.tar` cut into 4 MiB pieces, each
+`zstd -3`'d on its own and the frames put back to back (51 frames, 66.5 MB). That is what
+`pzstd` or zstd's seekable format write, and decodes to the same tar.
+
+ms a decode, then how many times faster than on one thread.
+
+| workload | native, 1 | native, 4 | native, 8 | wasm, 1 | wasm, 4 | wasm, 8 |
+|---|---:|---:|---:|---:|---:|---:|
+| Silesia in frames of 4 MiB | 218.96 | 76.84 (2.85×) | 46.17 (4.74×) | 289.30 | 102.63 (2.82×) | 63.98 (4.52×) |
+| the GitHub frames | 15.96 | 5.44 (2.93×) | 3.52 (4.53×) | 22.73 | 7.36 (3.09×) | 4.59 (4.95×) |
+| the GitHub frames with their dictionary | 4.61 | 2.90 (1.59×) | 2.46 (1.87×) | 6.19 | 3.37 (1.84×) | 2.52 (2.46×) |
+| `x-ray` | 10.03 | 5.83 (1.72×) | 4.03 (2.49×) | 11.50 | 5.99 (1.92×) | 4.92 (2.34×) |
+| `nci` | 23.55 | 17.07 (1.38×) | 16.43 (1.43×) | 27.62 | 18.71 (1.48×) | 17.76 (1.56×) |
+| silesia `-3` | 221.30 | 157.47 (1.41×) | 131.76 (1.68×) | 297.13 | 190.55 (1.56×) | 174.20 (1.71×) |
+| silesia `-19` | 233.35 | 159.12 (1.47×) | 140.02 (1.67×) | 313.77 | 206.91 (1.52×) | 179.93 (1.74×) |
+| silesia `--fast=4` | 145.20 | 127.58 (1.14×) | 94.88 (1.53×) | 186.84 | 152.72 (1.22×) | 117.88 (1.59×) |
+
+2, 3 and 6 threads are in the results.
+
+- **Independent frames scale**: 4.5–5.0 times as fast on 8 threads, on lab2's 4 cores of 2
+  threads each, natively and in wasm alike. The dictionary frames gain less: they are the
+  quickest per byte, so what stays on one thread weighs more. That is finding the frames, and
+  putting the runs' outputs together.
+- **One frame gets 1.4–2.5 times as fast.**
+  - Its sequences' execution stays on one thread. On one thread it was about half of a decode
+    (the WSL workstation, silesia `-3`: tables 25 ms, literals and sequences 148 ms, execution
+    177 ms).
+  - Execution includes the window's copy into the output and the checksum's hash, about a
+    fifth of it (40 of 186 ms there).
+  - Execution also slows as the other threads work beside it, from 177 ms alone to 190, 208
+    and 230 ms on 2, 4 and 6 threads there.
+  - `x-ray`, nearly all Huffman literals, gains most. The Silesia tars, most of whose output
+    comes from matches, gain least, `--fast=4`'s raw literals least of all.
+- **2 and 3 threads move from run to run on lab2.**
+  - Run 31's and run 32's figures differ by up to a third. For one thread against two, on
+    the GitHub frames and `--fast=4`, pinning to vCPUs 0 and 2 (separate cores, by `lscpu`)
+    gave what pinning to 0 and 1 (one core) did. The VM's vCPUs may not be the host's.
+  - Two threads were slower than one now and then: the dictionary frames 0.72× natively in
+    run 32 (1.24× in wasm), `--fast=4` 0.97× natively on 3 threads.
+  - From 4 threads up they differ less: up to a quarter on the dictionary frames, the
+    quickest workload, and up to 14% on the rest. The split frames' batches changed between
+    B and C, so not all of that is noise.
+- **In wasm the threads gain about as much as natively**: within 0.25× of it on 8 threads,
+  but more on both GitHub sets (4.95× to 4.53×, and 2.46× to 1.87× with the dictionary). The module's threads are Node's
+  workers (`worker_threads`) on a shared `WebAssembly.Memory`. In headless
+  Chrome 155 on the WSL workstation, silesia `-3` took 562 ms on one thread and 298 ms on six,
+  the GitHub frames 43 ms and 13 ms.
+
 ## Running it again
 
 ### On any machine
@@ -2148,6 +2273,12 @@ python3 -I docs/benchmarks/harness/summary.py "$SCRATCH/results/run.jsonl" M
   whose builds decoded to different output (`none` when all agree).
 
 A run of one variant and libzstd, three rounds, took about six minutes on lab2 (run 29); `ROUNDS=1` is a quick check that everything builds and decodes.
+
+**On several threads**: `docs/benchmarks/harness/threads.sh "$SCRATCH/results/threads.jsonl"`,
+then `harness/threads-summary.py` on its output (run 32). It needs the nightly of
+`examples/wasm-threads` (rustup installs it) and `wasm-bindgen-cli` 0.2.130, and makes
+`corpus-threads/silesia.tar.l3.4M-frames.zst` from `corpus-src/silesia.tar`, outside
+`corpus/`, which `run.sh` runs all of. It takes about four minutes.
 
 ### What the scripts do
 

@@ -484,7 +484,10 @@ impl From<HuffmanTableError> for DictionaryDecodeError {
 pub enum FrameDecoderError {
     ReadFrameHeaderError(ReadFrameHeaderError),
     FrameHeaderError(FrameHeaderError),
-    WindowSizeTooBig { requested: u64, max: u64 },
+    WindowSizeTooBig {
+        requested: u64,
+        max: u64,
+    },
     DictionaryDecodeError(DictionaryDecodeError),
     FailedToReadBlockHeader(BlockHeaderReadError),
     FailedToReadBlockBody(DecodeBlockContentError),
@@ -494,7 +497,14 @@ pub enum FrameDecoderError {
     FailedToDrainDecodebuffer(Error),
     FailedToSkipFrame,
     TargetTooSmall,
-    DictNotProvided { dict_id: u32 },
+    DictNotProvided {
+        dict_id: u32,
+    },
+    /// The frame's checksum is not that of what it decoded to.
+    ChecksumMismatch {
+        expected: u32,
+        calculated: u32,
+    },
 }
 
 #[cfg(feature = "std")]
@@ -569,6 +579,15 @@ impl core::fmt::Display for FrameDecoderError {
                 write!(
                     f,
                     "Frame header specified dictionary id 0x{dict_id:X} that wasnt provided by add_dict() or reset_with_dict()"
+                )
+            }
+            FrameDecoderError::ChecksumMismatch {
+                expected,
+                calculated,
+            } => {
+                write!(
+                    f,
+                    "The frame's checksum is 0x{expected:08X}, and what it decoded to hashes to 0x{calculated:08X}"
                 )
             }
         }

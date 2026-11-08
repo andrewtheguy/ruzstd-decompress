@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ruzstd-mt demo</title>
+<style>
+  :root { --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --bg: #fff; --accent: #0a66c2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg: #f5f5f7; --muted: #a1a1a6; --line: #3a3a3c; --bg: #1c1c1e; --accent: #4ea1ff; }
+  }
+  body { font: 15px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg);
+         max-width: 760px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.lead { color: var(--muted); margin: 0 0 20px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 0 0 16px; }
+  legend { color: var(--muted); padding: 0 6px; }
+  label { display: block; margin: 6px 0; }
+  button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent);
+           background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  #status { min-height: 1.5em; color: var(--muted); }
+  #status.error { color: #d70015; }
+  code { font-size: 13px; }
+</style>
+</head>
+<body>
+<h1>ruzstd-decompress on several threads</h1>
+<p class="lead">A zstd decoder in WebAssembly whose decodes run on a pool of workers sharing one
+memory. Frames decode side by side; within a frame, its blocks' literals and sequences do.</p>
+
+<fieldset>
+  <legend>Input</legend>
+  <label>zstd file: <input type="file" id="file"></label>
+  <label>dictionary (optional): <input type="file" id="dict"></label>
+  <label>threads: <select id="threads"></select></label>
+  <p>
+    <button id="decode" disabled>Decode</button>
+    <button id="compare" class="secondary" disabled>Compare thread counts</button>
+    <button id="save" class="secondary" disabled>Save output</button>
+  </p>
+</fieldset>
+
+<div id="status"></div>
+<table id="results" hidden>
+  <thead><tr><th>threads</th><th>decode (ms)</th><th>with copies (ms)</th><th>MB/s out</th><th>speed-up</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<script type="module">
+import { availableThreads, createDecoder } from "../js/ruzstd-mt.js";
+import { compileModule } from "../js/env.js";
+
+const $ = (id) => document.getElementById(id);
+const status = (text, error = false) => { $("status").textContent = text; $("status").className = error ? "error" : ""; };
+const most = availableThreads();
+for (let n = 1; n <= most; n *= 2) $("threads").add(new Option(String(n), String(n)));
+if ((most & (most - 1)) !== 0) $("threads").add(new Option(String(most), String(most)));
+$("threads").value = String(most);
+
+let module, input, dictionaries = [], output;
+const ready = () => { for (const b of ["decode", "compare"]) $(b).disabled = !input; };
+
+if (!crossOriginIsolated) {
+  status("This page is not cross-origin isolated, so it cannot share memory between workers: serve it with serve.mjs.", true);
+} else {
+  module = await compileModule();
+  status("Choose a .zst file.");
+}
+
+$("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  input = file ? new Uint8Array(await file.arrayBuffer()) : null;
+  if (input) status(`${file.name}: ${(input.length / 1e6).toFixed(1)} MB`);
+  ready();
+});
+$("dict").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  dictionaries = file ? [new Uint8Array(await file.arrayBuffer())] : [];
+});
+
+/** The median of `runs` decodes on `threads` threads. */
+async function measure(threads, runs) {
+  const decoder = await createDecoder({ threads, dictionaries, module });
+  try {
+    const times = [];
+    for (let i = 0; i < runs; i++) times.push(await decoder.decodeTimed(input));
+    output = times[0].output;
+    const median = (key) => times.map((t) => t[key]).sort((a, b) => a - b)[runs >> 1];
+    return { threads: decoder.threads, decodeMs: median("decodeMs"), ms: median("ms") };
+  } finally {
+    await decoder.close();
+  }
+}
+
+function show(rows) {
+  const body = $("results").tBodies[0];
+  body.replaceChildren();
+  const base = rows[0].decodeMs;
+  for (const r of rows) {
+    const tr = body.insertRow();
+    for (const v of [r.threads, r.decodeMs.toFixed(1), r.ms.toFixed(1),
+                     (output.length / 1e3 / r.decodeMs).toFixed(0), (base / r.decodeMs).toFixed(2) + "×"]) {
+      tr.insertCell().textContent = v;
+    }
+  }
+  $("results").hidden = false;
+  $("save").disabled = false;
+}
+
+async function run(counts) {
+  for (const b of ["decode", "compare", "save"]) $(b).disabled = true;
+  try {
+    const rows = [];
+    for (const threads of counts) {
+      status(`decoding on ${threads} thread${threads > 1 ? "s" : ""}…`);
+      rows.push(await measure(threads, counts.length > 1 ? 5 : 3));
+      show(rows);
+    }
+    status(`${(output.length / 1e6).toFixed(1)} MB out, every frame's checksum checked.`);
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    ready();
+  }
+}
+
+$("decode").addEventListener("click", () => run([Number($("threads").value)]));
+$("compare").addEventListener("click", () => {
+  const counts = [];
+  for (let n = 1; n < most; n *= 2) counts.push(n);
+  counts.push(most);
+  run(counts);
+});
+$("save").addEventListener("click", () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([output]));
+  a.download = ($("file").files[0]?.name ?? "output.zst").replace(/\.zst$/, "") || "output";
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+</script>
+</body>
+</html>

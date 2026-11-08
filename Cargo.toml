@@ -6,7 +6,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/andrewtheguy/ruzstd-decompress"
 description = "A decoder for the zstd compression format"
-exclude = ["decodecorpus_files/*", "dict_tests/*", "fuzz_decodecorpus/*"]
+exclude = ["decodecorpus_files/*", "dict_tests/*", "fuzz_decodecorpus/*", "examples/wasm-threads/*"]
 readme = "Readme.md"
 keywords = ["zstd", "zstandard", "decompression"]
 categories = ["compression"]
@@ -14,6 +14,8 @@ categories = ["compression"]
 [dependencies]
 # Locked behind the `hash` feature flag
 twox-hash = { version = "2.1", default-features = false, features = ["xxhash64"], optional = true }
+# Locked behind the `rayon` feature flag: decoding on the threads of a rayon pool.
+rayon = { version = "1.10", optional = true }
 
 # Internal feature, only used when building as part of libstd, not part of the
 # stable interface of this crate.
@@ -31,11 +33,22 @@ zstd = "0.14"
 default = ["hash", "std"]
 hash = ["dep:twox-hash"]
 std = []
+# `FrameDecoder::decode_all_parallel`, on the threads of the rayon pool it is called in. In
+# WebAssembly, a pool of the page's workers on a shared memory: see examples/wasm-threads.
+rayon = ["std", "dep:rayon"]
 
 # Internal feature, only used when building as part of libstd, not part of the
 # stable interface of this crate.
 rustc-dep-of-std = ["dep:core", "dep:alloc"]
 
+# cargo-fuzz builds with `--cfg fuzzing`, under which the parallel decoder splits small frames too.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
 [[bench]]
 name = "decode_all"
 harness = false
+
+[[example]]
+name = "decode_parallel"
+required-features = ["rayon"]

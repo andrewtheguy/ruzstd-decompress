@@ -96,6 +96,19 @@ the raw lines in the `.jsonl` beside it.
   times their native time, 1.29 by geomean; the dictionary frames most (1.55), the GitHub
   frames next (1.42), the video clip's raw blocks about the same.
 
+## On several threads
+
+`FrameDecoder::decode_all_parallel` (the `rayon` feature) decodes on a pool's threads, in
+wasm on a pool of workers (`examples/wasm-threads`). Run 32 of the [README](README.md)
+(2026-11-08, lab2, 8 threads against 1):
+
+- **Inputs of many frames** got 4.5–5.0 times as fast natively and in wasm: Silesia in frames
+  of 4 MiB, and the GitHub frames. With their dictionary, 1.9× natively and 2.5× in wasm.
+- **One frame** got 1.4–2.5 times as fast: `x-ray` most, the Silesia tars 1.5–1.7×. Its
+  sequences are executed on one thread, which is about half of a decode.
+
+On one thread it decodes as before (run 30, geomean +0.4% natively and +0.2% in wasm).
+
 ## Running it again
 
 On any machine: "On any machine", under "Running it again" in the [README](README.md), which makes

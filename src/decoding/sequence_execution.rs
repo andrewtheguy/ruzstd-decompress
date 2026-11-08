@@ -1,6 +1,8 @@
 use super::decode_buffer::{DecodeBuffer, LITERALS_PADDING};
 use crate::blocks::sequence_section::Sequence;
 use crate::decoding::errors::ExecuteSequencesError;
+#[cfg(feature = "rayon")]
+use alloc::vec::Vec;
 
 /// Executes sequences one at a time, as they are decoded, so they never have to be stored.
 ///
@@ -140,6 +142,131 @@ impl<'a> SequenceExecutor<'a> {
         );
         Ok(())
     }
+}
+
+/// Where the sequences' loop puts each sequence it decodes: executed at once, by a
+/// [`SequenceExecutor`], or kept for later, by a [`SequenceStore`], for a block whose
+/// sequences are decoded on another thread than the one executing them. The loop is the same
+/// code for both, made for each.
+pub trait SequenceSink {
+    /// The sink's state over a run of the fast loop, in its locals (see [`RawRun`]).
+    type Run;
+    /// What the run hands back for [`Self::execute_slow`]: nothing, for a sink that has no slow
+    /// path.
+    type Slow;
+    fn raw_run(&mut self) -> Self::Run;
+    fn finish_raw(&mut self, run: Self::Run);
+    /// One sequence, in the run.
+    ///
+    /// # Safety
+    ///
+    /// As [`RawRun::execute`]: the sink is used only through `run`, from [`Self::raw_run`],
+    /// until [`Self::finish_raw`] takes it back.
+    unsafe fn execute(
+        run: &mut Self::Run,
+        ll: u32,
+        ml: u32,
+        of: u32,
+    ) -> Result<Option<Self::Slow>, ExecuteSequencesError>;
+    fn execute_slow(&mut self, slow: Self::Slow) -> Result<(), ExecuteSequencesError>;
+    fn execute_out_of_line(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError>;
+}
+
+impl SequenceSink for SequenceExecutor<'_> {
+    type Run = RawRun;
+    type Slow = SlowSequence;
+    #[inline(always)]
+    fn raw_run(&mut self) -> RawRun {
+        SequenceExecutor::raw_run(self)
+    }
+    #[inline(always)]
+    fn finish_raw(&mut self, run: RawRun) {
+        SequenceExecutor::finish_raw(self, run)
+    }
+    #[inline(always)]
+    unsafe fn execute(
+        run: &mut RawRun,
+        ll: u32,
+        ml: u32,
+        of: u32,
+    ) -> Result<Option<SlowSequence>, ExecuteSequencesError> {
+        // SAFETY: the caller keeps to the run's contract.
+        unsafe { run.execute(ll, ml, of) }
+    }
+    #[inline(always)]
+    fn execute_slow(&mut self, slow: SlowSequence) -> Result<(), ExecuteSequencesError> {
+        SequenceExecutor::execute_slow(self, slow)
+    }
+    #[inline(always)]
+    fn execute_out_of_line(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError> {
+        SequenceExecutor::execute_out_of_line(self, seq)
+    }
+}
+
+/// A block's sequences, kept as they are decoded, to be executed later by
+/// [`execute_sequences`]: what the offsets mean, and whether the literals and the window have
+/// what they ask for, is left to then.
+#[cfg(feature = "rayon")]
+pub struct SequenceStore {
+    pub sequences: Vec<Sequence>,
+}
+
+#[cfg(feature = "rayon")]
+impl SequenceSink for SequenceStore {
+    type Run = Vec<Sequence>;
+    type Slow = core::convert::Infallible;
+    #[inline(always)]
+    fn raw_run(&mut self) -> Vec<Sequence> {
+        core::mem::take(&mut self.sequences)
+    }
+    #[inline(always)]
+    fn finish_raw(&mut self, run: Vec<Sequence>) {
+        self.sequences = run;
+    }
+    #[inline(always)]
+    unsafe fn execute(
+        run: &mut Vec<Sequence>,
+        ll: u32,
+        ml: u32,
+        of: u32,
+    ) -> Result<Option<core::convert::Infallible>, ExecuteSequencesError> {
+        run.push(Sequence { ll, ml, of });
+        Ok(None)
+    }
+    fn execute_slow(
+        &mut self,
+        slow: core::convert::Infallible,
+    ) -> Result<(), ExecuteSequencesError> {
+        match slow {}
+    }
+    fn execute_out_of_line(&mut self, seq: Sequence) -> Result<(), ExecuteSequencesError> {
+        self.sequences.push(seq);
+        Ok(())
+    }
+}
+
+/// Execute sequences kept by a [`SequenceStore`], in order, as the fast loop executes them.
+#[cfg(feature = "rayon")]
+pub fn execute_sequences(
+    executor: &mut SequenceExecutor<'_>,
+    sequences: &[Sequence],
+) -> Result<(), ExecuteSequencesError> {
+    let mut run = executor.raw_run();
+    for seq in sequences {
+        // SAFETY: the executor is used only through `run` until `finish_raw`, and a new run is
+        // made after each use of it.
+        match unsafe { run.execute(seq.ll, seq.ml, seq.of) } {
+            Ok(None) => {}
+            Ok(Some(slow)) => {
+                executor.finish_raw(run);
+                executor.execute_slow(slow)?;
+                run = executor.raw_run();
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    executor.finish_raw(run);
+    Ok(())
 }
 
 /// A sequence for [`SequenceExecutor::execute_slow`]: where its literals start, their count,

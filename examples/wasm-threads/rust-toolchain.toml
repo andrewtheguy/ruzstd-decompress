@@ -1,0 +1,8 @@
+# The module's threads need the standard library built for a shared memory, which only a
+# nightly Cargo does (`build-std`, in .cargo/config.toml). The crate itself builds on stable.
+# A dated nightly, so the build does not change under it; rustup installs it from this file.
+[toolchain]
+channel = "nightly-2026-10-31"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
