@@ -15,9 +15,12 @@ fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut option = |name: &str| {
         let at = args.iter().position(|a| a == name)?;
-        let value = args.get(at + 1).cloned();
-        args.drain(at..(at + 2).min(args.len()));
-        value
+        let Some(value) = args.get(at + 1).cloned() else {
+            eprintln!("{name} needs a value");
+            std::process::exit(2);
+        };
+        args.drain(at..at + 2);
+        Some(value)
     };
     let dict = option("--dict");
     let threads = option("--threads").unwrap_or_else(|| {

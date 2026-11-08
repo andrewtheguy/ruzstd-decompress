@@ -38,8 +38,8 @@ NATIVE=$TARGETS/threads/release/examples/decode_parallel
 run() { # run FILE [DICT]
   local dict=()
   [ $# -gt 1 ] && dict=(--dict "$2")
-  "$NATIVE" "$1" --threads "$THREADS" "${dict[@]}" | sed 's/^{/{"platform":"native",/' >> "$OUT"
-  "$NODE" --no-warnings "$ROOT/examples/wasm-threads/bench.mjs" "$1" --threads "$THREADS" "${dict[@]}" \
+  "$NATIVE" "$1" --threads "$THREADS" ${dict[@]+"${dict[@]}"} | sed 's/^{/{"platform":"native",/' >> "$OUT"
+  "$NODE" --no-warnings "$ROOT/examples/wasm-threads/bench.mjs" "$1" --threads "$THREADS" ${dict[@]+"${dict[@]}"} \
     | sed 's/^{/{"platform":"wasm",/' >> "$OUT"
   echo "done $(basename "$1") $(date)"
 }

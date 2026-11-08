@@ -70,7 +70,8 @@ With the `rayon` feature, `FrameDecoder::decode_all_parallel` decodes a whole in
 of the rayon pool it is called in. Independent frames decode side by side. Within a large frame,
 each block's literals and sequences decode side by side, and are executed in order on one thread.
 So an input of many frames scales with the threads (4.5–5 times as fast on 8, natively and in
-WebAssembly), and a single frame gets 1.4–2.5 times as fast (`docs/benchmarks/README.md`).
+WebAssembly), but less with a dictionary (1.9 times natively, 2.5 in WebAssembly), and a single
+frame gets 1.4–2.5 times as fast (`docs/benchmarks/README.md`).
 
 ```rust, ignore
 let mut output = Vec::new();

@@ -2159,7 +2159,9 @@ Every build decoded every workload to the same output.
 
 Every other workload was within ±1.9% of A, inside or near its spread.
 
-`x-ray` is the one that moved beyond its spread natively. `perf stat` over its passes (lab2,
+`x-ray` is the one that moved beyond its spread natively. Its spread in run 32, 38.5% for A,
+is one round, round 3 at 12.17 ms; A's other four took 8.78–8.84 ms and C's five 9.01–9.09
+ms, so the +2.8%, a median of rounds, does not hang on it. `perf stat` over its passes (lab2,
 vCPU 2) does not count more work:
 
 | | instructions a pass | cycles a pass |
@@ -2224,9 +2226,10 @@ ms a decode, then how many times faster than on one thread.
   - From 4 threads up they differ less: up to a quarter on the dictionary frames, the
     quickest workload, and up to 14% on the rest. The split frames' batches changed between
     B and C, so not all of that is noise.
-- **In wasm the threads gain about as much as natively**: within 0.25× of it on 8 threads,
-  but more on both GitHub sets (4.95× to 4.53×, and 2.46× to 1.87× with the dictionary). The module's threads are Node's
-  workers (`worker_threads`) on a shared `WebAssembly.Memory`. In headless
+- **In wasm the threads gain about as much as natively**: within 0.25× of it on 8 threads on
+  all but the GitHub sets, which gain more in wasm (4.95× to 4.53×, and 2.46× to 1.87× with
+  the dictionary). The module's threads are Node's workers (`worker_threads`) on a shared
+  `WebAssembly.Memory`. In headless
   Chrome 155 on the WSL workstation, silesia `-3` took 562 ms on one thread and 298 ms on six,
   the GitHub frames 43 ms and 13 ms.
 

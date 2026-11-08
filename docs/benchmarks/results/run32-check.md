@@ -10,6 +10,9 @@ outputs differ: none
 | silesia-x-ray.l1.zst | 8.5 | 8.80 | 9.05 (+2.8%) | 38.5% |
 | **geomean vs A** | | +0.0% | +1.5% | |
 
+x-ray's spread for A is one round, round 3 at 12.17 ms; A's other four took 8.78–8.84 ms, C's
+9.01–9.09 ms, so its median and +2.8% do not hang on that round.
+
 ## wasm: ms per pass (median of rounds), and vs A
 
 | workload | MB out | A | C | spread A |

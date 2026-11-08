@@ -102,8 +102,9 @@ the raw lines in the `.jsonl` beside it.
 wasm on a pool of workers (`examples/wasm-threads`). Run 32 of the [README](README.md)
 (2026-11-08, lab2, 8 threads against 1):
 
-- **Inputs of many frames** got 4.5–5.0 times as fast natively and in wasm: Silesia in frames
-  of 4 MiB, and the GitHub frames. With their dictionary, 1.9× natively and 2.5× in wasm.
+- **Inputs of many frames, without a dictionary,** got 4.5–5.0 times as fast natively and in
+  wasm: Silesia in frames of 4 MiB, and the GitHub frames.
+- **The GitHub frames with their dictionary** got 1.9× natively and 2.5× in wasm.
 - **One frame** got 1.4–2.5 times as fast: `x-ray` most, the Silesia tars 1.5–1.7×. Its
   sequences are executed on one thread, which is about half of a decode.
 

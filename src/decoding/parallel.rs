@@ -60,6 +60,19 @@ const BATCH_BYTES_PER_THREAD: usize = if cfg!(any(test, fuzzing)) {
 /// A run of frames, decoded by one job, is at least this many bytes of them.
 const RUN_BYTES_LEAST: usize = 32 << 10;
 
+/// The most room reserved for output before it is decoded, whatever the frames' headers say:
+/// past it, the output grows as it is decoded.
+const ROOM_MOST: usize = 256 << 20;
+
+/// Room for what `frames` decode to, up to [`ROOM_MOST`].
+fn room(frames: &[Frame<'_>]) -> usize {
+    frames
+        .iter()
+        .map(Frame::room)
+        .fold(0, usize::saturating_add)
+        .min(ROOM_MOST)
+}
+
 /// Every frame of `input` decoded, appended to `output`; see
 /// [`FrameDecoder::decode_all_parallel`](super::FrameDecoder::decode_all_parallel).
 pub fn decode_all(
@@ -74,7 +87,7 @@ pub fn decode_all(
     let split_blocks = frames.len() < threads;
     let runs = runs(&frames, threads);
     if runs.len() <= 1 {
-        output.reserve(frames.iter().map(Frame::room).sum());
+        output.reserve(room(&frames));
         let mut scratch = None;
         for frame in &frames {
             decode_frame(frame, dicts, &mut scratch, output, split_blocks)?;
@@ -85,7 +98,7 @@ pub fn decode_all(
             .map(|run| {
                 // Room for what the frames say they decode to, so that it is not grown and copied
                 // as they decode.
-                let mut out = Vec::with_capacity(run.iter().map(Frame::room).sum());
+                let mut out = Vec::with_capacity(room(run));
                 let mut scratch = None;
                 for frame in *run {
                     decode_frame(frame, dicts, &mut scratch, &mut out, split_blocks)?;
@@ -116,11 +129,13 @@ struct Frame<'a> {
 
 impl Frame<'_> {
     /// Room for what the frame decodes to: what its header says, as far as its blocks can make
-    /// it, a header's word not trusted further.
+    /// it and up to [`ROOM_MOST`], a header's word not trusted further.
     fn room(&self) -> usize {
         let max_block_len = self.window_size.min(MAX_BLOCK_SIZE as usize);
         // A block takes 3 bytes at least.
-        let most = (self.body.len() / 3).saturating_mul(max_block_len);
+        let most = (self.body.len() / 3)
+            .saturating_mul(max_block_len)
+            .min(ROOM_MOST);
         self.header.frame_content_size().min(most as u64) as usize
     }
 }

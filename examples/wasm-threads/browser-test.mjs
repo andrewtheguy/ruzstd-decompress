@@ -14,7 +14,12 @@ import { fileURLToPath } from "node:url";
 const args = process.argv.slice(2);
 const option = (name, fallback) => {
   const at = args.indexOf(name);
-  return at < 0 ? fallback : args.splice(at, 2)[1];
+  if (at < 0) return fallback;
+  if (at + 1 >= args.length) {
+    console.error(`${name} needs a value`);
+    process.exit(2);
+  }
+  return args.splice(at, 2)[1];
 };
 const chrome = option("--chrome", "google-chrome");
 const threadList = option("--threads", "");
