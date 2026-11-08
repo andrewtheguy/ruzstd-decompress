@@ -64,6 +64,23 @@ recommended approach.
 For an example see the src/bin/zstd.rs file. Basically you can decode the frame until either a
 given block count has been decoded or the decodebuffer has reached a certain size. Then you can collect the bytes decoded so far and do something with them, and resume decoding the frame in a loop until the frame has been decoded completely. Collecting gives every byte as soon as its block is decoded; the decoder keeps the window that later blocks copy from by itself.
 
+### On several threads
+
+With the `rayon` feature, `FrameDecoder::decode_all_parallel` decodes a whole input on the threads
+of the rayon pool it is called in. Independent frames decode side by side. Within a large frame,
+each block's literals and sequences decode side by side, and are executed in order on one thread.
+So an input of many frames scales with the threads (4.5–5 times as fast on 8, natively and in
+WebAssembly), but less with a dictionary (1.9 times natively, 2.5 in WebAssembly), and a single
+frame gets 1.4–2.5 times as fast (`docs/benchmarks/README.md`).
+
+```rust, ignore
+let mut output = Vec::new();
+pool.install(|| decoder.decode_all_parallel(&compressed, &mut output))?;
+```
+
+In WebAssembly a thread is a worker on a shared memory: `examples/wasm-threads` is a module and
+the JavaScript that runs it on a pool of workers, in a browser or in Node.
+
 ## Roadmap
 
 1. More Performance optimizations

@@ -1,0 +1,12 @@
+{
+  "name": "ruzstd-mt",
+  "private": true,
+  "type": "module",
+  "description": "ruzstd-decompress on several threads in WebAssembly, in a browser or Node",
+  "scripts": {
+    "build": "./build.sh",
+    "serve": "node serve.mjs",
+    "bench": "node bench.mjs",
+    "test": "node test.mjs"
+  }
+}

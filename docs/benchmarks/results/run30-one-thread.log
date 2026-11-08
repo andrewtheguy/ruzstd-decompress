@@ -1,0 +1,15 @@
+total 3668
+drwxrwxr-x  2 linuxuser linuxuser   4096 Nov  8 17:05 .
+drwxrwxr-x 10 linuxuser linuxuser   4096 Nov  8 06:28 ..
+-rwxrwxr-x  1 linuxuser linuxuser 696768 Nov  8 17:05 A-native
+-rw-rw-r--  1 linuxuser linuxuser 262199 Nov  8 17:05 A.wasm
+-rwxrwxr-x  1 linuxuser linuxuser 695848 Nov  8 17:05 B-native
+-rw-rw-r--  1 linuxuser linuxuser 261526 Nov  8 17:05 B.wasm
+-rwxrwxr-x  1 linuxuser linuxuser 696736 Nov  8 06:28 M29-native
+-rw-rw-r--  1 linuxuser linuxuser 262217 Nov  8 06:28 M29.wasm
+-rwxrwxr-x  1 linuxuser linuxuser 852944 Nov  8 06:29 Z-native
+10 workloads, pinned by: taskset -c 2
+round 1 done Sun Nov  8 05:07:07 PM UTC 2026
+round 2 done Sun Nov  8 05:08:43 PM UTC 2026
+round 3 done Sun Nov  8 05:10:18 PM UTC 2026
+ALLDONE

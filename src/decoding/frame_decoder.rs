@@ -106,11 +106,9 @@ impl FrameDecoderState {
     ) -> Result<FrameDecoderState, FrameDecoderError> {
         let (frame, header_size) = frame::read_frame_header(source)?;
         let window_size = frame.window_size()?;
-        Self::check_window_size(window_size, max_window_size)?;
-        let mut decoder_scratch = DecoderScratch::new(
-            window_size as usize,
-            frame.descriptor.content_checksum_flag(),
-        );
+        let window_len = check_window_size(window_size, max_window_size)?;
+        let mut decoder_scratch =
+            DecoderScratch::new(window_len, frame.descriptor.content_checksum_flag());
         decoder_scratch
             .buffer
             .reserve(Self::initial_room(&frame, window_size));
@@ -128,13 +126,13 @@ impl FrameDecoderState {
     fn reset(&mut self, source: impl Read, max_window_size: u64) -> Result<(), FrameDecoderError> {
         let (frame_header, header_size) = frame::read_frame_header(source)?;
         let window_size = frame_header.window_size()?;
-        Self::check_window_size(window_size, max_window_size)?;
+        let window_len = check_window_size(window_size, max_window_size)?;
 
         self.frame_header = frame_header;
         self.frame_finished = false;
         self.block_counter = 0;
         self.decoder_scratch.reset(
-            window_size as usize,
+            window_len,
             self.frame_header.descriptor.content_checksum_flag(),
         );
         self.decoder_scratch
@@ -156,17 +154,22 @@ impl FrameDecoderState {
             .min(frame.frame_content_size())
             .min(u64::from(crate::common::MAX_BLOCK_SIZE)) as usize
     }
+}
 
-    /// Reject a frame whose declared window exceeds the limit, before allocation.
-    fn check_window_size(window_size: u64, max_window_size: u64) -> Result<(), FrameDecoderError> {
-        if window_size > max_window_size {
-            return Err(FrameDecoderError::WindowSizeTooBig {
-                requested: window_size,
-                max: max_window_size,
-            });
-        }
-        Ok(())
+/// A frame's declared window, as a length: rejected before allocation if it exceeds the limit,
+/// or what a `usize` holds (on 32-bit targets, a window of 4 GiB or more).
+pub(super) fn check_window_size(
+    window_size: u64,
+    max_window_size: u64,
+) -> Result<usize, FrameDecoderError> {
+    let max = max_window_size.min(usize::MAX as u64);
+    if window_size > max {
+        return Err(FrameDecoderError::WindowSizeTooBig {
+            requested: window_size,
+            max,
+        });
     }
+    Ok(window_size as usize)
 }
 
 impl Default for FrameDecoder {
@@ -618,6 +621,40 @@ impl FrameDecoder {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(feature = "rayon")]
+impl FrameDecoder {
+    /// Decode every frame of `input`, appending what they decode to to `output`, on the threads
+    /// of the rayon pool this is called in (rayon's global pool outside one): the same bytes as
+    /// [`Self::decode_all_to_vec`], with each frame's checksum checked where it has one and the
+    /// `hash` feature is on. Skippable frames are skipped. `output` is left as it was on an
+    /// error.
+    ///
+    /// Frames are decoded side by side. So are the blocks of a frame, where there are fewer
+    /// frames than threads: each block's literals and sequences are decoded on a thread of their
+    /// own, and executed in order on one, beside the next blocks' decoding. On one thread this
+    /// decodes as [`Self::decode_all_to_vec`] does.
+    ///
+    /// The dictionaries given by [`Self::add_dict`] are used, and the window most of
+    /// [`Self::set_max_window_size`]; the decoder's state, the frame [`Self::reset`] set up, is
+    /// neither used nor changed.
+    ///
+    /// In WebAssembly a thread is a worker the page starts on the module's shared memory: see
+    /// `examples/wasm-threads` in the repository. As every rayon call, this waits for the
+    /// pool's threads, which a page's main thread may not: call it from a worker.
+    pub fn decode_all_parallel(
+        &self,
+        input: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<(), FrameDecoderError> {
+        let len = output.len();
+        let result = super::parallel::decode_all(input, &self.dicts, self.max_window_size, output);
+        if result.is_err() {
+            output.truncate(len);
+        }
+        result
     }
 }
 

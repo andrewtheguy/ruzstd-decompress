@@ -2,6 +2,7 @@ use super::super::blocks::sequence_section::ModeType;
 use super::super::blocks::sequence_section::Sequence;
 use super::super::blocks::sequence_section::SequencesHeader;
 use super::scratch::FSEScratch;
+use super::sequence_table::SeqTables;
 use super::sequence_table::{ALL, SeqEntry, SeqKind, at};
 #[cfg(test)]
 use super::sequence_table::{LL_DEFAULT_ACC_LOG, LL_DEFAULT_DISTRIBUTION};
@@ -12,22 +13,37 @@ use crate::blocks::sequence_section::{
     MAX_LITERAL_LENGTH_CODE, MAX_MATCH_LENGTH_CODE, MAX_OFFSET_CODE,
 };
 use crate::decoding::errors::{DecodeSequenceError, ExecuteSequencesError};
-use crate::decoding::sequence_execution::SequenceExecutor;
+use crate::decoding::sequence_execution::SequenceSink;
 
-/// Decode the provided source as a series of sequences, executing each one as soon as it is
-/// decoded.
-pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
+/// Decode the provided source as a series of sequences, handing each one to `executor` as soon
+/// as it is decoded.
+pub fn decode_sequences<
+    E: From<DecodeSequenceError> + From<ExecuteSequencesError>,
+    S: SequenceSink,
+>(
     section: &SequencesHeader,
     source: &[u8],
     scratch: &mut FSEScratch,
-    executor: &mut SequenceExecutor<'_>,
+    executor: &mut S,
 ) -> Result<(), E> {
-    let bytes_read = maybe_update_fse_tables(section, source, scratch)?;
+    let bytes_read = update_fse_tables(section, source, scratch)?;
 
     vprintln!("Updating tables used {} bytes", bytes_read);
 
-    let bit_stream = &source[bytes_read..];
+    decode_sequences_with(section, &source[bytes_read..], &scratch.seq, executor)
+}
 
+/// [`decode_sequences`] once the tables are updated ([`update_fse_tables`]): the bitstream after
+/// the tables' descriptions, decoded with `tables`.
+pub fn decode_sequences_with<
+    E: From<DecodeSequenceError> + From<ExecuteSequencesError>,
+    S: SequenceSink,
+>(
+    section: &SequencesHeader,
+    bit_stream: &[u8],
+    tables: &SeqTables,
+    executor: &mut S,
+) -> Result<(), E> {
     // Where the stream's last bytes are copied after zeros, so that the fast loop goes on to
     // its end (see `BitReaderReversed::padded`), and what that adds to the bits remaining.
     let mut padded = [0u8; PADDING + PADDED_LEFT];
@@ -46,10 +62,10 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
 
     // An RLE table is a table of one state that reads no bits, so it needs no case of its own.
     // The three tables are one array, and a state an index into it (see `SeqTables`).
-    let (ll_log, ll_start) = scratch.seq.first_state(SeqKind::LiteralLength)?;
-    let (of_log, of_start) = scratch.seq.first_state(SeqKind::Offset)?;
-    let (ml_log, ml_start) = scratch.seq.first_state(SeqKind::MatchLength)?;
-    let table = scratch.seq.entries()?;
+    let (ll_log, ll_start) = tables.first_state(SeqKind::LiteralLength)?;
+    let (of_log, of_start) = tables.first_state(SeqKind::Offset)?;
+    let (ml_log, ml_start) = tables.first_state(SeqKind::MatchLength)?;
+    let table = tables.entries()?;
     let ll_state = ll_start + br.get_bits(ll_log) as usize;
     let of_state = of_start + br.get_bits(of_log) as usize;
     let ml_state = ml_start + br.get_bits(ml_log) as usize;
@@ -69,7 +85,7 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
     let mut seq_idx = 0;
     let mut states = [ll_state, ml_state, of_state];
     // One call for both, so that a small block pays for the loop's setup once.
-    if fast_sequences::<E>(
+    if fast_sequences::<E, S>(
         &mut br,
         &mut padded,
         table,
@@ -134,12 +150,16 @@ pub fn decode_sequences<E: From<DecodeSequenceError> + From<ExecuteSequencesErro
 /// On x86-64 it runs in a build with BMI2 where the processor has it, as libzstd's does: its
 /// shifts take their count from any register, where the others' take it only from `cl`.
 #[inline(always)]
-fn fast_sequences<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
+fn fast_sequences<
+    'x,
+    E: From<DecodeSequenceError> + From<ExecuteSequencesError>,
+    S: SequenceSink,
+>(
     br: &mut BitReaderReversed<'x>,
     padded: &'x mut [u8; PADDING + PADDED_LEFT],
     table: &[SeqEntry; ALL],
     states: &mut [usize; 3],
-    executor: &mut SequenceExecutor<'_>,
+    executor: &mut S,
     seq_idx: &mut u32,
     num_sequences: u32,
 ) -> Result<bool, E> {
@@ -156,12 +176,16 @@ fn fast_sequences<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>
 /// [`fast_sequences_body`] built with BMI2.
 #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
 #[target_feature(enable = "bmi2")]
-fn fast_sequences_bmi2<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
+fn fast_sequences_bmi2<
+    'x,
+    E: From<DecodeSequenceError> + From<ExecuteSequencesError>,
+    S: SequenceSink,
+>(
     br: &mut BitReaderReversed<'x>,
     padded: &'x mut [u8; PADDING + PADDED_LEFT],
     table: &[SeqEntry; ALL],
     states: &mut [usize; 3],
-    executor: &mut SequenceExecutor<'_>,
+    executor: &mut S,
     seq_idx: &mut u32,
     num_sequences: u32,
 ) -> Result<bool, E> {
@@ -171,12 +195,16 @@ fn fast_sequences_bmi2<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
 /// The body of [`fast_sequences`]: on `br` while it can refill fast, then on its padded copy in
 /// `padded` (see [`BitReaderReversed::padded`]), to which it sets `br`, returning `true`.
 #[inline(always)]
-fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesError>>(
+fn fast_sequences_body<
+    'x,
+    E: From<DecodeSequenceError> + From<ExecuteSequencesError>,
+    S: SequenceSink,
+>(
     br: &mut BitReaderReversed<'x>,
     padded: &'x mut [u8; PADDING + PADDED_LEFT],
     table: &[SeqEntry; ALL],
     states: &mut [usize; 3],
-    executor: &mut SequenceExecutor<'_>,
+    executor: &mut S,
     seq_idx: &mut u32,
     num_sequences: u32,
 ) -> Result<bool, E> {
@@ -235,7 +263,8 @@ fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
                     // SAFETY: the executor is used only through `run` until `finish_raw`,
                     // and a new run is made after each use of it.
                     let slow = unsafe {
-                        run.execute(
+                        S::execute(
+                            &mut run,
                             ll.base_value + ll_add as u32,
                             ml.base_value + ml_add as u32,
                             of.base_value + of_add as u32,
@@ -268,7 +297,8 @@ fn fast_sequences_body<'x, E: From<DecodeSequenceError> + From<ExecuteSequencesE
                 let ll_add = take_bits(&mut window, ll.nb_add_bits);
                 // SAFETY: as in the loop above.
                 let slow = unsafe {
-                    run.execute(
+                    S::execute(
+                        &mut run,
                         ll.base_value + ll_add as u32,
                         ml.base_value + ml_add as u32,
                         of.base_value + of_add as u32,
@@ -325,7 +355,9 @@ pub const ML_MAX_LOG: u8 = 9;
 /// "The maximum accuracy log for the offset table is 8."
 pub const OF_MAX_LOG: u8 = 8;
 
-fn maybe_update_fse_tables(
+/// Update `scratch`'s tables as the section's modes say, from the descriptions at the start of
+/// `source`; returns the bytes they took.
+pub fn update_fse_tables(
     section: &SequencesHeader,
     source: &[u8],
     scratch: &mut FSEScratch,

@@ -12,8 +12,11 @@ cargo-fuzz = true
 [dependencies]
 zstd = "0.5.1"
 
+rayon = "1.10"
+
 [dependencies.ruzstd-decompress]
 path = ".."
+features = ["rayon"]
 [dependencies.libfuzzer-sys]
 git = "https://github.com/rust-fuzz/libfuzzer-sys.git"
 
@@ -32,3 +35,7 @@ path = "fuzz_targets/decode_dict.rs"
 [[bin]]
 name = "interop"
 path = "fuzz_targets/interop.rs"
+
+[[bin]]
+name = "decode_parallel"
+path = "fuzz_targets/decode_parallel.rs"

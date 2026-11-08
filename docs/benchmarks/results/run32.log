@@ -1,0 +1,31 @@
+total 4608
+drwxrwxr-x  2 linuxuser linuxuser   4096 Nov  8 17:56 .
+drwxrwxr-x 11 linuxuser linuxuser   4096 Nov  8 17:45 ..
+-rwxrwxr-x  1 linuxuser linuxuser 696768 Nov  8 17:05 A-native
+-rw-rw-r--  1 linuxuser linuxuser 262199 Nov  8 17:05 A.wasm
+-rwxrwxr-x  1 linuxuser linuxuser 695848 Nov  8 17:47 B-native
+-rw-rw-r--  1 linuxuser linuxuser 261526 Nov  8 17:47 B.wasm
+-rwxrwxr-x  1 linuxuser linuxuser 696592 Nov  8 17:56 C-native
+-rw-rw-r--  1 linuxuser linuxuser 261526 Nov  8 17:56 C.wasm
+-rwxrwxr-x  1 linuxuser linuxuser 696736 Nov  8 06:28 M29-native
+-rw-rw-r--  1 linuxuser linuxuser 262217 Nov  8 06:28 M29.wasm
+-rwxrwxr-x  1 linuxuser linuxuser 852944 Nov  8 06:29 Z-native
+4 workloads, pinned by: taskset -c 2
+round 1 done Sun Nov  8 05:57:15 PM UTC 2026
+round 2 done Sun Nov  8 05:57:48 PM UTC 2026
+round 3 done Sun Nov  8 05:58:21 PM UTC 2026
+round 4 done Sun Nov  8 05:58:54 PM UTC 2026
+round 5 done Sun Nov  8 05:59:28 PM UTC 2026
+ALLDONE
+   Compiling ruzstd-decompress v0.9.2-alpha.12 (/home/linuxuser/codes/staging-area/ruzstd-decompress)
+   Compiling ruzstd-mt v0.0.0 (/home/linuxuser/codes/staging-area/ruzstd-decompress/examples/wasm-threads)
+    Finished `release` profile [optimized] target(s) in 3.88s
+done silesia.tar.l3.zst Sun Nov  8 06:00:08 PM UTC 2026
+done silesia.tar.l19.zst Sun Nov  8 06:00:37 PM UTC 2026
+done silesia.tar.fast4.zst Sun Nov  8 06:01:05 PM UTC 2026
+done silesia-x-ray.l1.zst Sun Nov  8 06:01:30 PM UTC 2026
+done silesia-nci.l3.zst Sun Nov  8 06:01:55 PM UTC 2026
+done silesia.tar.l3.4M-frames.zst Sun Nov  8 06:02:23 PM UTC 2026
+done github.frames Sun Nov  8 06:02:48 PM UTC 2026
+done github-dict.frames Sun Nov  8 06:03:12 PM UTC 2026
+ALLDONE

@@ -1,6 +1,5 @@
 /target
 **/*.rs.bk
-Cargo.lock
 /local_corpus_files
 /local_dict_corpus_files
 /orig-zstd
@@ -11,4 +10,3 @@ fuzz/corpus
 tmp/
 CLAUDE.local.md
 .claude/settings.local.json
-!docs/benchmarks/harness/libzstd/Cargo.lock

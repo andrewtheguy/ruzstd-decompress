@@ -15,6 +15,7 @@ pub(crate) const MAX_MAX_NUM_BITS: u8 = 11;
 const TABLE_SIZE: usize = 1 << MAX_MAX_NUM_BITS;
 
 /// A Huffman decoding table contains a list of Huffman prefix codes and their associated values
+#[derive(Clone)]
 pub struct HuffmanTable {
     /// Indexed by the next `MAX_MAX_NUM_BITS` bits (see [`TABLE_SIZE`]): empty until the first
     /// table is built, so that a new decoder allocates nothing it may not use, then always
@@ -235,14 +236,49 @@ impl HuffmanTable {
         self.decode_stream_n::<N>(br3, &mut out3[at[3]..]);
     }
 
+    /// Make what [`Self::decode_4_streams_sized`] decodes a block's four streams from: the table
+    /// of pairs, when [`choose_pairs`] says it pays for its build. `regenerated` is the
+    /// literals' size decoded, `compressed_size` in the block, the table's description included.
+    ///
+    /// On x86-64 the table is built in a build with BMI2 where the processor has it, as the
+    /// streams are decoded: its shifts are by the codes' lengths.
+    pub(crate) fn prepare_4_streams(&mut self, regenerated: usize, compressed_size: usize) {
+        if !choose_pairs(regenerated, compressed_size) {
+            return;
+        }
+        #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
+        if crate::common::cpu::has_bmi2() {
+            // SAFETY: the processor has BMI2.
+            return unsafe { self.build_pairs_bmi2() };
+        }
+        self.build_pairs();
+    }
+
+    /// [`Self::build_pairs`] built with BMI2.
+    #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
+    #[target_feature(enable = "bmi2")]
+    fn build_pairs_bmi2(&mut self) {
+        self.build_pairs();
+    }
+
+    /// Whether [`Self::prepare_4_streams`] has anything to make for such a block.
+    #[cfg(feature = "rayon")]
+    pub(crate) fn needs_prepare_4_streams(
+        &self,
+        regenerated: usize,
+        compressed_size: usize,
+    ) -> bool {
+        !self.pairs_built && choose_pairs(regenerated, compressed_size)
+    }
+
     /// [`Self::decode_4_streams`], from the table of pairs when [`choose_pairs`] says it pays for
-    /// its build: `compressed_size` is the literals' size in the block, the table's description
-    /// included.
+    /// its build, which [`Self::prepare_4_streams`] has made: `compressed_size` is the literals'
+    /// size in the block, the table's description included.
     ///
     /// On x86-64 it runs in a build with BMI2 where the processor has it, as libzstd's does: its
     /// shifts take their count from any register, where the others' take it only from `cl`.
     pub(crate) fn decode_4_streams_sized(
-        &mut self,
+        &self,
         brs: &mut [BitReaderReversed<'_>; 4],
         outs: [&mut [u8]; 4],
         compressed_size: usize,
@@ -259,7 +295,7 @@ impl HuffmanTable {
     #[cfg(all(target_arch = "x86_64", not(target_feature = "bmi2")))]
     #[target_feature(enable = "bmi2")]
     fn decode_4_streams_sized_bmi2(
-        &mut self,
+        &self,
         brs: &mut [BitReaderReversed<'_>; 4],
         outs: [&mut [u8]; 4],
         compressed_size: usize,
@@ -270,14 +306,17 @@ impl HuffmanTable {
     /// The four streams decoded as [`Self::decode_4_streams_sized`] says.
     #[inline(always)]
     fn decode_4_streams_sized_body(
-        &mut self,
+        &self,
         brs: &mut [BitReaderReversed<'_>; 4],
         outs: [&mut [u8]; 4],
         compressed_size: usize,
     ) {
         let regenerated: usize = outs.iter().map(|out| out.len()).sum();
         if choose_pairs(regenerated, compressed_size) {
-            self.build_pairs();
+            assert!(
+                self.pairs_built,
+                "the table of pairs is made before it decodes"
+            );
             self.decode_4_streams_pairs(brs, outs);
         } else {
             self.decode_4_streams(brs, outs);
@@ -290,6 +329,7 @@ impl HuffmanTable {
     /// shifted to the top, index `decode` again for the second. That entry is the symbol whose
     /// code those bits start with if its code is no longer than they are, which is when the two
     /// codes together fit in the index.
+    #[inline(always)]
     fn build_pairs(&mut self) {
         if self.pairs_built {
             return;
