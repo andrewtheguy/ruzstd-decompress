@@ -1,8 +1,9 @@
 # Roadmap
 
-What to make faster next, most promising first, as of 2026-11-06 (after the
-dictionary frames in V8, run 28 of [`benchmarks/README.md`](benchmarks/README.md)). Figures from run 18 and later are
-from lab2, on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
+What to make faster next, most promising first, as of 2026-11-07 (run 29 of
+[`benchmarks/README.md`](benchmarks/README.md), a new baseline on a rebuilt lab2). Figures from
+run 29 on are from lab2's EPYC-Milan; from run 18 to 28, from lab2's EPYC-Rome before it, so
+the two sets are not comparable; all on the generic workloads (Silesia, the GitHub sample set, wlshare's tiles
 as a check); the older ones, from `perf` profiles on lab1 on the tiles, say so. The
 decoder is a generic one, natively and in WebAssembly alike.
 
@@ -10,13 +11,14 @@ Unsafe code is allowed since run 26, kept to the hot loops: the sequences' and t
 Huffman streams' loops run by raw pointers, as libzstd's, natively in a BMI2 build where the
 processor has it, and since run 27 in WebAssembly too, which had kept safe loops of its own.
 
-Natively, by geomean over the 10 workloads (run 28), ruzstd-decompress takes 0.97 times
-libzstd's time: 1.09–1.14 times on Silesia, `x-ray` included, 1.09 on the GitHub frames
-with their dictionary, 1.11 on mixed's tiles; 0.95 on the GitHub frames without it, and
-less on the raw blocks of the video clip (0.75) and terminal's tiles (0.48). In wasm, which
-libzstd is not built for here, the workloads take 1.18–1.63 times their native time (run
-28), 1.33 by geomean, the dictionary frames most, the video clip's raw blocks about the
-same; 1.50 by geomean with the safe loops (run 26).
+Natively, by geomean over the 10 workloads (run 29), ruzstd-decompress takes 0.99 times
+libzstd's time (0.97 on the EPYC-Rome, run 28): 1.23 times on mixed's tiles, 1.22 on `x-ray`
+(1.06–1.29 by round), 1.11–1.15 on the rest of Silesia, 1.11 on the GitHub frames with their
+dictionary; 0.93 on the GitHub frames without it, and less on the raw blocks of the video clip
+(0.70) and terminal's tiles (0.49). In wasm, which libzstd is not built for here, the
+workloads take 1.01–1.55 times their native time (run 29), 1.29 by geomean, the dictionary
+frames most, the video clip's raw blocks about the same; 1.50 by geomean with the safe loops
+(run 26, EPYC-Rome).
 
 ## 1. The sequences, again
 
