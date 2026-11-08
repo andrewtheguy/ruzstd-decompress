@@ -4,7 +4,18 @@
 set -e
 S=~/codes/staging-area/ruzstd-decompress-scratch
 mkdir -p $S/bin
+# Z is libzstd, from harness/libzstd (its Cargo.lock keeps zstd-sys at 1.5.7), native only.
+HARNESS=$(cd "$(dirname "$0")" && pwd)
 for v in "$@"; do
+  if [ $v = Z ]; then
+    C=$S/benchcrates/Z
+    mkdir -p $C/src
+    cp $HARNESS/libzstd/Cargo.toml $HARNESS/libzstd/Cargo.lock $C/
+    cp $HARNESS/libzstd/decode_bench_libzstd.rs $C/src/main.rs
+    (cd $C && CARGO_TARGET_DIR=~/codes/staging-area/ruzstd-decompress-target/Z ~/.cargo/bin/cargo build -q --release --locked)
+    cp ~/codes/staging-area/ruzstd-decompress-target/Z/release/decode_bench_libzstd $S/bin/Z-native
+    continue
+  fi
   C=$S/benchcrates/$v
   mkdir -p $C/src
   # The harness of the variant's own commit if it has one, since the decoder's API changes
