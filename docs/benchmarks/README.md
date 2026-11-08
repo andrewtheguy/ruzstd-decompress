@@ -2056,6 +2056,55 @@ the GitHub frames' +0.0%, silesia `-3`'s −0.2%, the instructions 0.5–4.2% mo
   and on arm64 (`remote-lxc`). AddressSanitizer under the fuzzers (`decode`, `decode_dict`,
   `interop`, three minutes each) and Miri over AGENTS.md's tests found nothing.
 
+## 2026-11-07: a new baseline, on a rebuilt lab2 and reproducible corpora
+
+No change to the decoder. Its two reasons:
+
+- **lab2 was rebuilt** on 2026-11-07, on a new address and a new processor: an
+  `AMD EPYC-Milan Processor` (AVX2 and BMI2, no AVX-512), 8 vCPUs (4 cores, 2 threads),
+  15 GB, Debian 13, kernel 6.12.115, swap off; from an `AMD EPYC-Rome Processor`, 4 vCPUs and
+  8 GB. rustc 1.99.1, binaryen 120 and Node 26.13.0 (V8 14.6) as before; each run still
+  pinned to vCPU 2. Timings from before run 29 are not comparable with later ones.
+- **The Silesia corpus was not reproducible.** Its tar was made by `tar` of `unzip`'s
+  output, so its headers held the user's name and times in the time zone of the `unzip`,
+  and that tar went with the old lab2: another machine could not make the same `.zst` files.
+  [`make-corpus.sh`](harness/make-corpus.sh) now makes every general corpus on any machine,
+  checked against [`corpus.sha256`](harness/corpus.sha256) ("Running it again", below).
+  Its Silesia `.zst` files are 289–475 bytes from those of runs 16–28 (66,217,517 bytes at
+  `-3`, from 66,217,806); every other file is the same as in those runs, and lab2 and this
+  repository's working machine made the same bytes.
+
+The run (run 29), on lab2 after a restart: M29 is `main` at `ff75fa7` (v0.9.2-alpha.12,
+run 28's B28 merged), with libzstd. Every build decoded every workload to the same output,
+and the tiles and frames to run 28's hashes.
+
+| workload | native M29 | wasm M29 | libzstd | native ÷ libzstd | wasm ÷ native |
+|---|---:|---:|---:|---:|---:|
+| silesia `-3` | 203.09 | 276.64 | 176.50 | 1.15 | 1.36 |
+| silesia `-19` | 208.97 | 278.37 | 187.56 | 1.11 | 1.33 |
+| silesia `--fast=4` | 132.81 | 173.25 | 116.25 | 1.14 | 1.30 |
+| `nci` | 19.27 | 25.30 | 17.09 | 1.13 | 1.31 |
+| `x-ray` | 8.79 | 9.99 | 7.23 | 1.22 | 1.14 |
+| the GitHub frames with their dictionary | 3.49 | 5.43 | 3.14 | 1.11 | 1.55 |
+| the GitHub frames | 15.28 | 21.69 | 16.48 | 0.93 | 1.42 |
+| mixed's tiles 2880x1800@2 | 426.10 | 524.85 | 345.54 | 1.23 | 1.23 |
+| the video clip | 13.69 | 13.87 | 19.47 | 0.70 | 1.01 |
+| terminal's tiles 2880x1800@2 | 0.66 | 0.88 | 1.36 | 0.49 | 1.33 |
+| **geomean** | | | | **0.99** | **1.29** |
+
+ms a pass, the median of three rounds. Every workload:
+[`results/run29-lab2-rebuilt.md`](results/run29-lab2-rebuilt.md).
+
+- The rounds were closer than on the old lab2: natively 0.3–3.1%, but the dictionary frames
+  6.5%; in wasm 0.9–4.3%; libzstd 0.4–1.6%, but `x-ray` 19.9% (6.84, 7.23 and 8.28 ms), so
+  that `x-ray` takes ruzstd-decompress 1.06–1.29 times libzstd's time, 1.22 by the median.
+- Against run 28's B28, the same code: every figure is 2.5–18.4% lower (libzstd 2.5–17.9%,
+  ruzstd-decompress 6.2–17.1% natively and 9.1–18.4% in wasm), from the processor, and
+  the ratios moved. Natively the geomean went from 0.97 to 0.99 times libzstd's time:
+  libzstd gained more on mixed's tiles (1.11 to 1.23) and, less surely, `x-ray` (1.09 to 1.22), and
+  ruzstd-decompress more on the video clip (0.75 to 0.70). In wasm it went from 1.33 to 1.29
+  times the native time.
+
 ## Running it again
 
 The scripts assume `../devtools`' layout, everything under
@@ -2069,32 +2118,47 @@ and results.
    [`dump-tiles.sh`](harness/dump-tiles.sh), which writes
    `SCENARIO-SIZE-PICTURE.tiles`: a byte for the kind (0 planar, 1 still), `w`
    and `h` as u16, the length as u32, little endian, then the body.
-2. **The general corpora**: the Silesia corpus as one tar, `zstd -3` and
-   `zstd -19`, and the first minute of `Multicolored_Explosions-4k.webm` (4K
-   VP9 video, no audio), cut without re-encoding (`ffmpeg -t 60 -c copy -an`:
-   129,927,535 bytes, SHA-256
-   `ba8a6a586890f80bd78a3a5180644d867882f7c5370c63573b5aec582ed66e54`),
-   `zstd -T0 -3`, into `corpus/`. The video is already compressed, so zstd
-   stores it as it is, in raw blocks: it measures that path. At `-19` it is the
-   same, so it is left out. `enwik9` at both levels was the third until
-   2026-11-04. It is text, which Silesia has, and it was the slowest workload.
-   Since 2026-11-05 (zstd 1.5.7): `silesia.tar.fast4.zst` (`zstd -T0
-   --fast=4`), `silesia-x-ray.l1.zst` (`zstd -1` of `x-ray`) and
-   `silesia-nci.l3.zst` (`zstd -3` of `nci`), from `silesia.zip` (SHA-256
-   `0626e25f…63c77af`); and from zstd's
-   [`github_users_sample_set.tar.zst`](https://github.com/facebook/zstd/releases/download/v1.1.3/github_users_sample_set.tar.zst)
-   (SHA-256 `e35074ab…89fc0de1`), its files in name order, each `zstd -3`'s
-   frame back to back: `github.frames`, and with `zstd --train -r` of them,
-   `github-dict.dict`, `github-dict.frames` (`zstd -3 -D`). `run.sh` takes
-   `NAME.frames` in the `frames` mode, with `NAME.dict` if there is one. Of the
-   tiles, only `mixed-2880x1800@2-lossless-200M.tiles` and
-   `terminal-2880x1800@2-lossless.tiles` stay in `tiles/`; the rest are in
-   `tiles-retired/`.
+2. **The general corpora**: [`make-corpus.sh`](harness/make-corpus.sh) `[SCRATCH]` writes
+   `corpus/` from `corpus-src/`, downloading what can be downloaded, and checks every file
+   against [`corpus.sha256`](harness/corpus.sha256), so any machine with zstd 1.5.7 and GNU
+   tar makes the same bytes (lab2 and this repository's working machine did, 2026-11-07).
+   What it makes:
+   - From `silesia.zip` (SHA-256 `0626e25f…63c77af`): the Silesia corpus as one tar (its 12
+     files in the zip's order, owner 0, mode 0644, mtime 0, GNU format), `zstd -3`, `-19`
+     and `--fast=4`; `silesia-x-ray.l1.zst` (`zstd -1` of `x-ray`) and `silesia-nci.l3.zst`
+     (`zstd -3` of `nci`).
+   - From zstd's
+     [`github_users_sample_set.tar.zst`](https://github.com/facebook/zstd/releases/download/v1.1.3/github_users_sample_set.tar.zst)
+     (SHA-256 `e35074ab…89fc0de1`): its files in name order (case-insensitive, lower case
+     first), each `zstd -3`'s frame back to back, `github.frames`; a dictionary trained on
+     them (`zstd --train`, 110 KB), `github-dict.dict`, given its files in the order of
+     [`github-dict-order.txt`](harness/github-dict-order.txt), since the training depends
+     on it; and `github-dict.frames` (`zstd -3 -D`). `run.sh` takes `NAME.frames` in the
+     `frames` mode, with `NAME.dict` if there is one.
+   - The first minute of `Multicolored_Explosions-4k.webm` (4K VP9 video, no audio), cut
+     without re-encoding (`ffmpeg -t 60 -c copy -an`: 129,927,535 bytes, SHA-256
+     `ba8a6a586890f80bd78a3a5180644d867882f7c5370c63573b5aec582ed66e54`), `zstd -T0 -3`.
+     It cannot be downloaded again: the script takes it from `VIDEO`, by default the backup
+     drive's copy (`ruzstd-decompress-artifacts/corpus/`, which holds every file above with
+     its `SHA256SUMS`). The video is already compressed, so zstd stores it as it is, in raw
+     blocks: it measures that path. At `-19` it is the same, so it is left out.
+
+   What would make the bytes differ, and what the script pins: a tar's headers hold the
+   owner's name, the files' times (from a zip, in the time zone of the `unzip`) and their
+   order (a locale's sort); `zstd --train -r` takes its files in the directory's order; and
+   zstd writes other bytes for input from a pipe, of no known size. The number of threads
+   does not change its output (`-T1` to `-T0` alike; `--single-thread` would). The Silesia tar of runs 16–28 was made on lab2 without these
+   and went with that machine: its `.zst` files are 289–475 bytes from the script's, which
+   run 29 measures from. Every other file is the same as in those runs. `enwik9` at both
+   levels was a workload until 2026-11-04. It is text, which Silesia has, and it was the
+   slowest workload. Of the tiles, only `mixed-2880x1800@2-lossless-200M.tiles` and
+   `terminal-2880x1800@2-lossless.tiles` stay in `tiles/`, from the backup drive
+   (`ruzstd-decompress-artifacts/tiles/`, with their `SHA256SUMS`), which has the rest too.
 3. **The variants**: a tree each in `variants/A`… (a `git archive` of the
    commit, with the patches above), then [`build.sh`](harness/build.sh) `A B …`
    on the timing machine, with the harness of the variant's own tree where it has
-   one; [`libzstd/`](harness/libzstd) is built the same way
-   into `bin/Z-native`.
+   one; `build.sh Z` builds libzstd, [`libzstd/`](harness/libzstd) at its
+   `Cargo.lock`'s zstd-sys (1.5.7), into `bin/Z-native`.
 4. [`run.sh`](harness/run.sh) `OUT.jsonl VARIANT…` (wasm through
    [`run-wasi.mjs`](harness/run-wasi.mjs); `PLATFORMS=native` for native alone),
    on a quiet machine, then [`summary.py`](harness/summary.py) `OUT.jsonl
