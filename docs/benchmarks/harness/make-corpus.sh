@@ -7,7 +7,7 @@
 #
 # Needs: curl, unzip, GNU tar (TAR=gtar on macOS), zstd 1.5.7 (another version compresses
 # differently), sha256sum (or shasum). And the video clip, which cannot be downloaded again: VIDEO,
-# by default the backup drive's copy; without it the clip is left out and its check fails.
+# by default the backup drive's copy; without it the clip and its check are left out.
 #
 # What makes the bytes reproducible, since a tar's headers and zstd's choices are in them:
 # - silesia.tar: the zip's 12 files in the zip's order, owner and group 0 by number, mode 0644,
@@ -23,7 +23,7 @@ H=$(cd "$(dirname "$0")" && pwd)
 . "$H/env.sh"
 SCRATCH=${1:-$SCRATCH}
 SRC=$SCRATCH/corpus-src
-OUT=$SCRATCH/corpus
+OUT=$SCRATCH/corpus  # corpus.sha256's paths are relative to it, silesia.tar's as ../corpus-src/
 TAR=${TAR:-tar}
 VIDEO=${VIDEO:-/mnt/dasdata/backup/ruzstd-decompress-artifacts/corpus/explosions-4k-60s.webm}
 export LC_ALL=C
@@ -80,4 +80,6 @@ else
   echo "no video clip at $VIDEO (VIDEO=...): left out" >&2
 fi
 
-cd "$OUT" && sha256 -c "$H/corpus.sha256"
+cd "$OUT"
+if [ -e "$VIDEO" ]; then sha256 -c "$H/corpus.sha256"
+else grep -v ' explosions-4k-60s\.webm\.l3\.zst$' "$H/corpus.sha256" | sha256 -c -; fi

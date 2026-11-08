@@ -53,12 +53,11 @@ panic = "abort"
 
 [workspace]
 TOML
-  cd "$C"
-  export CARGO_TARGET_DIR=$TARGETS/$v
-  "$CARGO" build -q --release
-  cp "$CARGO_TARGET_DIR/release/decode_bench" "$S/bin/$v-native"
-  RUSTFLAGS="-C target-feature=+simd128,+bulk-memory" "$CARGO" build -q --release --target wasm32-wasip1
+  T=$TARGETS/$v
+  (cd "$C" && CARGO_TARGET_DIR="$T" "$CARGO" build -q --release)
+  cp "$T/release/decode_bench" "$S/bin/$v-native"
+  (cd "$C" && CARGO_TARGET_DIR="$T" RUSTFLAGS="-C target-feature=+simd128,+bulk-memory" "$CARGO" build -q --release --target wasm32-wasip1)
   "$WASM_OPT" -O3 --enable-bulk-memory --enable-nontrapping-float-to-int --enable-simd --enable-sign-ext --enable-mutable-globals \
-    "$CARGO_TARGET_DIR/wasm32-wasip1/release/decode_bench.wasm" -o "$S/bin/$v.wasm"
+    "$T/wasm32-wasip1/release/decode_bench.wasm" -o "$S/bin/$v.wasm"
 done
 ls -la "$S/bin"

@@ -2133,8 +2133,8 @@ python3 -I docs/benchmarks/harness/summary.py "$SCRATCH/results/run.jsonl" M
   `ROUNDS`. Unset, they are the maintainer's layout (below), so the commands above without
   the `export` are how the recorded runs were made.
 - **What runs without the maintainer's files**: 8 of the 10 workloads. The video clip
-  cannot be downloaded again (`make-corpus.sh` reads it from `VIDEO`, and fails its
-  check without it), and wlshare's tiles come from frame samples that are not public.
+  cannot be downloaded again (`make-corpus.sh` reads it from `VIDEO`, and leaves it and
+  its check out without it), and wlshare's tiles come from frame samples that are not public.
   `run.sh` runs what is in `$SCRATCH/corpus` and `$SCRATCH/tiles` and leaves the rest out.
 - **Each process is pinned** to one CPU, `taskset -c 2` by default on Linux with 3 CPUs or
   more and nothing elsewhere (`PIN=` for none, `PIN="taskset -c 5"` for another). Time on a

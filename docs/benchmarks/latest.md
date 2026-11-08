@@ -98,7 +98,7 @@ the raw lines in the `.jsonl` beside it.
 
 ## Running it again
 
-On any machine: "Running it again, on any machine" in the [README](README.md), which makes
+On any machine: "On any machine", under "Running it again" in the [README](README.md), which makes
 the corpora, builds a commit and libzstd, and runs them, with
 [`harness/env.sh`](harness/env.sh) for the settings; without the maintainer's files it runs 8
 of the 10 workloads, all but the video clip and the tiles. A figure compares only within its
