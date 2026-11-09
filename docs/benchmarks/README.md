@@ -2236,6 +2236,80 @@ ms a decode, then how many times faster than on one thread.
   Chrome 155 on the WSL workstation, silesia `-3` took 562 ms on one thread and 298 ms on six,
   the GitHub frames 43 ms and 13 ms.
 
+## 2026-11-08: executing into the output (run 33)
+
+The roadmap's first idea for one frame on several threads: execute its sequences into the
+output itself rather than into the decoder's ring, so that the window is not copied out.
+
+- **The ring has a linear mode** ([`src/decoding/ringbuffer.rs`](../../src/decoding/ringbuffer.rs)):
+  it is made of the output `Vec`, its data after the bytes already there. It never wraps, and
+  grows in place. The bytes it drops past the window stay where they are, before its head.
+  The same copies and the same fast loop write to it, with no new unsafe code.
+- **`DecodeBuffer::start_in_place`** decodes into it, and a block is then collected without a
+  copy, hashed and dropped past the window as before.
+- **What it costs: zeroing.** The safe ring writes only what is initialised, and a ring kept
+  from frame to frame is initialised once; a new window in the output, once a byte. It is
+  zeroed ahead of the writes in steps that grow with the frame, 1 KiB to 128 KiB, the fast
+  loop stopping at each: with steps of 16 KiB `x-ray` on 6 threads was 5% slower than A on the
+  WSL workstation, with 128 KiB within its noise.
+- **Where it is used** (`in_place` in [`src/decoding/parallel.rs`](../../src/decoding/parallel.rs)):
+  natively, for a frame of 32 KiB of input or more, or a split one, where one job decodes
+  the whole input. A smaller frame cost more zeroed than copied (the dictionary frames 7%
+  slower on the WSL workstation). Tests and the fuzzer take both ways.
+
+### Variants and runs
+
+All on lab2 after a restart. **A** is `main` at `97ee24f`. **B** decodes in place natively and
+in wasm. **B0** is B without the zeroing, an experiment only (`set_len` over memory not
+initialised). **C** decodes in place natively only. **D** is C in place only where one job
+decodes the whole input: the final code.
+
+- `threads.sh`, three rounds, A and B alternating
+  ([`results/run33-in-place.md`](results/run33-in-place.md)), then A and C
+  ([`results/run33-threads.md`](results/run33-threads.md)).
+- A, B and B0 on `x-ray`, `--fast=4` and the 4 MiB frames
+  ([`results/run33-zeroing.md`](results/run33-zeroing.md)); A and D natively on the 4 MiB
+  frames and silesia `-3` ([`results/run33-alone.md`](results/run33-alone.md)).
+- The one-thread harness, `main` against the new ring, three rounds
+  ([`results/run33-one-thread.md`](results/run33-one-thread.md)).
+
+Every build decoded every workload to the same output.
+
+### Results
+
+On one thread, through `FrameDecoder` (the one-thread harness), nothing moved: +0.2% natively,
+−0.3% in wasm by geomean, every workload within ±2.2%.
+
+`decode_all_parallel`, natively, C or D ÷ A:
+
+| workload | 1 thread | 4 threads | 8 threads |
+|---|---:|---:|---:|
+| silesia `-3` | 0.94 | 0.94 | 0.92–0.93 |
+| silesia `-19` | 0.88 | 1.03 | 0.90 |
+| silesia `--fast=4` | 0.96 | 0.97 | 1.01 |
+| `x-ray` | 0.92 | 0.95 | 1.00 |
+| `nci` | 0.83 | 0.81 | 0.82 |
+| Silesia in frames of 4 MiB, D | 0.94 | 0.99 | 1.01 |
+
+The small frames, the GitHub sets, are decoded as before; they moved by their noise, up to a
+quarter for the dictionary frames on 2 to 8 threads.
+
+- **Natively the copy was worth saving**: a large frame is 4–17% faster on one thread. On 8
+  threads silesia `-3` and `-19` and `nci` are 7–18% faster, as the sequences' execution, the
+  critical path, does less; `--fast=4` and `x-ray` are as before.
+- **Jobs side by side, each into its own output, were not**: the 4 MiB frames in place in every
+  job (B and C, the same natively) were 3.5–7% slower on 8 threads in all three runs that
+  timed them, against each job's ring, warm from frame to frame. So D decodes in place only where one job decodes the whole
+  input; the 4 MiB frames then gain on one thread and are as before on several.
+- **In wasm it was slower** (B), on 2 threads and up: `x-ray` 4–12%, the 4 MiB frames 4–10%,
+  `--fast=4` 4–8% on most thread counts; only `x-ray` on one thread gained (8%). Not for the
+  zeroing: B0, without it, was as slow (`x-ray` on 8 threads 1.09 ÷ A, B 1.06). Natively the
+  zeroing cost 4–9% on `--fast=4` (B0 against B). In wasm C, and D, which is the same there,
+  decode as A does: within its noise, which on 2 and 3 threads is large (see run 32).
+- **Tried and dropped**: the runs' outputs copied into the output side by side (an
+  `output.resize` and a copy a run, on the pool), on the WSL workstation: no faster on the
+  4 MiB frames on 6 threads and 9% slower on the GitHub frames.
+
 ## Running it again
 
 ### On any machine

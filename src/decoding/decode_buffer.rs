@@ -16,6 +16,9 @@ const _: () = assert!(LITERALS_PADDING >= super::ringbuffer::CHUNK);
 /// collected ones as the window needs, which blocks to come may copy from.
 pub struct DecodeBuffer {
     buffer: RingBuffer,
+    /// The ring, kept while the buffer decodes in place (see [`Self::start_in_place`]).
+    #[cfg(feature = "rayon")]
+    ring: RingBuffer,
     /// How many of the buffer's first bytes have been collected: kept only for the window.
     collected: usize,
     /// A dictionary's content, kept from frame to frame so that frames using the same
@@ -82,6 +85,8 @@ impl DecodeBuffer {
     pub fn new(window_size: usize, checksum: bool) -> DecodeBuffer {
         let mut buffer = DecodeBuffer {
             buffer: RingBuffer::new(),
+            #[cfg(feature = "rayon")]
+            ring: RingBuffer::new(),
             collected: 0,
             dict_content: Vec::new(),
             dict_active: false,
@@ -111,6 +116,33 @@ impl DecodeBuffer {
 
     pub fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// Decode into `out` itself, the buffer being empty, until [`Self::end_in_place`]: what is
+    /// decoded is written after `out`'s bytes, where it stays, and is collected by
+    /// [`Self::collect_in_place`], with no copy. The window is then the end of `out`.
+    #[cfg(feature = "rayon")]
+    pub fn start_in_place(&mut self, out: &mut Vec<u8>) {
+        debug_assert!(self.buffer.len() == 0);
+        let linear = RingBuffer::linear(core::mem::take(out));
+        self.ring = core::mem::replace(&mut self.buffer, linear);
+    }
+
+    /// `out` back from [`Self::start_in_place`], with every byte decoded since, collected or
+    /// not; the buffer is empty.
+    #[cfg(feature = "rayon")]
+    pub fn end_in_place(&mut self, out: &mut Vec<u8>) {
+        let ring = core::mem::replace(&mut self.ring, RingBuffer::new());
+        *out = core::mem::replace(&mut self.buffer, ring).into_vec();
+        self.collected = 0;
+    }
+
+    /// Collect every byte decoded in place (see [`Self::start_in_place`]), which is where it is
+    /// wanted already.
+    #[cfg(feature = "rayon")]
+    pub fn collect_in_place(&mut self) {
+        let collected = self.collect_with(usize::MAX, |buf| (buf.len(), Ok(())));
+        debug_assert!(collected.is_ok());
     }
 
     /// Make room for `amount` more bytes.
