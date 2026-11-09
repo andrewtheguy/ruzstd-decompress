@@ -116,9 +116,10 @@ the [README](README.md) (lab2, 8 threads against 1):
   Silesia tars 1.6–1.8× natively and 1.8–2.0× in wasm. Its sequences are executed on one
   thread, which is about half of a decode.
 
-Against v0.9.2-alpha.14 the large frames are as before; the small frames move by their noise
-on several threads, B34 1.5–5% behind in wasm on the GitHub frames, about what the checks
-cost on one thread (run 34).
+Against v0.9.2-alpha.14 the large frames are as before; the small frames move both ways on
+several threads. In wasm, B34 took 1.5–5% longer on the GitHub frames (M and B alternating
+three times), and on the GitHub frames with their dictionary 11.5% longer on 3 threads and
+10.4% on 4, but 3.3% less on 8 (run 34).
 
 ## Running it again
 
