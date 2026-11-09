@@ -35,3 +35,7 @@ outputs differ: none
 | silesia.tar.l3.zst | 212.0 | 273.75 (+0.3%) | 272.93 | 186.6% |
 | terminal-2880x1800@2 | 3.4 | 0.88 (-0.5%) | 0.89 | 4.2% |
 | **geomean vs M** | | -0.3% | +0.0% | |
+
+silesia `-3`'s spread for M is one round, round 3 at 779.40 ms (3 reps); M's other two took
+270.18 and 272.93 ms, L's three 270.20–274.00 ms, so its median and +0.3% do not hang on that
+round.
