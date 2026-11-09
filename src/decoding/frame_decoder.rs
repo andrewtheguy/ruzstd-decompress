@@ -700,47 +700,73 @@ impl FrameDecoder {
 /// The bound is what the input's headers say: a few bytes of input may claim gigabytes. Hold it
 /// to what is acceptable before reserving it.
 pub fn decompressed_bound(mut input: &[u8]) -> Result<u64, FrameDecoderError> {
-    use FrameDecoderError as err;
     let mut bound = 0u64;
     while !input.is_empty() {
-        let header = match frame::read_frame_header(&mut input) {
-            Ok((header, _)) => header,
-            Err(crate::decoding::errors::ReadFrameHeaderError::SkipFrame { length, .. }) => {
-                input = input.get(length as usize..).ok_or(err::FailedToSkipFrame)?;
-                continue;
-            }
-            Err(e) => return Err(err::ReadFrameHeaderError(e)),
+        let Some((header, blocks)) = skip_frame(&mut input)? else {
+            continue;
         };
-        let max_block_len =
-            max_block_len(usize::try_from(header.window_size()?).unwrap_or(usize::MAX)) as u64;
-        let mut block_dec = decoding::block_decoder::new();
-        let mut blocks = 0u64;
-        loop {
-            let (block, _) = block_dec
-                .read_block_header(&mut input)
-                .map_err(err::FailedToReadBlockHeader)?;
-            input = input.get(block.content_size as usize..).ok_or_else(|| {
-                err::FailedToReadBlockBody(DecodeBlockContentError::ReadError {
-                    step: block.block_type,
-                    source: Error::from(crate::io::ErrorKind::UnexpectedEof),
-                })
-            })?;
-            blocks += 1;
-            if block.last_block {
-                break;
+        let frame_bound = match header.frame_content_size() {
+            Some(size) => size,
+            None => {
+                let window = usize::try_from(header.window_size()?).unwrap_or(usize::MAX);
+                blocks.saturating_mul(max_block_len(window) as u64)
             }
-        }
-        if header.descriptor.content_checksum_flag() {
-            input = input.get(4..).ok_or(err::FailedToReadChecksum(Error::from(
-                crate::io::ErrorKind::UnexpectedEof,
-            )))?;
-        }
-        let frame_bound = header
-            .frame_content_size()
-            .unwrap_or(blocks.saturating_mul(max_block_len));
+        };
         bound = bound.saturating_add(frame_bound);
     }
     Ok(bound)
+}
+
+/// The length of the frame `input` begins with, a skippable frame's included, from its header
+/// and its blocks' headers, nothing decoded, as libzstd's `ZSTD_findFrameCompressedSize` gives
+/// it, but by this crate's reading of the headers, which the decoders share: a frame they refuse
+/// to delimit, such as one of a block larger than 128 KiB, has no length here. It fails where
+/// `input` does not begin with a whole frame.
+///
+/// The decoders read every frame of an input and skip skippable ones. Where an input must be
+/// exactly one frame, as a message's body may be, hold it to beginning with the zstd magic
+/// number, not a skippable frame's, and to this being its length.
+pub fn frame_compressed_size(input: &[u8]) -> Result<usize, FrameDecoderError> {
+    let mut rest = input;
+    skip_frame(&mut rest)?;
+    Ok(input.len() - rest.len())
+}
+
+/// The frame `input` begins with stepped over from its header and its blocks' headers: its
+/// header and how many blocks it has, nothing for a skippable frame.
+fn skip_frame(input: &mut &[u8]) -> Result<Option<(frame::FrameHeader, u64)>, FrameDecoderError> {
+    use FrameDecoderError as err;
+    let header = match frame::read_frame_header(&mut *input) {
+        Ok((header, _)) => header,
+        Err(crate::decoding::errors::ReadFrameHeaderError::SkipFrame { length, .. }) => {
+            *input = input.get(length as usize..).ok_or(err::FailedToSkipFrame)?;
+            return Ok(None);
+        }
+        Err(e) => return Err(err::ReadFrameHeaderError(e)),
+    };
+    let mut block_dec = decoding::block_decoder::new();
+    let mut blocks = 0u64;
+    loop {
+        let (block, _) = block_dec
+            .read_block_header(&mut *input)
+            .map_err(err::FailedToReadBlockHeader)?;
+        *input = input.get(block.content_size as usize..).ok_or_else(|| {
+            err::FailedToReadBlockBody(DecodeBlockContentError::ReadError {
+                step: block.block_type,
+                source: Error::from(crate::io::ErrorKind::UnexpectedEof),
+            })
+        })?;
+        blocks += 1;
+        if block.last_block {
+            break;
+        }
+    }
+    if header.descriptor.content_checksum_flag() {
+        *input = input.get(4..).ok_or(err::FailedToReadChecksum(Error::from(
+            crate::io::ErrorKind::UnexpectedEof,
+        )))?;
+    }
+    Ok(Some((header, blocks)))
 }
 
 #[cfg(feature = "rayon")]

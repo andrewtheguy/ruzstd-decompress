@@ -90,6 +90,15 @@ let mut outputs: Vec<Vec<u8>> = tiles.iter().map(|t| Vec::with_capacity(t.most))
 let results = pool.install(|| decoder.decode_each_parallel(&frames, &mut outputs));
 ```
 
+Every decoder reads all the frames of an input and skips skippable ones. Where an input must be
+exactly one frame, `decoding::frame_compressed_size` gives where its first frame ends, from the
+headers, as libzstd's `ZSTD_findFrameCompressedSize` does:
+
+```rust, ignore
+let one_frame = body.starts_with(&[0x28, 0xB5, 0x2F, 0xFD])
+    && ruzstd_decompress::decoding::frame_compressed_size(body)? == body.len();
+```
+
 Every decoder holds a frame to the content size its header gives, as libzstd does: a frame that
 decodes to more fails at the block that would take it past, which writes nothing, and one that
 decodes to less fails at its end.
