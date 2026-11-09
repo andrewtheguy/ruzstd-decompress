@@ -439,13 +439,14 @@ fn run_lens(sizes: impl ExactSizeIterator<Item = usize> + Clone, threads: usize)
     if count <= 1 || threads <= 1 {
         return alloc::vec![count];
     }
-    let total: usize = sizes.clone().sum();
+    // Saturating: the inputs of `decode_each` may be any slices, the same one many times.
+    let total = sizes.clone().fold(0usize, usize::saturating_add);
     let each = (total / (4 * threads)).max(RUN_BYTES_LEAST);
     let mut lens = Vec::new();
-    let (mut len, mut size) = (0, 0);
+    let (mut len, mut size) = (0, 0usize);
     for item in sizes {
         len += 1;
-        size += item;
+        size = size.saturating_add(item);
         if size >= each {
             lens.push(len);
             (len, size) = (0, 0);
@@ -956,4 +957,17 @@ fn execute_works(
         collect(scratch, output.as_deref_mut())?;
     }
     Ok(done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run_lens;
+
+    /// Sizes adding up past `usize`, as many inputs of the same large slice do on wasm32.
+    #[test]
+    fn run_lens_past_usize() {
+        let sizes = [usize::MAX / 2, usize::MAX / 2, usize::MAX / 2, 1];
+        let lens = run_lens(sizes.iter().copied(), 4);
+        assert_eq!(lens.iter().sum::<usize>(), sizes.len());
+    }
 }
