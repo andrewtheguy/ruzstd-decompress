@@ -74,9 +74,25 @@ WebAssembly), but less with a dictionary (1.9 times natively, 2.5 in WebAssembly
 frame gets 1.4–2.5 times as fast (`docs/benchmarks/README.md`).
 
 ```rust, ignore
-let mut output = Vec::new();
+// It decodes to the output's spare capacity, never grown: room first, from the headers.
+let bound = ruzstd_decompress::decoding::decompressed_bound(&compressed)?;
+let mut output = Vec::with_capacity(bound.min(LIMIT) as usize);
 pool.install(|| decoder.decode_all_parallel(&compressed, &mut output))?;
 ```
+
+`FrameDecoder::decode_each_parallel` decodes many inputs side by side, each to its own output,
+within that output's spare capacity, with a result for each: such as a frame for each tile of a
+picture, each held to what its tile can be. A run of inputs goes to each of the pool's jobs, its
+buffers and tables made once for the run.
+
+```rust, ignore
+let mut outputs: Vec<Vec<u8>> = tiles.iter().map(|t| Vec::with_capacity(t.most)).collect();
+let results = pool.install(|| decoder.decode_each_parallel(&frames, &mut outputs));
+```
+
+Every decoder holds a frame to the content size its header gives, as libzstd does: a frame that
+decodes to more fails at the block that would take it past, which writes nothing, and one that
+decodes to less fails at its end.
 
 In WebAssembly a thread is a worker on a shared memory: `examples/wasm-threads` is a module and
 the JavaScript that runs it on a pool of workers, in a browser or in Node.

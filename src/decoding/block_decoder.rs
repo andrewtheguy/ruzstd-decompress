@@ -7,11 +7,11 @@ use super::literals_section_decoder::decode_literals;
 use super::sequence_section_decoder::decode_sequences;
 use crate::common::MAX_BLOCK_SIZE;
 use crate::decoding::decode_buffer::LITERALS_PADDING;
-use crate::decoding::errors::DecodeSequenceError;
 use crate::decoding::errors::{
     BlockHeaderReadError, BlockSizeError, BlockTypeError, DecodeBlockContentError,
     DecompressBlockError,
 };
+use crate::decoding::errors::{DecodeSequenceError, ExecuteSequencesError};
 use crate::decoding::scratch::DecoderScratch;
 use crate::decoding::sequence_execution::SequenceExecutor;
 use crate::io::Read;
@@ -26,6 +26,28 @@ enum DecoderState {
     ReadyToDecodeNextBody,
     #[allow(dead_code)]
     Failed, //TODO put "self.internal_state = DecoderState::Failed;" everywhere an unresolvable error occurs
+}
+
+/// Block_Maximum_Size (RFC 8878 3.1.1.2.4) of a frame of `window_size`: the smaller of the
+/// window and 128 KiB.
+pub(crate) fn max_block_len(window_size: usize) -> usize {
+    window_size.min(MAX_BLOCK_SIZE as usize)
+}
+
+/// Whether `err` is a block's decoding to more than it may: than its Block_Maximum_Size, or than
+/// what is left of its frame's most (see [`DecodeBuffer::block_most`]).
+///
+/// [`DecodeBuffer::block_most`]: crate::decoding::decode_buffer::DecodeBuffer::block_most
+pub(crate) fn too_large(err: &DecodeBlockContentError) -> bool {
+    matches!(
+        err,
+        DecodeBlockContentError::DecompressBlockError(
+            DecompressBlockError::DecompressedSizeTooLarge { .. }
+                | DecompressBlockError::ExecuteSequencesError(
+                    ExecuteSequencesError::TooManyBytesGenerated { .. }
+                )
+        )
+    )
 }
 
 /// Create a new [BlockDecoder].
@@ -51,8 +73,11 @@ impl BlockDecoder {
             }
         }
 
-        // Block_Maximum_Size (RFC 8878 3.1.1.2.4): the smaller of the window and 128 KiB
-        let max_block_len = (workspace.buffer.window_size).min(MAX_BLOCK_SIZE as usize);
+        // Block_Maximum_Size (RFC 8878 3.1.1.2.4): the smaller of the window and 128 KiB, or
+        // less where the frame is near its most
+        let max_block_len = workspace
+            .buffer
+            .block_most(max_block_len(workspace.buffer.window_size));
         // raw and RLE blocks state their size, compressed ones are checked as they decode
         Self::check_decompressed_size(header.decompressed_size as usize, max_block_len)?;
 

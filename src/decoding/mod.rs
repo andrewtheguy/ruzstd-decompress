@@ -5,7 +5,9 @@ mod frame_decoder;
 mod streaming_decoder;
 
 pub use dictionary::Dictionary;
-pub use frame_decoder::{BlockDecodingStrategy, DEFAULT_MAX_WINDOW_SIZE, FrameDecoder};
+pub use frame_decoder::{
+    BlockDecodingStrategy, DEFAULT_MAX_WINDOW_SIZE, FrameDecoder, decompressed_bound,
+};
 pub use streaming_decoder::StreamingDecoder;
 
 pub(crate) mod block_decoder;

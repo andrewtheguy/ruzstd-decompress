@@ -41,7 +41,9 @@ fn main() {
             .unwrap();
     }
     let mut expected: Option<Vec<u8>> = None;
-    let mut output = Vec::new();
+    // Room for what it decodes to, which the decoder does not grow.
+    let bound = ruzstd_decompress::decoding::decompressed_bound(&input).expect("FILE's frames");
+    let mut output = Vec::with_capacity(usize::try_from(bound).expect("a bound that fits"));
     for threads in threads
         .split(',')
         .map(|t| t.parse::<usize>().expect("threads"))

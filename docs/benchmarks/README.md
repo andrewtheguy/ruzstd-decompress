@@ -2310,6 +2310,86 @@ quarter for the dictionary frames on 2 to 8 threads.
   `output.resize` and a copy a run, on the pool), on the WSL workstation: no faster on the
   4 MiB frames on 6 threads and 9% slower on the GitHub frames.
 
+## 2026-11-08: outputs held to their room, frames to their content size (run 34)
+
+What changed in the decoder:
+
+- **Every decoder holds a frame to the content size its header gives**, as libzstd does: a
+  block that would take the frame past it fails before it writes
+  (`FrameDecoderError::ContentSizeExceeded`), and a frame that ends short of it fails at its
+  last block, which adds nothing (`ContentSizeShort`). Before, neither was checked, by the
+  decoder on one thread or on several. `FrameHeader::frame_content_size` is an `Option` now,
+  absent told from zero; raw and RLE blocks count toward the decoded bytes, which they did
+  not, so that a match's reach into the dictionary is judged right after them too.
+- **`decode_all_parallel` decodes to the output's spare capacity**, never grown, as
+  `decode_all_to_vec` does: `TargetTooSmall` past it, nothing written there. Before, it grew
+  the output for whatever the input said, so that an RLE block of 4 bytes could ask for
+  128 KiB. `decompressed_bound`, as libzstd's `ZSTD_decompressBound`, gives room from the
+  headers.
+- **`decode_each_parallel`** decodes many inputs side by side, each to its own output within
+  its capacity, with a result for each: a run of inputs to each job, its scratch made once,
+  as `decode_all_parallel` does with frames. For a frame per tile, each held to what its tile
+  can be.
+- How the room is kept on several threads ([`src/decoding/parallel.rs`](../../src/decoding/parallel.rs)):
+  each block is held to what is left of its frame's content size and of the output's room
+  before it writes. A frame that gives its content size decodes to no more, so a job takes
+  its run's content sizes from the room at once; only a frame that gives none takes each
+  block's bytes as it is decoded.
+
+### lab2, rebuilt again
+
+On 2026-11-08, on a new address and back on an `AMD EPYC-Rome Processor` (AVX2 and BMI2, no
+AVX-512), 8 vCPUs (4 cores, 2 threads), 15 GB, Debian 13, kernel 6.12.116, swap off; rustc
+1.99.1, binaryen 120 and Node 26.13.0 (V8 14.6) as before, each run pinned to vCPU 2. Timings
+from before run 34 are not comparable with later ones. The corpora are the same bytes
+([`corpus.sha256`](harness/corpus.sha256)), and every build decoded every workload to run
+29's hashes.
+
+### Variants and runs
+
+All on lab2 after a restart. **M** is `main` at `68e4795` (v0.9.2-alpha.14); **B** is this
+change.
+
+- `run.sh`, M, B and libzstd, three rounds
+  ([`results/run34-lab2-rebuilt.md`](results/run34-lab2-rebuilt.md)); then silesia `-3` alone,
+  M and B, five rounds ([`results/run34-l3.md`](results/run34-l3.md)).
+- `threads.sh` from each variant's tree, M, B, M, B
+  ([`results/run34-threads.md`](results/run34-threads.md)), and B's GitHub frames under
+  `perf stat` and in wasm, M and B alternating three times.
+
+### Results
+
+On one thread, through `FrameDecoder`, nothing moved: by geomean B ÷ M is 0.996 natively and
+0.995 in wasm. silesia `-3` read +2.0% and +2.7%, past its spread, from two slow rounds of B;
+five more rounds put it at −0.2% and +0.2%. The video clip read −8.4% and −7.0%, within its
+spread (8–11%).
+
+On several threads, B ÷ M, the better of two rounds:
+
+| workload | 1 thread | 2 | 3 | 4 | 6 | 8 |
+|---|---:|---:|---:|---:|---:|---:|
+| natively, the large frames (5 files and the 4 MiB frames) | 0.98–1.01 | 1.00–1.05 | 0.97–1.09 | 0.97–1.04 | 0.96–1.06 | 0.96–1.06 |
+| natively, the GitHub frames | 1.01 | 0.96 | 0.98 | 1.05 | 1.06 | 1.08 |
+| natively, the GitHub frames with their dictionary | 1.01 | 0.85 | 0.94 | 1.10 | 1.13 | 1.09 |
+| in wasm, the large frames | 1.00–1.01 | 0.88–1.01 | 0.83–1.05 | 0.87–1.01 | 0.89–1.01 | 0.91–1.00 |
+| in wasm, the GitHub frames | 1.01 | 1.04 | 1.06 | 1.03 | 1.14 | 1.05 |
+| in wasm, the GitHub frames with their dictionary | 1.03 | 1.06 | 1.12 | 1.10 | 0.99 | 0.97 |
+
+By geomean 1.011 natively and 0.986 in wasm.
+
+- **The large frames are as before**, within their noise, in both.
+- **The small frames' figures move by their noise on several threads**, as in runs 32 and 33
+  (M's own rounds up to 17.6% apart natively). Natively B ran as many instructions a decode as
+  M on the GitHub frames on 8 threads (193 M, B within 0.4%, under `perf stat`), its time level
+  with M's in one of three runs and 6–8% over in two. In wasm, M and B alternating three
+  times, B took 1.4% longer on 2 threads, 1.5% on 3 and 5% on 6, where the runs were
+  6.0–6.75 ms: about what the checks cost on one thread, where `run.sh` put the GitHub frames
+  at +0.6–1.4%.
+- **Tried and dropped: the room taken for each block.** Every job's every block wrote the one
+  counter, which went from core to core: the GitHub frames with their dictionary took 1.3–1.7
+  times M's time natively on 3 to 8 threads, and 1.2–1.4 in wasm; the GitHub frames up to
+  1.15. Taking a run's content sizes at once made it the figures above.
+
 ## Running it again
 
 ### On any machine

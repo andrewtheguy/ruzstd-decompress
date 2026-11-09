@@ -32,6 +32,9 @@ pub struct DecodeBuffer {
 
     pub window_size: usize,
     total_output_counter: u64,
+    /// The most bytes the frame may decode to, from the reset: its content size where its
+    /// header gives it, and the room of the output it is decoded to (see [`Self::block_most`]).
+    most: u64,
     /// The hash of the bytes dropped from the buffer, when the frame has a checksum to check
     /// them against: none is made for one that has not, as libzstd makes none. The bytes still
     /// in the buffer are hashed when the checksum is asked for (see [`DecodeBuffer::checksum`]),
@@ -92,6 +95,7 @@ impl DecodeBuffer {
             dict_active: false,
             window_size,
             total_output_counter: 0,
+            most: u64::MAX,
             #[cfg(feature = "hash")]
             hash: None,
         };
@@ -106,6 +110,7 @@ impl DecodeBuffer {
         self.collected = 0;
         self.dict_active = false;
         self.total_output_counter = 0;
+        self.most = u64::MAX;
         #[cfg(feature = "hash")]
         {
             self.hash = checksum.then(|| twox_hash::XxHash64::with_seed(0));
@@ -116,6 +121,24 @@ impl DecodeBuffer {
 
     pub fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// How many bytes the frame has decoded to since the reset, collected or not.
+    pub fn decoded(&self) -> u64 {
+        self.total_output_counter
+    }
+
+    /// Hold the frame to `most` bytes from the reset, until a reset or the next call.
+    pub fn set_most(&mut self, most: u64) {
+        self.most = most;
+    }
+
+    /// The most the next block may decode to: `max_block_len`, its Block_Maximum_Size, or what
+    /// is left of the frame's most (see [`Self::set_most`]) if that is less. A block decoding to
+    /// more writes none of it past that.
+    pub fn block_most(&self, max_block_len: usize) -> usize {
+        let left = self.most.saturating_sub(self.total_output_counter);
+        usize::try_from(left).map_or(max_block_len, |left| left.min(max_block_len))
     }
 
     /// Decode into `out` itself, the buffer being empty, until [`Self::end_in_place`]: what is
@@ -161,6 +184,7 @@ impl DecodeBuffer {
 
     pub fn extend_and_fill(&mut self, fill_with: u8, fill_length: usize) {
         self.buffer.extend_and_fill(fill_with, fill_length);
+        self.total_output_counter += fill_length as u64;
     }
 
     pub fn extend_from_reader<R: Read>(
@@ -168,7 +192,9 @@ impl DecodeBuffer {
         read: R,
         fill_length: usize,
     ) -> Result<(), crate::io::Error> {
-        self.buffer.extend_from_reader(read, fill_length)
+        self.buffer.extend_from_reader(read, fill_length)?;
+        self.total_output_counter += fill_length as u64;
+        Ok(())
     }
 
     /// A writer of sequences to the buffer, for a run of them (see [`SequenceWriter`]), of at
