@@ -1,0 +1,101 @@
+    Finished `release` profile [optimized] target(s) in 0.29s
+done silesia.tar.l3.zst Mon Nov  9 02:09:47 AM UTC 2026
+done silesia.tar.l19.zst Mon Nov  9 02:10:17 AM UTC 2026
+done silesia.tar.fast4.zst Mon Nov  9 02:10:46 AM UTC 2026
+done silesia-x-ray.l1.zst Mon Nov  9 02:11:11 AM UTC 2026
+done silesia-nci.l3.zst Mon Nov  9 02:11:36 AM UTC 2026
+done silesia.tar.l3.4M-frames.zst Mon Nov  9 02:12:06 AM UTC 2026
+done github.frames Mon Nov  9 02:12:30 AM UTC 2026
+done github-dict.frames Mon Nov  9 02:12:55 AM UTC 2026
+ALLDONE
+M round 1 done Mon Nov  9 02:12:55 AM UTC 2026
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> src/decoding/parallel.rs:136:14
+    |
+136 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+136 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+136 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |
+
+   Compiling ruzstd-decompress v0.9.2-alpha.14 (/home/linuxuser/codes/staging-area/ruzstd-decompress-scratch/variants/B)
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> /home/linuxuser/codes/staging-area/ruzstd-decompress-scratch/variants/B/src/decoding/parallel.rs:136:14
+    |
+136 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+136 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+136 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |
+
+warning: `ruzstd-decompress` (lib) generated 1 warning (run `cargo fix --lib -p ruzstd-decompress` to apply 1 suggestion)
+   Compiling ruzstd-mt v0.0.0 (/home/linuxuser/codes/staging-area/ruzstd-decompress-scratch/variants/B/examples/wasm-threads)
+    Finished `release` profile [optimized] target(s) in 4.23s
+done silesia.tar.l3.zst Mon Nov  9 02:13:37 AM UTC 2026
+done silesia.tar.l19.zst Mon Nov  9 02:14:07 AM UTC 2026
+done silesia.tar.fast4.zst Mon Nov  9 02:14:36 AM UTC 2026
+done silesia-x-ray.l1.zst Mon Nov  9 02:15:00 AM UTC 2026
+done silesia-nci.l3.zst Mon Nov  9 02:15:25 AM UTC 2026
+done silesia.tar.l3.4M-frames.zst Mon Nov  9 02:15:54 AM UTC 2026
+done github.frames Mon Nov  9 02:16:18 AM UTC 2026
+done github-dict.frames Mon Nov  9 02:16:43 AM UTC 2026
+ALLDONE
+B round 1 done Mon Nov  9 02:16:43 AM UTC 2026
+    Finished `release` profile [optimized] target(s) in 0.05s
+done silesia.tar.l3.zst Mon Nov  9 02:17:14 AM UTC 2026
+done silesia.tar.l19.zst Mon Nov  9 02:17:44 AM UTC 2026
+done silesia.tar.fast4.zst Mon Nov  9 02:18:13 AM UTC 2026
+done silesia-x-ray.l1.zst Mon Nov  9 02:18:37 AM UTC 2026
+done silesia-nci.l3.zst Mon Nov  9 02:19:02 AM UTC 2026
+done silesia.tar.l3.4M-frames.zst Mon Nov  9 02:19:32 AM UTC 2026
+done github.frames Mon Nov  9 02:19:56 AM UTC 2026
+done github-dict.frames Mon Nov  9 02:20:21 AM UTC 2026
+ALLDONE
+M round 2 done Mon Nov  9 02:20:21 AM UTC 2026
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> src/decoding/parallel.rs:136:14
+    |
+136 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+136 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+136 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |
+
+warning: use of deprecated method `core::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> /home/linuxuser/codes/staging-area/ruzstd-decompress-scratch/variants/B/src/decoding/parallel.rs:136:14
+    |
+136 |             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |              ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+136 -             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+136 +             .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+    |
+
+warning: `ruzstd-decompress` (lib) generated 1 warning (run `cargo fix --lib -p ruzstd-decompress` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 0.05s
+done silesia.tar.l3.zst Mon Nov  9 02:20:52 AM UTC 2026
+done silesia.tar.l19.zst Mon Nov  9 02:21:21 AM UTC 2026
+done silesia.tar.fast4.zst Mon Nov  9 02:21:50 AM UTC 2026
+done silesia-x-ray.l1.zst Mon Nov  9 02:22:15 AM UTC 2026
+done silesia-nci.l3.zst Mon Nov  9 02:22:40 AM UTC 2026
+done silesia.tar.l3.4M-frames.zst Mon Nov  9 02:23:09 AM UTC 2026
+done github.frames Mon Nov  9 02:23:33 AM UTC 2026
+done github-dict.frames Mon Nov  9 02:23:58 AM UTC 2026
+ALLDONE
+B round 2 done Mon Nov  9 02:23:58 AM UTC 2026
+THREADS DONE
