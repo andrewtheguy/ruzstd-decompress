@@ -282,6 +282,20 @@ fn empty_and_skippable_only() {
     assert!(decode_parallel(&decoder, &skip).is_err());
 }
 
+/// A frame decoded in place into the room its header says it needs fills that room exactly,
+/// with nothing grown and copied: z000033's frame, of an even length, is decoded in place under
+/// test (see `parallel::in_place`).
+#[test]
+fn in_place_fills_its_room() {
+    let input = fs::read("./decodecorpus_files/z000033.zst").unwrap();
+    let mut out = Vec::new();
+    FrameDecoder::new()
+        .decode_all_parallel(&input, &mut out)
+        .unwrap();
+    assert_eq!(out.len(), 1_022_035);
+    assert_eq!(out.capacity(), out.len(), "the output was grown");
+}
+
 /// A frame of several compressed blocks, split across two threads (tests take small batches):
 /// small enough for Miri, which runs it over the executor's raw loop on stored sequences.
 #[test]

@@ -13,7 +13,8 @@ use alloc::vec::Vec;
 ///
 /// A linear ring ([`Self::linear`]) never wraps: it is the end of a `Vec` of output, the bytes
 /// before the head kept and never written, the free space only what is after the tail, and it
-/// grows in place.
+/// grows in place. Never wrapping, it keeps no sentinel: its tail may reach `cap`, so that a
+/// frame fills exactly the room reserved for it.
 pub struct RingBuffer {
     buf: Vec<u8>,
     cap: usize,
@@ -85,8 +86,10 @@ impl RingBuffer {
     #[inline(always)]
     pub fn free(&self) -> usize {
         let (x, y) = self.free_slice_lengths();
-        // A linear ring's room before the head holds what was there before it.
-        let x = if self.linear { 0 } else { x };
+        if self.linear {
+            // Its room before the head holds what was there before it, and it has no sentinel.
+            return y;
+        }
         // We always keep one free slot as a sentinel
         (x + y).saturating_sub(1)
     }
@@ -115,7 +118,7 @@ impl RingBuffer {
         let required = cap + amount;
         if self.linear {
             // Grown in place, its bytes where they were; twice as large at least, as a `Vec`.
-            let new_cap = usize::max(required + 1, cap.saturating_mul(2));
+            let new_cap = usize::max(required, cap.saturating_mul(2));
             self.buf.reserve_exact(new_cap - self.buf.len());
             self.cap = new_cap;
             return;
@@ -186,11 +189,11 @@ impl RingBuffer {
         }
     }
 
-    /// `tail` moved on by `len`, wrapping at the end of the buffer.
+    /// `tail` moved on by `len`, wrapping at the end of the buffer unless it is linear.
     #[inline(always)]
     fn advance_tail(&mut self, len: usize) {
         let tail = self.tail + len;
-        self.tail = if tail >= self.cap {
+        self.tail = if tail >= self.cap && !self.linear {
             tail - self.cap
         } else {
             tail
@@ -242,14 +245,20 @@ impl RingBuffer {
     pub fn truncate(&mut self, len: usize) {
         debug_assert!(len <= self.len());
         if len < self.len() {
-            self.tail = (self.head + len) % self.cap;
+            let tail = self.head + len;
+            self.tail = if self.linear { tail } else { tail % self.cap };
         }
     }
 
     pub fn drop_first_n(&mut self, amount: usize) {
         debug_assert!(amount <= self.len());
         let amount = usize::min(amount, self.len());
-        self.head = (self.head + amount) % self.cap.max(1);
+        let head = self.head + amount;
+        self.head = if self.linear {
+            head
+        } else {
+            head % self.cap.max(1)
+        };
     }
 
     /// Return the size of the two contiguous occupied sections of memory used
@@ -1103,6 +1112,31 @@ mod tests {
         let data = [a, b].concat();
         assert!(rb.cap() > 1 << 10, "grown to {}", rb.cap());
         assert_eq!(rb.into_vec(), [&b"before"[..], &dropped, &data].concat());
+    }
+
+    /// A linear ring takes as many bytes as its `Vec` has room for, its tail at the end of it,
+    /// without growing: it keeps no sentinel.
+    #[test]
+    fn linear_fills_its_capacity() {
+        let mut out = alloc::vec::Vec::with_capacity(16);
+        out.extend_from_slice(b"before");
+        let cap = out.capacity();
+        let mut rb = RingBuffer::linear(out);
+        let rest: alloc::vec::Vec<u8> = (0..cap - 6).map(|i| i as u8).collect();
+        rb.extend(&rest[..2]);
+        rb.extend_from_within(0, 2);
+        rb.extend_and_fill(7, rest.len() - 5);
+        rb.extend(&rest[..1]);
+        assert_eq!((rb.cap(), rb.free(), rb.len()), (cap, 0, cap - 6));
+        rb.drop_first_n(cap - 6);
+        assert_eq!((rb.len(), rb.free()), (0, 0));
+        let vec = rb.into_vec();
+        assert_eq!(vec.capacity(), cap);
+        let mut expected = b"before".to_vec();
+        expected.extend_from_slice(&[0, 1, 0, 1]);
+        expected.resize(cap - 1, 7);
+        expected.push(0);
+        assert_eq!(vec, expected);
     }
 
     /// Random changes to `rb`, empty, checked against a `Vec`; the bytes dropped from its start.
