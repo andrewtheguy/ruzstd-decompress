@@ -112,9 +112,18 @@ the other threads work beside it (silesia `-3` on the WSL workstation: 177 ms al
 beside 5 others). On 8 threads the Silesia tars get 1.5–1.7 times as fast.
 
 What could make it shorter:
-- **Execute into the output.** Copying the window out of the ring buffer into the output,
-  with the checksum's hash, is about a fifth of execution (40 of 186 ms). A decode of a whole
-  input into a `Vec` could execute into that `Vec` itself, the window being the output
-  before it, and hash the finished part on another thread.
+- **Execute into the output**: done natively in run 33, where one job decodes the whole input
+  (a large frame 4–17% faster on one thread; on 8 threads silesia `-3` and `-19` and `nci`
+  7–18%). Not in wasm, where it was 4–12% slower on several threads for a reason not found:
+  not the zeroing of the new window, which a build without it did not make faster. Nor in jobs
+  side by side, where each job's ring, warm from frame to frame, was faster on 8 threads.
+  What is left of it:
+  - **The zeroing**, natively 4–9% on `--fast=4`: the safe ring writes only what is
+    initialised. Writing the window's free space by raw pointers, as the fast loop does,
+    would take unsafe code past the loop.
+  - **The checksum's hash on another thread.** The finished part of the output is not written
+    again, but it is in the `Vec` the execution grows, which safe code cannot lend to another
+    thread meanwhile.
+  - **Why wasm is slower**, which would want V8's code for the execution on several threads.
 - **Less to carry from step to step.** Each sequence is written as 12 bytes by one thread
   and read by another.

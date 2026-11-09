@@ -67,6 +67,28 @@ const BATCH_STORE_PER_THREAD: usize = if cfg!(any(test, fuzzing)) {
     2 << 20
 };
 
+/// Natively, a frame is decoded in place, into the output, where it is at least this many bytes
+/// of input, or is split (see [`in_place`]). A smaller one is decoded into the decoder's ring,
+/// which earlier frames have made and initialised, and copied out: a new window in the output is
+/// initialised as it is written, which for a small frame costs more than the copy.
+const IN_PLACE_LEAST: usize = 32 << 10;
+
+/// Whether `frame` is decoded in place, into the output, rather than into the decoder's ring and
+/// copied out; `split` if its blocks are decoded side by side, `alone` if one job decodes the
+/// whole input.
+///
+/// Only where one job does: jobs side by side, each into its own output, were slower in place
+/// on 8 threads than each from its ring, warm from frame to frame. And never in WebAssembly,
+/// where it was slower on several threads, not for the initialisation. Tests and the fuzzer
+/// take both ways, by the frame's length.
+fn in_place(frame: &Frame<'_>, split: bool, alone: bool) -> bool {
+    if cfg!(any(test, fuzzing)) {
+        frame.body.len().is_multiple_of(2)
+    } else {
+        !cfg!(target_family = "wasm") && alone && (split || frame.body.len() >= IN_PLACE_LEAST)
+    }
+}
+
 /// A run of frames, decoded by one job, is at least this many bytes of them.
 const RUN_BYTES_LEAST: usize = 32 << 10;
 
@@ -100,7 +122,7 @@ pub fn decode_all(
         output.reserve(room(&frames));
         let mut scratch = None;
         for frame in &frames {
-            decode_frame(frame, dicts, &mut scratch, output, split_blocks)?;
+            decode_frame(frame, dicts, &mut scratch, output, split_blocks, true)?;
         }
     } else {
         let decoded: Vec<Result<Vec<u8>, FrameDecoderError>> = runs
@@ -111,7 +133,7 @@ pub fn decode_all(
                 let mut out = Vec::with_capacity(room(run));
                 let mut scratch = None;
                 for frame in *run {
-                    decode_frame(frame, dicts, &mut scratch, &mut out, split_blocks)?;
+                    decode_frame(frame, dicts, &mut scratch, &mut out, split_blocks, false)?;
                 }
                 Ok(out)
             })
@@ -271,13 +293,15 @@ fn runs<'f, 'a>(frames: &'f [Frame<'a>], threads: usize) -> Vec<&'f [Frame<'a>]>
 }
 
 /// Decode `frame`, appending it to `output`, with `scratch`, made if it is `None` and kept for
-/// the next frame; its blocks side by side if `split_blocks` and it has enough of them.
+/// the next frame; its blocks side by side if `split_blocks` and it has enough of them. `alone`
+/// if one job decodes the whole input.
 fn decode_frame(
     frame: &Frame<'_>,
     dicts: &BTreeMap<u32, Dictionary>,
     scratch: &mut Option<DecoderScratch>,
     output: &mut Vec<u8>,
     split_blocks: bool,
+    alone: bool,
 ) -> Result<(), FrameDecoderError> {
     let checksum_flag = frame.header.descriptor.content_checksum_flag();
     let scratch = match scratch {
@@ -298,17 +322,56 @@ fn decode_frame(
     if let Some(dict) = dict {
         scratch.init_from_dict(dict);
     }
+    output.reserve(frame.room());
+    // Split only where there are two batches at least, for one to execute beside the other's
+    // decoding.
+    let threads = rayon::current_num_threads();
+    let split =
+        split_blocks && threads > 1 && frame.body.len() >= 2 * threads * BATCH_BYTES_PER_THREAD;
+    if in_place(frame, split, alone) {
+        // Executed into `output` itself, which is the window.
+        scratch.buffer.start_in_place(output);
+        let result = decode_frame_blocks(frame, dict, scratch, split, None);
+        scratch.buffer.end_in_place(output);
+        result
+    } else {
+        decode_frame_blocks(frame, dict, scratch, split, Some(output))
+    }
+}
+
+/// Collect what `scratch` has decoded: to `output`, or in place where it is `None`.
+fn collect(
+    scratch: &mut DecoderScratch,
+    output: Option<&mut Vec<u8>>,
+) -> Result<(), FrameDecoderError> {
+    match output {
+        Some(output) => {
+            scratch
+                .buffer
+                .collect_to_writer(output)
+                .map_err(FrameDecoderError::FailedToDrainDecodebuffer)?;
+        }
+        None => scratch.buffer.collect_in_place(),
+    }
+    Ok(())
+}
+
+/// [`decode_frame`]'s blocks, into `scratch`'s buffer, then collected to `output`, or decoded in
+/// place where `output` is `None`; and its checksum checked.
+fn decode_frame_blocks(
+    frame: &Frame<'_>,
+    dict: Option<&Dictionary>,
+    scratch: &mut DecoderScratch,
+    split: bool,
+    mut output: Option<&mut Vec<u8>>,
+) -> Result<(), FrameDecoderError> {
     let max_block_len = frame.window_size.min(MAX_BLOCK_SIZE as usize);
     let content_size = frame.header.frame_content_size();
-    output.reserve(frame.room());
     scratch
         .buffer
         .reserve(content_size.min(max_block_len as u64) as usize);
 
-    // Split only where there are two batches at least, for one to execute beside the other's
-    // decoding.
-    let threads = rayon::current_num_threads();
-    if split_blocks && threads > 1 && frame.body.len() >= 2 * threads * BATCH_BYTES_PER_THREAD {
+    if split {
         decode_blocks_split(frame, dict, scratch, output)?;
     } else {
         let mut src = frame.body;
@@ -320,7 +383,7 @@ fn decode_frame(
             block_dec
                 .decode_block_content(&header, scratch, &mut src)
                 .map_err(FrameDecoderError::FailedToReadBlockBody)?;
-            collect(scratch, output)?;
+            collect(scratch, output.as_deref_mut())?;
             if header.last_block {
                 break;
             }
@@ -338,15 +401,6 @@ fn decode_frame(
             });
         }
     }
-    Ok(())
-}
-
-/// Move what `scratch` has decoded to `output`.
-fn collect(scratch: &mut DecoderScratch, output: &mut Vec<u8>) -> Result<(), FrameDecoderError> {
-    scratch
-        .buffer
-        .collect_to_writer(output)
-        .map_err(FrameDecoderError::FailedToDrainDecodebuffer)?;
     Ok(())
 }
 
@@ -544,12 +598,12 @@ impl Compressed<'_> {
 }
 
 /// A frame's blocks in three steps (see the module's documentation), into `scratch`, which is set
-/// up for the frame, and on to `output`.
+/// up for the frame, and collected to `output` (see [`collect`]).
 fn decode_blocks_split(
     frame: &Frame<'_>,
     dict: Option<&Dictionary>,
     scratch: &mut DecoderScratch,
-    output: &mut Vec<u8>,
+    mut output: Option<&mut Vec<u8>>,
 ) -> Result<(), FrameDecoderError> {
     // Block_Maximum_Size (RFC 8878 3.1.1.2.4): the smaller of the window and 128 KiB
     let max_block_len = frame.window_size.min(MAX_BLOCK_SIZE as usize);
@@ -571,7 +625,7 @@ fn decode_blocks_split(
         let failed = matches!(works.last(), Some(Work::Failed(_)));
         let more = !failed && !blocks.is_empty();
         let (executed, next_works) = rayon::join(
-            || execute_works(works, scratch, max_block_len, output),
+            || execute_works(works, scratch, max_block_len, output.as_deref_mut()),
             || more.then(|| first_two(&mut tables, &mut spare, &mut blocks, &batch)),
         );
         spare.extend(executed?);
@@ -633,7 +687,7 @@ fn execute_works(
     works: Vec<Work<'_>>,
     scratch: &mut DecoderScratch,
     max_block_len: usize,
-    output: &mut Vec<u8>,
+    mut output: Option<&mut Vec<u8>>,
 ) -> Result<Spare, FrameDecoderError> {
     use FrameDecoderError as err;
     let block_err = |e: DecompressBlockError| {
@@ -657,7 +711,7 @@ fn execute_works(
             }
             Work::Failed(e) => return Err(block_err(e)),
         }
-        collect(scratch, output)?;
+        collect(scratch, output.as_deref_mut())?;
     }
     Ok(done)
 }

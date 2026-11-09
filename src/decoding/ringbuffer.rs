@@ -10,11 +10,16 @@ use alloc::vec::Vec;
 /// before it is used: a frame of a few kilobytes then costs a few kilobytes. Within
 /// `buf.len()`, a copy may read past the data it wants and write past the end of the data,
 /// into the free space, where that is faster.
+///
+/// A linear ring ([`Self::linear`]) never wraps: it is the end of a `Vec` of output, the bytes
+/// before the head kept and never written, the free space only what is after the tail, and it
+/// grows in place.
 pub struct RingBuffer {
     buf: Vec<u8>,
     cap: usize,
     head: usize,
     tail: usize,
+    linear: bool,
 }
 
 /// The size a short copy is rounded up to, when there is room for it.
@@ -27,6 +32,11 @@ const SHORT_COPY: usize = 2 * CHUNK;
 /// large fills rather than one for each write.
 const INIT_AHEAD: usize = 16 * 1024;
 
+/// The least and the most a linear ring is initialised ahead of a write: further than a ring
+/// that is initialised once, as the fast loop of sequences stops where it ends.
+const LINEAR_INIT_AHEAD_LEAST: usize = 1024;
+const LINEAR_INIT_AHEAD: usize = 128 * 1024;
+
 impl RingBuffer {
     pub fn new() -> Self {
         RingBuffer {
@@ -34,7 +44,30 @@ impl RingBuffer {
             cap: 0,
             head: 0,
             tail: 0,
+            linear: false,
         }
+    }
+
+    /// A linear ring at the end of `out`, empty: what it is given is written after `out`'s
+    /// bytes, which it keeps. [`Self::into_vec`] gives `out` back with them.
+    #[cfg(any(feature = "rayon", test))]
+    pub fn linear(out: Vec<u8>) -> Self {
+        let len = out.len();
+        RingBuffer {
+            cap: out.capacity(),
+            buf: out,
+            head: len,
+            tail: len,
+            linear: true,
+        }
+    }
+
+    /// The `Vec` a linear ring was made of, its data after the bytes it was made with.
+    #[cfg(any(feature = "rayon", test))]
+    pub fn into_vec(mut self) -> Vec<u8> {
+        debug_assert!(self.linear);
+        self.buf.truncate(self.tail);
+        self.buf
     }
 
     #[cfg(test)]
@@ -49,14 +82,18 @@ impl RingBuffer {
     }
 
     /// Return the amount of available space (in bytes) of the buffer.
+    #[inline(always)]
     pub fn free(&self) -> usize {
         let (x, y) = self.free_slice_lengths();
+        // A linear ring's room before the head holds what was there before it.
+        let x = if self.linear { 0 } else { x };
         // We always keep one free slot as a sentinel
         (x + y).saturating_sub(1)
     }
 
     /// Empty the buffer and reset the head and tail.
     pub fn clear(&mut self) {
+        debug_assert!(!self.linear);
         self.head = 0;
         self.tail = 0;
     }
@@ -76,6 +113,13 @@ impl RingBuffer {
         let cap = self.cap;
         // We always need at least 1 unused element as the sentinel, so add 1 to the required capacity
         let required = cap + amount;
+        if self.linear {
+            // Grown in place, its bytes where they were; twice as large at least, as a `Vec`.
+            let new_cap = usize::max(required + 1, cap.saturating_mul(2));
+            self.buf.reserve_exact(new_cap - self.buf.len());
+            self.cap = new_cap;
+            return;
+        }
 
         // We still grow exponentionally but only when the demand exceeds 2^k + 2 blocks
         // This is where the demand commonly settles when we have reached the window size (commonly a 2^k)
@@ -112,8 +156,15 @@ impl RingBuffer {
     #[cold]
     fn init_ahead(&mut self, end: usize) {
         debug_assert!(end <= self.cap);
+        // A linear ring, new for each frame and initialised all the way as it is written, as far
+        // ahead as it has data, for a small frame to cost little more than its bytes.
+        let ahead = if self.linear {
+            (end - self.head).clamp(LINEAR_INIT_AHEAD_LEAST, LINEAR_INIT_AHEAD)
+        } else {
+            INIT_AHEAD
+        };
         // Within `buf`'s capacity, which is `cap`: no reallocation.
-        self.buf.resize(usize::min(end + INIT_AHEAD, self.cap), 0);
+        self.buf.resize(usize::min(end + ahead, self.cap), 0);
     }
 
     #[allow(dead_code)]
@@ -1035,6 +1086,28 @@ mod tests {
     /// destination, and copies both shorter and longer than a chunk.
     #[test]
     fn matches_a_vec() {
+        let dropped = changes_match_a_vec(&mut RingBuffer::new());
+        assert!(!dropped.is_empty());
+    }
+
+    /// A linear ring, as `matches_a_vec`'s, after bytes it keeps: what it drops stays, and it
+    /// never wraps.
+    #[test]
+    fn linear_matches_a_vec() {
+        let mut out = alloc::vec::Vec::with_capacity(7);
+        out.extend_from_slice(b"before");
+        let mut rb = RingBuffer::linear(out);
+        assert_eq!(rb.len(), 0);
+        let dropped = changes_match_a_vec(&mut rb);
+        let (a, b) = rb.as_slices();
+        let data = [a, b].concat();
+        assert!(rb.cap() > 1 << 10, "grown to {}", rb.cap());
+        assert_eq!(rb.into_vec(), [&b"before"[..], &dropped, &data].concat());
+    }
+
+    /// Random changes to `rb`, empty, checked against a `Vec`; the bytes dropped from its start.
+    fn changes_match_a_vec(rb: &mut RingBuffer) -> alloc::vec::Vec<u8> {
+        let mut dropped = alloc::vec::Vec::new();
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         let mut next = move |below: usize| {
             seed ^= seed << 13;
@@ -1042,7 +1115,6 @@ mod tests {
             seed ^= seed << 17;
             (seed % below as u64) as usize
         };
-        let mut rb = RingBuffer::new();
         let mut model: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         let mut sequences = 0;
         for step in 0..200_000 {
@@ -1083,7 +1155,7 @@ mod tests {
                 1 if !model.is_empty() => {
                     let n = next(model.len() + 1);
                     rb.drop_first_n(n);
-                    model.drain(..n);
+                    dropped.extend(model.drain(..n));
                 }
                 2 if !model.is_empty() => {
                     let n = next(model.len() + 1);
@@ -1102,15 +1174,20 @@ mod tests {
             if model.len() > 300 {
                 let n = model.len() - 100;
                 rb.drop_first_n(n);
-                model.drain(..n);
+                dropped.extend(model.drain(..n));
             }
             let (a, b) = rb.as_slices();
+            assert!(
+                !rb.linear || b.is_empty(),
+                "step {step}: a linear ring wrapped"
+            );
             assert_eq!([a, b].concat(), model, "step {step}");
         }
         assert!(
             sequences > 5_000,
             "only {sequences} sequences took the fast copy"
         );
+        dropped
     }
 
     /// Sequences through the raw writer, as the fast loop writes them, checked against a

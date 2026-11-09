@@ -288,7 +288,8 @@ fn empty_and_skippable_only() {
 fn split_small_frame() {
     let mut serial = FrameDecoder::new();
     let decoder = FrameDecoder::new();
-    // Miri takes minutes over one.
+    // Miri takes minutes over one. Under test z000006's frame, of an even length, is decoded in
+    // place, into the output, and z000025's into the decoder's ring (see `parallel::in_place`).
     let names: &[&str] = if cfg!(miri) {
         &["z000006.zst"]
     } else {
