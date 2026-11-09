@@ -496,6 +496,7 @@ pub enum FrameDecoderError {
     FailedToInitialize(FrameHeaderError),
     FailedToDrainDecodebuffer(Error),
     FailedToSkipFrame,
+    /// The output has no room for what the input decodes to.
     TargetTooSmall,
     DictNotProvided {
         dict_id: u32,
@@ -504,6 +505,16 @@ pub enum FrameDecoderError {
     ChecksumMismatch {
         expected: u32,
         calculated: u32,
+    },
+    /// The frame decodes to more than the content size its header gives: its block that would
+    /// take it past it fails, and writes nothing past it.
+    ContentSizeExceeded {
+        content_size: u64,
+    },
+    /// The frame ends having decoded to less than the content size its header gives.
+    ContentSizeShort {
+        content_size: u64,
+        decoded: u64,
     },
 }
 
@@ -543,10 +554,10 @@ impl core::fmt::Display for FrameDecoderError {
                 write!(f, "{e:?}")
             }
             FrameDecoderError::FailedToReadBlockHeader(e) => {
-                write!(f, "Failed to parse/decode block body: {e}")
+                write!(f, "Failed to parse block header: {e}")
             }
             FrameDecoderError::FailedToReadBlockBody(e) => {
-                write!(f, "Failed to parse block header: {e}")
+                write!(f, "Failed to parse/decode block body: {e}")
             }
             FrameDecoderError::FailedToReadChecksum(e) => {
                 write!(f, "Failed to read checksum: {e}")
@@ -570,10 +581,7 @@ impl core::fmt::Display for FrameDecoderError {
                 )
             }
             FrameDecoderError::TargetTooSmall => {
-                write!(
-                    f,
-                    "Target must have at least as many bytes as the contentsize of the frame reports"
-                )
+                write!(f, "The output has no room for what the input decodes to")
             }
             FrameDecoderError::DictNotProvided { dict_id } => {
                 write!(
@@ -588,6 +596,21 @@ impl core::fmt::Display for FrameDecoderError {
                 write!(
                     f,
                     "The frame's checksum is 0x{expected:08X}, and what it decoded to hashes to 0x{calculated:08X}"
+                )
+            }
+            FrameDecoderError::ContentSizeExceeded { content_size } => {
+                write!(
+                    f,
+                    "The frame decodes to more than the {content_size} bytes its header gives"
+                )
+            }
+            FrameDecoderError::ContentSizeShort {
+                content_size,
+                decoded,
+            } => {
+                write!(
+                    f,
+                    "The frame decodes to {decoded} bytes, and its header gives {content_size}"
                 )
             }
         }

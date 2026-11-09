@@ -128,9 +128,10 @@ impl<'a> SequenceExecutor<'a> {
         if self.literals_copy_counter < self.literals_len {
             let rest_literals =
                 &self.padded_literals[self.literals_copy_counter..self.literals_len];
-            self.buffer.push(rest_literals);
+            // Checked before they are written: the block's most may be the end of the output.
             seq_sum += rest_literals.len() as u32;
             check_decoded_len(seq_sum, self.max_block_decoded_len)?;
+            self.buffer.push(rest_literals);
         }
 
         let diff = self.buffer.len() - self.old_buffer_size;

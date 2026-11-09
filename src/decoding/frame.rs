@@ -35,7 +35,7 @@ pub fn read_frame_header(mut r: impl Read) -> Result<(FrameHeader, u8), ReadFram
     let mut frame_header = FrameHeader {
         descriptor: FrameDescriptor(desc.0),
         dict_id: None,
-        frame_content_size: 0,
+        frame_content_size: None,
         window_descriptor: 0,
     };
 
@@ -78,7 +78,7 @@ pub fn read_frame_header(mut r: impl Read) -> Result<(FrameHeader, u8), ReadFram
         if fcs_len == 2 {
             fcs += 256;
         }
-        frame_header.frame_content_size = fcs;
+        frame_header.frame_content_size = Some(fcs);
     }
 
     Ok((frame_header, bytes_read as u8))
@@ -106,8 +106,8 @@ pub struct FrameHeader {
     /// The `Dictionary_ID` field contains the ID of the dictionary to be used to decode the frame.
     /// When this value is not present, it's up to the decoder to know which dictionary to use.
     dict_id: Option<u32>,
-    /// The size of the original/uncompressed content.
-    frame_content_size: u64,
+    /// The size of the original/uncompressed content, where the header gives it.
+    frame_content_size: Option<u64>,
 }
 
 impl FrameHeader {
@@ -115,7 +115,8 @@ impl FrameHeader {
     /// whichever is defined, returning the size in bytes.
     pub fn window_size(&self) -> Result<u64, FrameHeaderError> {
         if self.descriptor.single_segment_flag() {
-            Ok(self.frame_content_size())
+            // A single segment's header always gives its content size.
+            Ok(self.frame_content_size.unwrap_or(0))
         } else {
             let exp = self.window_descriptor >> 3;
             let mantissa = self.window_descriptor & 0x7;
@@ -143,8 +144,9 @@ impl FrameHeader {
         self.dict_id
     }
 
-    /// Obtain the uncompressed size (in bytes) of the frame contents.
-    pub fn frame_content_size(&self) -> u64 {
+    /// The size in bytes the frame decodes to, `Frame_Content_Size`, where its header gives it:
+    /// a frame that decodes to any other is corrupt, and fails to decode.
+    pub fn frame_content_size(&self) -> Option<u64> {
         self.frame_content_size
     }
 }

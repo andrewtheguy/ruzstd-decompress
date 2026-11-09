@@ -15,7 +15,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 
 use rayon::{ThreadBuilder, ThreadPool, ThreadPoolBuilder};
-use ruzstd_decompress::decoding::{Dictionary, FrameDecoder};
+use ruzstd_decompress::decoding::{Dictionary, FrameDecoder, decompressed_bound};
 use wasm_bindgen::prelude::*;
 
 /// The pool's threads on their way from the pool that makes them to the workers that run them.
@@ -118,9 +118,16 @@ impl Decoder {
         self.decoder.set_max_window_size(bytes as u64);
     }
 
-    /// Every frame of `input`, decoded, each one's checksum checked.
+    /// Every frame of `input`, decoded, each one's checksum checked: into room for what its
+    /// headers say it decodes to, up to 1 GiB.
     pub fn decode(&mut self, input: &[u8]) -> Result<Vec<u8>, JsError> {
-        let mut output = Vec::new();
+        let bound = decompressed_bound(input).map_err(|e| JsError::new(&e.to_string()))?;
+        if bound > 1 << 30 {
+            return Err(JsError::new(&format!(
+                "the frames say they decode to {bound} bytes, past 1 GiB"
+            )));
+        }
+        let mut output = Vec::with_capacity(bound as usize);
         let start = now();
         let result = self
             .pool

@@ -1,8 +1,10 @@
-//! [`FrameDecoder::decode_all_parallel`] against the decoder on one thread: the same bytes, or
-//! an error where it errs.
+//! [`FrameDecoder::decode_all_parallel`] and [`FrameDecoder::decode_each_parallel`] against the
+//! decoder on one thread: the same bytes, or an error where it errs; and each held to its
+//! output's room.
 extern crate std;
 
-use crate::decoding::{Dictionary, FrameDecoder};
+use crate::decoding::errors::FrameDecoderError;
+use crate::decoding::{Dictionary, FrameDecoder, decompressed_bound};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -53,9 +55,17 @@ fn in_pools(f: impl Fn(usize) + Sync) {
     }
 }
 
+/// Room for what `input` decodes to: its bound, where it has one.
+fn bound(input: &[u8]) -> usize {
+    decompressed_bound(input).map_or(0, |bound| bound.min(1 << 30) as usize)
+}
+
 fn decode_parallel(decoder: &FrameDecoder, input: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = b"before".to_vec();
+    out.reserve_exact(bound(input));
+    let capacity = out.capacity();
     let result = decoder.decode_all_parallel(input, &mut out);
+    assert_eq!(out.capacity(), capacity, "the output was grown");
     match result {
         Ok(()) => {
             assert_eq!(&out[..6], b"before");
@@ -284,16 +294,25 @@ fn empty_and_skippable_only() {
 
 /// A frame decoded in place into the room its header says it needs fills that room exactly,
 /// with nothing grown and copied: z000033's frame, of an even length, is decoded in place under
-/// test (see `parallel::in_place`).
+/// test (see `parallel::in_place`). A byte less room fails, nothing written past it.
 #[test]
 fn in_place_fills_its_room() {
     let input = fs::read("./decodecorpus_files/z000033.zst").unwrap();
-    let mut out = Vec::new();
+    assert_eq!(decompressed_bound(&input).unwrap(), 1_022_035);
+    let mut out = Vec::with_capacity(1_022_035);
     FrameDecoder::new()
         .decode_all_parallel(&input, &mut out)
         .unwrap();
     assert_eq!(out.len(), 1_022_035);
     assert_eq!(out.capacity(), out.len(), "the output was grown");
+
+    let mut out = Vec::with_capacity(1_022_034);
+    let result = FrameDecoder::new().decode_all_parallel(&input, &mut out);
+    assert!(
+        matches!(result, Err(FrameDecoderError::TargetTooSmall)),
+        "{result:?}"
+    );
+    assert_eq!((out.len(), out.capacity()), (0, 1_022_034));
 }
 
 /// A frame of several compressed blocks, split across two threads (tests take small batches):
@@ -393,4 +412,250 @@ fn window_past_usize() {
     assert!(err.contains("4294967296"), "{err}");
     let err = decode_serial(&mut decoder, &frame).unwrap_err();
     assert!(err.contains("4294967296"), "{err}");
+}
+
+/// What `input` decodes to on the pool it is called in, into `room` bytes of spare capacity: the
+/// output, never grown, or the error, the output as it was.
+fn decode_into(
+    decoder: &FrameDecoder,
+    input: &[u8],
+    room: usize,
+) -> Result<Vec<u8>, FrameDecoderError> {
+    let mut out = b"before".to_vec();
+    out.reserve_exact(room);
+    let capacity = out.capacity();
+    let result = decoder.decode_all_parallel(input, &mut out);
+    assert_eq!(out.capacity(), capacity, "the output was grown");
+    match result {
+        Ok(()) => Ok(out.split_off(6)),
+        Err(e) => {
+            assert_eq!(out, b"before", "the output is left as it was on an error");
+            Err(e)
+        }
+    }
+}
+
+/// Hand-made frames, decoding to more or less than their headers say, fail as on one thread.
+#[test]
+fn held_to_the_header() {
+    use super::content_size::{Block, frame};
+    let data: Vec<u8> = (0..1000u32).map(|i| (i * 7 % 251) as u8).collect();
+    let (first, second) = data.split_at(600);
+    let blocks = [Block::Raw(first), Block::Raw(second)];
+    let decoder = FrameDecoder::new();
+    in_pools(|threads| {
+        assert_eq!(
+            decode_into(&decoder, &frame(&blocks, Some(1000)), 1000).unwrap(),
+            data
+        );
+        let over = decode_into(&decoder, &frame(&blocks, Some(900)), 2000);
+        assert!(
+            matches!(
+                over,
+                Err(FrameDecoderError::ContentSizeExceeded { content_size: 900 })
+            ),
+            "on {threads} threads: {over:?}"
+        );
+        let short = decode_into(&decoder, &frame(&blocks, Some(1100)), 2000);
+        assert!(
+            matches!(
+                short,
+                Err(FrameDecoderError::ContentSizeShort {
+                    content_size: 1100,
+                    decoded: 1000
+                })
+            ),
+            "on {threads} threads: {short:?}"
+        );
+        // The room is short of what the frame says, and of what it decodes to.
+        let room = decode_into(&decoder, &frame(&blocks, Some(1000)), 999);
+        assert!(
+            matches!(room, Err(FrameDecoderError::TargetTooSmall)),
+            "{room:?}"
+        );
+        // The frame is corrupt, past both: corrupt, not short of room.
+        let both = decode_into(&decoder, &frame(&blocks, Some(900)), 800);
+        assert!(
+            matches!(both, Err(FrameDecoderError::TargetTooSmall)),
+            "the room, 800, is reached first: {both:?}"
+        );
+        let both = decode_into(&decoder, &frame(&blocks, Some(700)), 800);
+        assert!(
+            matches!(
+                both,
+                Err(FrameDecoderError::ContentSizeExceeded { content_size: 700 })
+            ),
+            "{both:?}"
+        );
+    });
+}
+
+/// `compressed`, one frame whose header gives its content size in 4 bytes, saying `size`.
+#[cfg(not(target_family = "wasm"))]
+fn with_content_size(compressed: &[u8], size: u32) -> Vec<u8> {
+    let descriptor = compressed[4];
+    assert_eq!(
+        descriptor & 0x23,
+        0,
+        "a window descriptor and no dictionary id"
+    );
+    assert_eq!(descriptor >> 6, 2, "a content size of 4 bytes");
+    let mut out = compressed.to_vec();
+    out[6..10].copy_from_slice(&size.to_le_bytes());
+    out
+}
+
+/// libzstd's frames of many compressed blocks, their headers changed to say more or less than
+/// they decode to, fail on one thread and on several, the blocks split or not.
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn compressed_held_to_the_header() {
+    let data = sample(1 << 20, 3);
+    let mut encoder = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+    encoder.window_log(17).unwrap();
+    encoder
+        .set_pledged_src_size(Some(data.len() as u64))
+        .unwrap();
+    encoder.include_contentsize(true).unwrap();
+    std::io::Write::write_all(&mut encoder, &data).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let len = data.len() as u32;
+    assert!(with_content_size(&compressed, len) == compressed);
+
+    let mut serial = FrameDecoder::new();
+    let decoder = FrameDecoder::new();
+    for (size, exceeded) in [(len - 1, true), (len / 2 + 17, true), (len + 1, false)] {
+        let changed = with_content_size(&compressed, size);
+        let err = decode_serial(&mut serial, &changed).unwrap_err();
+        assert!(err.contains("header gives"), "{size}: {err}");
+        in_pools(|threads| {
+            let got = decode_into(&decoder, &changed, 2 << 20);
+            let right = match got {
+                Err(FrameDecoderError::ContentSizeExceeded { content_size }) => {
+                    exceeded && content_size == u64::from(size)
+                }
+                Err(FrameDecoderError::ContentSizeShort {
+                    content_size,
+                    decoded,
+                }) => !exceeded && content_size == u64::from(size) && decoded == u64::from(len),
+                _ => false,
+            };
+            assert!(right, "{size} on {threads} threads: {got:?}");
+        });
+    }
+}
+
+/// Outputs of less room than their input decodes to fail, nothing written past their capacity:
+/// with frames side by side, a frame's blocks side by side, and frames that give no size.
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn held_to_the_room() {
+    let decoder = FrameDecoder::new();
+    let files = zst_files("./decodecorpus_files");
+    let mut all = Vec::new();
+    for (_, f) in &files {
+        all.extend_from_slice(f);
+    }
+    let cases = many_block_frames();
+    let all_len = decode_into(&decoder, &all, bound(&all)).unwrap().len();
+    in_pools(|threads| {
+        assert_eq!(decode_into(&decoder, &all, all_len).unwrap().len(), all_len);
+        for room in [0, all_len / 2, all_len - 1] {
+            let got = decode_into(&decoder, &all, room);
+            assert!(
+                matches!(got, Err(FrameDecoderError::TargetTooSmall)),
+                "{room} on {threads} threads: {got:?}"
+            );
+        }
+        for (name, data, compressed) in &cases {
+            let got = decode_into(&decoder, compressed, data.len() - 1);
+            assert!(
+                matches!(got, Err(FrameDecoderError::TargetTooSmall)),
+                "{name} on {threads} threads: {got:?}"
+            );
+        }
+    });
+}
+
+/// Inputs each decoded to their own output, side by side: each the same bytes as on one thread
+/// or the same failure, with its own room; a failed one leaves its output as it was.
+#[test]
+fn each_input_to_its_own_output() {
+    let files = zst_files("./decodecorpus_files");
+    let mut serial = FrameDecoder::new();
+    let expected: Vec<Vec<u8>> = files
+        .iter()
+        .map(|(p, f)| decode_serial(&mut serial, f).unwrap_or_else(|e| panic!("{p}: {e}")))
+        .collect();
+    let mut inputs: Vec<&[u8]> = files.iter().map(|(_, f)| &f[..]).collect();
+    // A frame cut short, an empty input, and one that is short of room.
+    let cut = &files[3].1[..files[3].1.len() / 2];
+    inputs.insert(5, cut);
+    inputs.insert(9, &[]);
+    let short = 13;
+    let decoder = FrameDecoder::new();
+    in_pools(|threads| {
+        let mut outputs: Vec<Vec<u8>> = inputs
+            .iter()
+            .enumerate()
+            .map(|(i, input)| {
+                let mut out = b"before".to_vec();
+                let room = if i == short { 1 } else { bound(input) };
+                out.reserve_exact(room);
+                out
+            })
+            .collect();
+        let capacities: Vec<usize> = outputs.iter().map(Vec::capacity).collect();
+        let results = decoder.decode_each_parallel(&inputs, &mut outputs);
+        assert_eq!(results.len(), inputs.len());
+        let mut files_left = expected.iter();
+        for (i, (result, out)) in results.iter().zip(&outputs).enumerate() {
+            assert_eq!(out.capacity(), capacities[i], "output {i} was grown");
+            if i == 5 {
+                assert!(result.is_err() && out == b"before", "{i}: {result:?}");
+                continue;
+            }
+            if i == 9 {
+                assert!(result.is_ok() && out == b"before", "{i}: {result:?}");
+                continue;
+            }
+            let expected = files_left.next().unwrap();
+            if i == short && !expected.is_empty() {
+                assert!(
+                    matches!(result, Err(FrameDecoderError::TargetTooSmall)) && out == b"before",
+                    "{i} on {threads} threads: {result:?}"
+                );
+                continue;
+            }
+            assert!(result.is_ok(), "{i} on {threads} threads: {result:?}");
+            assert!(
+                &out[..6] == b"before" && out[6..] == expected[..],
+                "{i} on {threads} threads"
+            );
+        }
+    });
+}
+
+/// Two inputs of large frames, fewer than the threads: each frame's blocks side by side.
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn each_of_few_large_inputs() {
+    let cases = many_block_frames();
+    let decoder = FrameDecoder::new();
+    let inputs = [&cases[1].2[..], &cases[11].2[..]];
+    in_pools(|threads| {
+        let mut outputs: Vec<Vec<u8>> = inputs
+            .iter()
+            .map(|input| Vec::with_capacity(bound(input)))
+            .collect();
+        let results = decoder.decode_each_parallel(&inputs, &mut outputs);
+        assert!(
+            results.iter().all(Result::is_ok),
+            "on {threads} threads: {results:?}"
+        );
+        assert!(
+            outputs[0] == cases[1].1 && outputs[1] == cases[11].1,
+            "on {threads} threads"
+        );
+    });
 }

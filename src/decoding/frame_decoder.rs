@@ -6,8 +6,9 @@
 
 use super::frame;
 use crate::decoding;
+use crate::decoding::block_decoder::{max_block_len, too_large};
 use crate::decoding::dictionary::Dictionary;
-use crate::decoding::errors::FrameDecoderError;
+use crate::decoding::errors::{DecodeBlockContentError, FrameDecoderError};
 use crate::decoding::scratch::DecoderScratch;
 use crate::io::{Error, Read, Write};
 use alloc::collections::BTreeMap;
@@ -112,6 +113,9 @@ impl FrameDecoderState {
         decoder_scratch
             .buffer
             .reserve(Self::initial_room(&frame, window_size));
+        decoder_scratch
+            .buffer
+            .set_most(frame.frame_content_size().unwrap_or(u64::MAX));
         Ok(FrameDecoderState {
             frame_header: frame,
             frame_finished: false,
@@ -138,6 +142,9 @@ impl FrameDecoderState {
         self.decoder_scratch
             .buffer
             .reserve(Self::initial_room(&self.frame_header, window_size));
+        self.decoder_scratch
+            .buffer
+            .set_most(self.frame_header.frame_content_size().unwrap_or(u64::MAX));
         self.bytes_read_counter = u64::from(header_size);
         self.check_sum = None;
         self.using_dict = None;
@@ -151,8 +158,74 @@ impl FrameDecoderState {
     /// data does.
     fn initial_room(frame: &frame::FrameHeader, window_size: u64) -> usize {
         window_size
-            .min(frame.frame_content_size())
+            .min(frame.frame_content_size().unwrap_or(0))
             .min(u64::from(crate::common::MAX_BLOCK_SIZE)) as usize
+    }
+
+    /// Decode the block `header` heads from `source`, as the frame's: one that would take the
+    /// frame past the content size its header gives fails.
+    fn decode_block(
+        &mut self,
+        block_dec: &mut decoding::block_decoder::BlockDecoder,
+        header: &crate::blocks::block::BlockHeader,
+        source: impl Read,
+    ) -> Result<u64, FrameDecoderError> {
+        let buffer = &self.decoder_scratch.buffer;
+        let max_block_len = max_block_len(buffer.window_size);
+        let held = buffer.block_most(max_block_len) < max_block_len;
+        let len_before = buffer.len();
+        let read = block_dec
+            .decode_block_content(header, &mut self.decoder_scratch, source)
+            .map_err(|e| {
+                block_failed(e, held, || FrameDecoderError::ContentSizeExceeded {
+                    content_size: self.frame_header.frame_content_size().unwrap_or(u64::MAX),
+                })
+            })?;
+        if header.last_block {
+            let buffer = &mut self.decoder_scratch.buffer;
+            if let Err(err) = check_content_size(&self.frame_header, buffer.decoded()) {
+                // A block that fails adds nothing to the output.
+                buffer.truncate(len_before);
+                return Err(err);
+            }
+        }
+        Ok(read)
+    }
+}
+
+/// What a block's failure `err` is to its frame: where the block was held to less than its
+/// Block_Maximum_Size by what is left of the frame's most (`held`, see
+/// [`DecodeBuffer::block_most`]), its decoding to more is `over()`, the frame's going past that
+/// most.
+///
+/// [`DecodeBuffer::block_most`]: crate::decoding::decode_buffer::DecodeBuffer::block_most
+pub(super) fn block_failed(
+    err: DecodeBlockContentError,
+    held: bool,
+    over: impl FnOnce() -> FrameDecoderError,
+) -> FrameDecoderError {
+    if held && too_large(&err) {
+        over()
+    } else {
+        FrameDecoderError::FailedToReadBlockBody(err)
+    }
+}
+
+/// A frame that ends having decoded to `decoded` bytes fails if its header gives another
+/// content size. Its blocks are held to it as they decode (see
+/// [`DecodeBuffer::block_most`]): it decodes to no more.
+///
+/// [`DecodeBuffer::block_most`]: crate::decoding::decode_buffer::DecodeBuffer::block_most
+pub(super) fn check_content_size(
+    header: &frame::FrameHeader,
+    decoded: u64,
+) -> Result<(), FrameDecoderError> {
+    match header.frame_content_size() {
+        Some(content_size) if content_size != decoded => Err(FrameDecoderError::ContentSizeShort {
+            content_size,
+            decoded,
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -278,12 +351,11 @@ impl FrameDecoder {
         Ok(())
     }
 
-    /// Returns how many bytes the frame contains after decompression
-    pub fn content_size(&self) -> u64 {
-        match &self.state {
-            None => 0,
-            Some(s) => s.frame_header.frame_content_size(),
-        }
+    /// How many bytes the frame decodes to, where its header gives it: a frame decoding to any
+    /// other fails ([`FrameDecoderError::ContentSizeExceeded`],
+    /// [`FrameDecoderError::ContentSizeShort`]). `None` where there is no frame.
+    pub fn content_size(&self) -> Option<u64> {
+        self.state.as_ref()?.frame_header.frame_content_size()
     }
 
     /// Returns the checksum that was read from the data. Only available after all bytes have been read. It is the last 4 bytes of a zstd-frame
@@ -370,9 +442,8 @@ impl FrameDecoder {
                 block_header.decompressed_size
             );
 
-            let bytes_read_in_block_body = block_dec
-                .decode_block_content(&block_header, &mut state.decoder_scratch, &mut source)
-                .map_err(err::FailedToReadBlockBody)?;
+            let bytes_read_in_block_body =
+                state.decode_block(&mut block_dec, &block_header, &mut source)?;
             state.bytes_read_counter += bytes_read_in_block_body;
 
             state.block_counter += 1;
@@ -506,13 +577,8 @@ impl FrameDecoder {
                     }
                     state.bytes_read_counter += u64::from(block_header_size);
 
-                    let bytes_read_in_block_body = block_dec
-                        .decode_block_content(
-                            &block_header,
-                            &mut state.decoder_scratch,
-                            &mut mt_source,
-                        )
-                        .map_err(err::FailedToReadBlockBody)?;
+                    let bytes_read_in_block_body =
+                        state.decode_block(&mut block_dec, &block_header, &mut mt_source)?;
                     state.bytes_read_counter += bytes_read_in_block_body;
                     state.block_counter += 1;
 
@@ -624,13 +690,71 @@ impl FrameDecoder {
     }
 }
 
+/// An upper bound of what the frames of `input` decode to, from their headers and their blocks'
+/// headers, nothing decoded: as libzstd's `ZSTD_decompressBound`, room enough for
+/// [`FrameDecoder::decode_all_to_vec`] or [`FrameDecoder::decode_all_parallel`]. A frame whose
+/// header gives its content size decodes to exactly that, or fails to decode; one whose header
+/// does not is bounded by its blocks, each at most its Block_Maximum_Size. Skippable frames
+/// decode to nothing.
+///
+/// The bound is what the input's headers say: a few bytes of input may claim gigabytes. Hold it
+/// to what is acceptable before reserving it.
+pub fn decompressed_bound(mut input: &[u8]) -> Result<u64, FrameDecoderError> {
+    use FrameDecoderError as err;
+    let mut bound = 0u64;
+    while !input.is_empty() {
+        let header = match frame::read_frame_header(&mut input) {
+            Ok((header, _)) => header,
+            Err(crate::decoding::errors::ReadFrameHeaderError::SkipFrame { length, .. }) => {
+                input = input.get(length as usize..).ok_or(err::FailedToSkipFrame)?;
+                continue;
+            }
+            Err(e) => return Err(err::ReadFrameHeaderError(e)),
+        };
+        let max_block_len =
+            max_block_len(usize::try_from(header.window_size()?).unwrap_or(usize::MAX)) as u64;
+        let mut block_dec = decoding::block_decoder::new();
+        let mut blocks = 0u64;
+        loop {
+            let (block, _) = block_dec
+                .read_block_header(&mut input)
+                .map_err(err::FailedToReadBlockHeader)?;
+            input = input.get(block.content_size as usize..).ok_or_else(|| {
+                err::FailedToReadBlockBody(DecodeBlockContentError::ReadError {
+                    step: block.block_type,
+                    source: Error::from(crate::io::ErrorKind::UnexpectedEof),
+                })
+            })?;
+            blocks += 1;
+            if block.last_block {
+                break;
+            }
+        }
+        if header.descriptor.content_checksum_flag() {
+            input = input.get(4..).ok_or(err::FailedToReadChecksum(Error::from(
+                crate::io::ErrorKind::UnexpectedEof,
+            )))?;
+        }
+        let frame_bound = header
+            .frame_content_size()
+            .unwrap_or(blocks.saturating_mul(max_block_len));
+        bound = bound.saturating_add(frame_bound);
+    }
+    Ok(bound)
+}
+
 #[cfg(feature = "rayon")]
 impl FrameDecoder {
-    /// Decode every frame of `input`, appending what they decode to to `output`, on the threads
-    /// of the rayon pool this is called in (rayon's global pool outside one): the same bytes as
-    /// [`Self::decode_all_to_vec`], with each frame's checksum checked where it has one and the
-    /// `hash` feature is on. Skippable frames are skipped. `output` is left as it was on an
-    /// error.
+    /// Decode every frame of `input`, appending what they decode to to `output`, within its
+    /// spare capacity, on the threads of the rayon pool this is called in (rayon's global pool
+    /// outside one): the same bytes as [`Self::decode_all_to_vec`], with each frame's checksum
+    /// checked where it has one and the `hash` feature is on. Skippable frames are skipped.
+    /// `output` is left as it was on an error.
+    ///
+    /// As [`Self::decode_all_to_vec`], this never grows `output`: it fails with
+    /// [`FrameDecoderError::TargetTooSmall`] where the frames decode to more than its spare
+    /// capacity, having written nothing past it. Reserve room first, as much as
+    /// [`decompressed_bound`] gives where that is acceptable.
     ///
     /// Frames are decoded side by side. So are the blocks of a frame, where there are fewer
     /// frames than threads: each block's literals and sequences are decoded on a thread of their
@@ -655,6 +779,29 @@ impl FrameDecoder {
             output.truncate(len);
         }
         result
+    }
+
+    /// Decode each of `inputs`, every frame of it, appending what it decodes to to the output of
+    /// the same index in `outputs`, within that output's spare capacity, the inputs side by side
+    /// on the threads of the rayon pool this is called in; one result for each input, in order.
+    /// Each is decoded as [`Self::decode_all_parallel`] decodes an input: an output that is
+    /// short of room fails its input with [`FrameDecoderError::TargetTooSmall`], having been
+    /// written nothing past its capacity, and the output of an input that fails is left as it
+    /// was.
+    ///
+    /// For many small inputs each decoded to its own output, such as a frame for each tile of a
+    /// picture, each held to what its tile can be: they are decoded a run of them to each of
+    /// the pool's jobs, each job's buffers and tables made once for its run. A frame's blocks
+    /// are decoded side by side where there are fewer inputs than threads, as
+    /// [`Self::decode_all_parallel`] does.
+    ///
+    /// Panics if there are not as many outputs as inputs.
+    pub fn decode_each_parallel<I: AsRef<[u8]> + Sync>(
+        &self,
+        inputs: &[I],
+        outputs: &mut [Vec<u8>],
+    ) -> Vec<Result<(), FrameDecoderError>> {
+        super::parallel::decode_each(inputs, &self.dicts, self.max_window_size, outputs)
     }
 }
 

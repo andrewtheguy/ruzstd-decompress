@@ -836,6 +836,8 @@ fn test_literals_left_after_sequences_bounded_by_block_maximum_size() {
 }
 
 pub mod bit_reader;
+#[cfg(test)]
+pub mod content_size;
 pub mod decode_corpus;
 pub mod dict_test;
 pub mod fuzz_regressions;

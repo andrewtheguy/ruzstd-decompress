@@ -1,11 +1,12 @@
 //! Decoding on several threads, those of the rayon pool it is called in: what
-//! [`FrameDecoder::decode_all_parallel`] does.
+//! [`FrameDecoder::decode_all_parallel`] and [`FrameDecoder::decode_each_parallel`] do.
 //!
 //! The frames of the input are independent, and are decoded side by side, a run of them to each
-//! job. Within a frame, a block's matches copy from the blocks before it, so its sequences must be
-//! executed in order; but what makes them, the literals' Huffman streams and the sequences' FSE
-//! streams, needs only the block's tables. So a frame of many blocks, when there are fewer frames
-//! than threads, is decoded in three steps:
+//! job; so are separate inputs, each to its own output. Within a frame, a block's matches copy
+//! from the blocks before it, so its sequences must be executed in order; but what makes them,
+//! the literals' Huffman streams and the sequences' FSE streams, needs only the block's tables.
+//! So a frame of many blocks, when there are fewer frames than threads, is decoded in three
+//! steps:
 //!
 //! 1. the tables, block after block, on one thread, as a block may repeat the one before's;
 //! 2. each block's literals and sequences, decoded into buffers of its own, a batch of blocks side
@@ -14,10 +15,15 @@
 //!
 //! A batch's execution runs beside the next batch's first two steps.
 //!
+//! Every output is decoded to its spare capacity and no further: each block is held to what is
+//! left of it, and of its frame's content size where the header gives one, before it writes.
+//!
 //! [`FrameDecoder::decode_all_parallel`]: super::FrameDecoder::decode_all_parallel
+//! [`FrameDecoder::decode_each_parallel`]: super::FrameDecoder::decode_each_parallel
 
 use super::block_decoder::{
-    self, BlockDecoder, BlockSections, check_literals, check_no_sequences, split_sections,
+    self, BlockDecoder, BlockSections, check_literals, check_no_sequences, max_block_len,
+    split_sections,
 };
 use super::decode_buffer::LITERALS_PADDING;
 use super::dictionary::Dictionary;
@@ -25,7 +31,7 @@ use super::errors::{
     DecodeBlockContentError, DecompressBlockError, FrameDecoderError, ReadFrameHeaderError,
 };
 use super::frame::{self, FrameHeader};
-use super::frame_decoder::check_window_size;
+use super::frame_decoder::{block_failed, check_content_size, check_window_size};
 use super::literals_section_decoder::{
     decode_literals_with, literals_need_prepare, prepare_literals,
 };
@@ -36,12 +42,12 @@ use super::sequence_table::SeqTables;
 use crate::blocks::block::BlockType;
 use crate::blocks::literals_section::LiteralsSectionType;
 use crate::blocks::sequence_section::{ModeType, Sequence};
-use crate::common::MAX_BLOCK_SIZE;
 use crate::huff0::HuffmanTable;
 use crate::io::{Error, ErrorKind, Read};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 
 /// The buffers of blocks executed, for the next blocks' literals and sequences.
@@ -89,7 +95,7 @@ fn in_place(frame: &Frame<'_>, split: bool, alone: bool) -> bool {
     }
 }
 
-/// A run of frames, decoded by one job, is at least this many bytes of them.
+/// A run of frames, or of inputs, decoded by one job, is at least this many bytes of them.
 const RUN_BYTES_LEAST: usize = 32 << 10;
 
 /// The most room reserved for output before it is decoded, whatever the frames' headers say:
@@ -97,7 +103,7 @@ const RUN_BYTES_LEAST: usize = 32 << 10;
 const ROOM_MOST: usize = 256 << 20;
 
 /// Room for what `frames` decode to, up to [`ROOM_MOST`].
-fn room(frames: &[Frame<'_>]) -> usize {
+fn run_room(frames: &[Frame<'_>]) -> usize {
     frames
         .iter()
         .map(Frame::room)
@@ -105,7 +111,49 @@ fn room(frames: &[Frame<'_>]) -> usize {
         .min(ROOM_MOST)
 }
 
-/// Every frame of `input` decoded, appended to `output`; see
+/// The room of an output: `limit` bytes, of which `used` are taken by the jobs that decode to it
+/// side by side. A frame whose header gives its content size decodes to no more, so a job takes
+/// its run's content sizes at once, before it decodes them ([`Self::claim`]); a frame that gives
+/// none takes each block's bytes as it is decoded, from what was left when the block began.
+/// Taken once for a run, not for each block: the jobs' blocks of small frames would each write
+/// it, and it would go from core to core (the GitHub frames up to 1.7 times as slow on 6
+/// threads).
+struct Room<'r> {
+    limit: usize,
+    used: &'r AtomicUsize,
+}
+
+impl Room<'_> {
+    /// How many bytes are left, as far as the jobs have taken them.
+    fn left(&self) -> usize {
+        self.limit.saturating_sub(self.used.load(Ordering::Relaxed))
+    }
+
+    /// Take `n` bytes: fails, taking none, if fewer are left. Never more than the limit.
+    fn take(&self, n: usize) -> Result<(), FrameDecoderError> {
+        let limit = self.limit;
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                used.checked_add(n).filter(|&used| used <= limit)
+            })
+            .map(drop)
+            .map_err(|_| FrameDecoderError::TargetTooSmall)
+    }
+
+    /// Take the content sizes of those of `frames` whose headers give them, at once.
+    fn claim(&self, frames: &[Frame<'_>]) -> Result<(), FrameDecoderError> {
+        let sizes = frames
+            .iter()
+            .filter_map(|frame| frame.header.frame_content_size())
+            .fold(0u64, u64::saturating_add);
+        if sizes == 0 {
+            return Ok(());
+        }
+        self.take(usize::try_from(sizes).unwrap_or(usize::MAX))
+    }
+}
+
+/// Every frame of `input` decoded, appended to `output`, within its spare capacity; see
 /// [`FrameDecoder::decode_all_parallel`](super::FrameDecoder::decode_all_parallel).
 pub fn decode_all(
     input: &[u8],
@@ -117,27 +165,44 @@ pub fn decode_all(
     let threads = rayon::current_num_threads();
     // A frame's blocks are decoded side by side only where its frames leave threads idle.
     let split_blocks = frames.len() < threads;
-    let runs = runs(&frames, threads);
+    let used = AtomicUsize::new(0);
+    let room = Room {
+        limit: output.capacity() - output.len(),
+        used: &used,
+    };
+    let runs = split_runs(&frames, threads, |frame| frame.body.len());
     if runs.len() <= 1 {
-        output.reserve(room(&frames));
         let mut scratch = None;
-        for frame in &frames {
-            decode_frame(frame, dicts, &mut scratch, output, split_blocks, true)?;
-        }
+        decode_frames(
+            &frames,
+            dicts,
+            &mut scratch,
+            output,
+            &room,
+            split_blocks,
+            true,
+        )?;
     } else {
         let decoded: Vec<Result<Vec<u8>, FrameDecoderError>> = runs
             .par_iter()
             .map(|run| {
                 // Room for what the frames say they decode to, so that it is not grown and copied
                 // as they decode.
-                let mut out = Vec::with_capacity(room(run));
+                let mut out = Vec::with_capacity(run_room(run).min(room.left()));
                 let mut scratch = None;
-                for frame in *run {
-                    decode_frame(frame, dicts, &mut scratch, &mut out, split_blocks, false)?;
-                }
+                decode_frames(
+                    run,
+                    dicts,
+                    &mut scratch,
+                    &mut out,
+                    &room,
+                    split_blocks,
+                    false,
+                )?;
                 Ok(out)
             })
             .collect();
+        // Within `output`'s capacity, which the runs took their bytes from.
         for run in decoded {
             output.extend_from_slice(&run?);
         }
@@ -146,6 +211,90 @@ pub fn decode_all(
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// Each of `inputs`, every frame of it, decoded to the spare capacity of the output of the same
+/// index, side by side; see
+/// [`FrameDecoder::decode_each_parallel`](super::FrameDecoder::decode_each_parallel).
+pub fn decode_each<I: AsRef<[u8]> + Sync>(
+    inputs: &[I],
+    dicts: &BTreeMap<u32, Dictionary>,
+    max_window_size: u64,
+    outputs: &mut [Vec<u8>],
+) -> Vec<Result<(), FrameDecoderError>> {
+    assert_eq!(
+        inputs.len(),
+        outputs.len(),
+        "as many outputs as there are inputs"
+    );
+    let threads = rayon::current_num_threads();
+    // A frame's blocks are decoded side by side only where the inputs leave threads idle.
+    let split_blocks = inputs.len() < threads;
+    let mut jobs: Vec<(&[u8], &mut Vec<u8>)> = inputs
+        .iter()
+        .map(AsRef::as_ref)
+        .zip(outputs.iter_mut())
+        .collect();
+    let mut runs = Vec::new();
+    let mut rest = &mut jobs[..];
+    for len in run_lens(rest.iter().map(|(input, _)| input.len()), threads) {
+        let (run, after) = rest.split_at_mut(len);
+        runs.push(run);
+        rest = after;
+    }
+    let alone = runs.len() <= 1;
+    let decode_run = |run: &mut [(&[u8], &mut Vec<u8>)]| {
+        // One scratch for the run's inputs, its buffers and tables made once.
+        let mut scratch = None;
+        run.iter_mut()
+            .map(|(input, output)| {
+                let len = output.len();
+                let used = AtomicUsize::new(0);
+                let room = Room {
+                    limit: output.capacity() - len,
+                    used: &used,
+                };
+                let (frames, scan_error) = scan(input, max_window_size);
+                let result = decode_frames(
+                    &frames,
+                    dicts,
+                    &mut scratch,
+                    output,
+                    &room,
+                    split_blocks,
+                    alone,
+                )
+                .and(scan_error.map_or(Ok(()), Err));
+                if result.is_err() {
+                    output.truncate(len);
+                }
+                result
+            })
+            .collect::<Vec<_>>()
+    };
+    if alone {
+        return runs.into_iter().flat_map(decode_run).collect();
+    }
+    let results: Vec<Vec<_>> = runs.into_par_iter().map(decode_run).collect();
+    results.into_iter().flatten().collect()
+}
+
+/// `frames` decoded one after another, appended to `output` within `room`, which their content
+/// sizes are taken from first, with `scratch` (see [`decode_frame`]).
+fn decode_frames(
+    frames: &[Frame<'_>],
+    dicts: &BTreeMap<u32, Dictionary>,
+    scratch: &mut Option<DecoderScratch>,
+    output: &mut Vec<u8>,
+    room: &Room<'_>,
+    split_blocks: bool,
+    alone: bool,
+) -> Result<(), FrameDecoderError> {
+    room.claim(frames)?;
+    for frame in frames {
+        decode_frame(frame, dicts, scratch, output, room, split_blocks, alone)?;
+    }
+    Ok(())
 }
 
 /// A frame found in the input: its header and its blocks, not yet decoded.
@@ -161,14 +310,17 @@ struct Frame<'a> {
 
 impl Frame<'_> {
     /// Room for what the frame decodes to: what its header says, as far as its blocks can make
-    /// it and up to [`ROOM_MOST`], a header's word not trusted further.
+    /// it and up to [`ROOM_MOST`], a header's word not trusted further before it is decoded.
     fn room(&self) -> usize {
-        let max_block_len = self.window_size.min(MAX_BLOCK_SIZE as usize);
+        let max_block_len = max_block_len(self.window_size);
         // A block takes 3 bytes at least.
         let most = (self.body.len() / 3)
             .saturating_mul(max_block_len)
             .min(ROOM_MOST);
-        self.header.frame_content_size().min(most as u64) as usize
+        self.header
+            .frame_content_size()
+            .unwrap_or(0)
+            .min(most as u64) as usize
     }
 }
 
@@ -267,39 +419,53 @@ fn walk_blocks<'a>(
     }
 }
 
-/// The frames split into runs of consecutive ones, each decoded by one job: about four to a
-/// thread, by their size in the input, so that the threads finish about together.
-fn runs<'f, 'a>(frames: &'f [Frame<'a>], threads: usize) -> Vec<&'f [Frame<'a>]> {
-    if frames.len() <= 1 || threads <= 1 {
-        return alloc::vec![frames];
-    }
-    let total: usize = frames.iter().map(|f| f.body.len()).sum();
-    let each = (total / (4 * threads)).max(RUN_BYTES_LEAST);
+/// `items` split into runs of consecutive ones, each decoded by one job (see [`run_lens`]).
+fn split_runs<T>(items: &[T], threads: usize, size: impl Fn(&T) -> usize + Clone) -> Vec<&[T]> {
     let mut runs = Vec::new();
-    let mut start = 0;
-    let mut size = 0;
-    for (i, frame) in frames.iter().enumerate() {
-        size += frame.body.len();
-        if size >= each {
-            runs.push(&frames[start..=i]);
-            start = i + 1;
-            size = 0;
-        }
-    }
-    if start < frames.len() {
-        runs.push(&frames[start..]);
+    let mut rest = items;
+    for len in run_lens(items.iter().map(size), threads) {
+        let (run, after) = rest.split_at(len);
+        runs.push(run);
+        rest = after;
     }
     runs
 }
 
-/// Decode `frame`, appending it to `output`, with `scratch`, made if it is `None` and kept for
-/// the next frame; its blocks side by side if `split_blocks` and it has enough of them. `alone`
-/// if one job decodes the whole input.
+/// The lengths of the runs of consecutive items of these `sizes`, in the input, each decoded by
+/// one job: about four to a thread, by size, so that the threads finish about together. All in
+/// one run on one thread.
+fn run_lens(sizes: impl ExactSizeIterator<Item = usize> + Clone, threads: usize) -> Vec<usize> {
+    let count = sizes.len();
+    if count <= 1 || threads <= 1 {
+        return alloc::vec![count];
+    }
+    let total: usize = sizes.clone().sum();
+    let each = (total / (4 * threads)).max(RUN_BYTES_LEAST);
+    let mut lens = Vec::new();
+    let (mut len, mut size) = (0, 0);
+    for item in sizes {
+        len += 1;
+        size += item;
+        if size >= each {
+            lens.push(len);
+            (len, size) = (0, 0);
+        }
+    }
+    if len > 0 {
+        lens.push(len);
+    }
+    lens
+}
+
+/// Decode `frame`, appending it to `output` within `room`, with `scratch`, made if it is `None`
+/// and kept for the next frame; its blocks side by side if `split_blocks` and it has enough of
+/// them. `alone` if one job decodes the whole input.
 fn decode_frame(
     frame: &Frame<'_>,
     dicts: &BTreeMap<u32, Dictionary>,
     scratch: &mut Option<DecoderScratch>,
     output: &mut Vec<u8>,
+    room: &Room<'_>,
     split_blocks: bool,
     alone: bool,
 ) -> Result<(), FrameDecoderError> {
@@ -322,6 +488,8 @@ fn decode_frame(
     if let Some(dict) = dict {
         scratch.init_from_dict(dict);
     }
+    // At most its content size, which is taken from the output's room already: no more than its
+    // capacity has, a run's own output grown past it only as it decodes.
     output.reserve(frame.room());
     // Split only where there are two batches at least, for one to execute beside the other's
     // decoding.
@@ -331,11 +499,11 @@ fn decode_frame(
     if in_place(frame, split, alone) {
         // Executed into `output` itself, which is the window.
         scratch.buffer.start_in_place(output);
-        let result = decode_frame_blocks(frame, dict, scratch, split, None);
+        let result = decode_frame_blocks(frame, dict, scratch, room, split, None);
         scratch.buffer.end_in_place(output);
         result
     } else {
-        decode_frame_blocks(frame, dict, scratch, split, Some(output))
+        decode_frame_blocks(frame, dict, scratch, room, split, Some(output))
     }
 }
 
@@ -362,17 +530,20 @@ fn decode_frame_blocks(
     frame: &Frame<'_>,
     dict: Option<&Dictionary>,
     scratch: &mut DecoderScratch,
+    room: &Room<'_>,
     split: bool,
     mut output: Option<&mut Vec<u8>>,
 ) -> Result<(), FrameDecoderError> {
-    let max_block_len = frame.window_size.min(MAX_BLOCK_SIZE as usize);
-    let content_size = frame.header.frame_content_size();
+    let max_block_len = max_block_len(frame.window_size);
+    // At most its content size, taken from the output's room already: in place, never past the
+    // output's capacity.
+    let content_size = frame.header.frame_content_size().unwrap_or(0);
     scratch
         .buffer
         .reserve(content_size.min(max_block_len as u64) as usize);
 
     if split {
-        decode_blocks_split(frame, dict, scratch, output)?;
+        decode_blocks_split(frame, dict, scratch, room, output)?;
     } else {
         let mut src = frame.body;
         let mut block_dec = block_decoder::new();
@@ -380,15 +551,18 @@ fn decode_frame_blocks(
             let (header, _) = block_dec
                 .read_block_header(&mut src)
                 .map_err(FrameDecoderError::FailedToReadBlockHeader)?;
+            let held = Held::new(frame, scratch, room, max_block_len);
             block_dec
                 .decode_block_content(&header, scratch, &mut src)
-                .map_err(FrameDecoderError::FailedToReadBlockBody)?;
+                .map_err(|e| held.failed(frame, e))?;
+            held.done(frame, scratch, room)?;
             collect(scratch, output.as_deref_mut())?;
             if header.last_block {
                 break;
             }
         }
     }
+    check_content_size(&frame.header, scratch.buffer.decoded())?;
 
     #[cfg(feature = "hash")]
     if let (Some(expected), Some(calculated)) = (frame.checksum, scratch.buffer.checksum()) {
@@ -402,6 +576,67 @@ fn decode_frame_blocks(
         }
     }
     Ok(())
+}
+
+/// A block of a frame about to be decoded, the frame's buffer held to what is left of its
+/// content size, where its header gives one, which its output's room was taken for; else to
+/// what is left of the room.
+struct Held {
+    /// What the frame had decoded to before the block.
+    decoded: u64,
+    /// Whether that holds the block to less than its Block_Maximum_Size.
+    held: bool,
+    /// Whether the room is less than the content size left: the output too small, not the frame
+    /// corrupt, where the block decodes to more.
+    by_room: bool,
+}
+
+impl Held {
+    fn new(
+        frame: &Frame<'_>,
+        scratch: &mut DecoderScratch,
+        room: &Room<'_>,
+        max_block_len: usize,
+    ) -> Held {
+        let decoded = scratch.buffer.decoded();
+        let (content_left, room_left) = match frame.header.frame_content_size() {
+            Some(size) => (size.saturating_sub(decoded), u64::MAX),
+            None => (u64::MAX, room.left() as u64),
+        };
+        let left = content_left.min(room_left);
+        scratch.buffer.set_most(decoded.saturating_add(left));
+        Held {
+            decoded,
+            held: left < max_block_len as u64,
+            by_room: room_left < content_left,
+        }
+    }
+
+    /// The frame's error for the block's `err`.
+    fn failed(&self, frame: &Frame<'_>, err: DecodeBlockContentError) -> FrameDecoderError {
+        block_failed(err, self.held, || {
+            if self.by_room {
+                FrameDecoderError::TargetTooSmall
+            } else {
+                FrameDecoderError::ContentSizeExceeded {
+                    content_size: frame.header.frame_content_size().unwrap_or(u64::MAX),
+                }
+            }
+        })
+    }
+
+    /// The block decoded: its bytes taken from the room, unless its frame's content size was.
+    fn done(
+        &self,
+        frame: &Frame<'_>,
+        scratch: &DecoderScratch,
+        room: &Room<'_>,
+    ) -> Result<(), FrameDecoderError> {
+        if frame.header.frame_content_size().is_some() {
+            return Ok(());
+        }
+        room.take((scratch.buffer.decoded() - self.decoded) as usize)
+    }
 }
 
 /// A block on its way through the three steps.
@@ -573,7 +808,8 @@ impl Compressed<'_> {
         Ok(())
     }
 
-    /// The third step: the block's sequences, executed into `scratch`'s buffer.
+    /// The third step: the block's sequences, executed into `scratch`'s buffer, of at most
+    /// `max_block_len` bytes.
     fn execute(
         &mut self,
         scratch: &mut DecoderScratch,
@@ -582,6 +818,8 @@ impl Compressed<'_> {
         core::mem::replace(&mut self.decoded, Ok(()))?;
         let literals_len = self.literals.len() - LITERALS_PADDING;
         if self.sections.sequences.num_sequences == 0 {
+            // Its tables checked them against Block_Maximum_Size; `max_block_len` may be less.
+            BlockDecoder::check_decompressed_size(literals_len, max_block_len)?;
             scratch.buffer.push(&self.literals[..literals_len]);
             return Ok(());
         }
@@ -603,10 +841,10 @@ fn decode_blocks_split(
     frame: &Frame<'_>,
     dict: Option<&Dictionary>,
     scratch: &mut DecoderScratch,
+    room: &Room<'_>,
     mut output: Option<&mut Vec<u8>>,
 ) -> Result<(), FrameDecoderError> {
-    // Block_Maximum_Size (RFC 8878 3.1.1.2.4): the smaller of the window and 128 KiB
-    let max_block_len = frame.window_size.min(MAX_BLOCK_SIZE as usize);
+    let max_block_len = max_block_len(frame.window_size);
     let threads = rayon::current_num_threads();
     let batch = Batch {
         // Eight batches to the frame at least, for the pipeline to be full most of the frame.
@@ -625,7 +863,7 @@ fn decode_blocks_split(
         let failed = matches!(works.last(), Some(Work::Failed(_)));
         let more = !failed && !blocks.is_empty();
         let (executed, next_works) = rayon::join(
-            || execute_works(works, scratch, max_block_len, output.as_deref_mut()),
+            || execute_works(works, frame, scratch, room, output.as_deref_mut()),
             || more.then(|| first_two(&mut tables, &mut spare, &mut blocks, &batch)),
         );
         spare.extend(executed?);
@@ -682,35 +920,39 @@ fn first_two<'a>(
     works
 }
 
-/// The third step for a batch of blocks, in order; returns the buffers they are done with.
+/// The third step for a batch of `frame`'s blocks, in order, within `room`; returns the buffers
+/// they are done with.
 fn execute_works(
     works: Vec<Work<'_>>,
+    frame: &Frame<'_>,
     scratch: &mut DecoderScratch,
-    max_block_len: usize,
+    room: &Room<'_>,
     mut output: Option<&mut Vec<u8>>,
 ) -> Result<Spare, FrameDecoderError> {
-    use FrameDecoderError as err;
-    let block_err = |e: DecompressBlockError| {
-        err::FailedToReadBlockBody(DecodeBlockContentError::DecompressBlockError(e))
-    };
+    let max_block_len = max_block_len(frame.window_size);
     let mut done = Vec::with_capacity(works.len());
     for work in works {
+        let held = Held::new(frame, scratch, room, max_block_len);
+        let most = scratch.buffer.block_most(max_block_len);
+        let block_err = |e: DecompressBlockError| {
+            held.failed(frame, DecodeBlockContentError::DecompressBlockError(e))
+        };
         match work {
             Work::Raw(data) => {
-                BlockDecoder::check_decompressed_size(data.len(), max_block_len)
-                    .map_err(block_err)?;
+                BlockDecoder::check_decompressed_size(data.len(), most).map_err(block_err)?;
                 scratch.buffer.push(data);
             }
             Work::Rle(byte, len) => {
-                BlockDecoder::check_decompressed_size(len, max_block_len).map_err(block_err)?;
+                BlockDecoder::check_decompressed_size(len, most).map_err(block_err)?;
                 scratch.buffer.extend_and_fill(byte, len);
             }
             Work::Compressed(mut c) => {
-                c.execute(scratch, max_block_len).map_err(block_err)?;
+                c.execute(scratch, most).map_err(block_err)?;
                 done.push((c.literals, c.sequences));
             }
             Work::Failed(e) => return Err(block_err(e)),
         }
+        held.done(frame, scratch, room)?;
         collect(scratch, output.as_deref_mut())?;
     }
     Ok(done)
