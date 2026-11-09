@@ -1,8 +1,11 @@
 //! A frame is held to the content size its header gives: one decoding to more fails at the
 //! block that would take it past, writing nothing past it, and one decoding to less fails at its
-//! end. And [`decompressed_bound`], what the headers say the frames decode to.
+//! end. And [`decompressed_bound`], what the headers say the frames decode to, and
+//! [`frame_compressed_size`], where they say the first frame ends.
 use crate::decoding::errors::FrameDecoderError;
-use crate::decoding::{BlockDecodingStrategy, FrameDecoder, decompressed_bound};
+use crate::decoding::{
+    BlockDecodingStrategy, FrameDecoder, decompressed_bound, frame_compressed_size,
+};
 use alloc::vec::Vec;
 
 /// A block of a hand-made frame.
@@ -132,5 +135,43 @@ fn bound_from_the_headers() {
     // Cut short anywhere, it is no bound.
     for cut in 1..sized.len() {
         assert!(decompressed_bound(&sized[..cut]).is_err(), "cut at {cut}");
+    }
+}
+
+#[test]
+fn first_frames_length_from_the_headers() {
+    let data = [3u8; 700];
+    let sized = frame(&[Block::Raw(&data), Block::Rle(1, 300)], Some(1000));
+    assert_eq!(frame_compressed_size(&sized).unwrap(), sized.len());
+
+    // What follows a frame is not of it, a skippable frame or another frame.
+    let skippable = [&0x184D2A53u32.to_le_bytes()[..], &2u32.to_le_bytes(), b"ok"].concat();
+    let followed = [&sized[..], &skippable, &sized].concat();
+    assert_eq!(frame_compressed_size(&followed).unwrap(), sized.len());
+    // A skippable frame is one.
+    assert_eq!(
+        frame_compressed_size(&[&skippable[..], &sized].concat()).unwrap(),
+        skippable.len()
+    );
+
+    // Cut short anywhere, or empty, it begins with no whole frame.
+    for cut in 0..sized.len() {
+        assert!(
+            frame_compressed_size(&sized[..cut]).is_err(),
+            "cut at {cut}"
+        );
+    }
+
+    // A frame's checksum, after its last block, is of it.
+    let mut checksummed = sized.clone();
+    checksummed[4] |= 0x04;
+    checksummed.extend_from_slice(&[1, 2, 3, 4]);
+    let followed = [&checksummed[..], &sized].concat();
+    assert_eq!(frame_compressed_size(&followed).unwrap(), checksummed.len());
+    for cut in sized.len()..checksummed.len() {
+        assert!(
+            frame_compressed_size(&checksummed[..cut]).is_err(),
+            "cut at {cut}"
+        );
     }
 }
